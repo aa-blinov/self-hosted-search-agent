@@ -1,12 +1,12 @@
 """
-Search profiles — predefined configurations for SearXNG queries.
+Search profiles for the local runtime.
 
-Each profile sets: categories, engines, language, time_range, fetch_top_n, max_results.
-
-Usage:
-  from profiles import get_profile, PROFILES
-  profile = get_profile("tech")
+Important:
+  - Search routing should lean on SearXNG-native tabs / groups / bangs.
+  - Local profiles remain useful only for runtime budget and language defaults.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 
@@ -15,114 +15,119 @@ from dataclasses import dataclass, field
 class SearchProfile:
     name: str
     description: str
-    categories: list[str]          # SearXNG categories
-    engines: list[str]             # specific engines; empty = SearXNG picks from categories
-    language: str                  # "auto" | "ru" | "en" | ...
-    time_range: str | None         # None | "day" | "week" | "month" | "year"
-    fetch_top_n: int               # how many URLs to extract full text via ReaderLM-v2
-    max_results: int               # total results to request from SearXNG
+    categories: list[str]
+    language: str
+    time_range: str | None
+    fetch_top_n: int
+    max_results: int
+    bang_prefixes: list[str] = field(default_factory=list)
+    engines: list[str] = field(default_factory=list)
 
 
 PROFILES: dict[str, SearchProfile] = {
-
-    # ── General ──────────────────────────────────────────────────────────────
-
     "web": SearchProfile(
         name="web",
-        description="General web — Google + Brave + Startpage",
+        description="SearXNG tab !general (default web search)",
         categories=["general"],
-        engines=[],
         language="auto",
         time_range=None,
         fetch_top_n=3,
-        max_results=5,
+        max_results=20,
     ),
-
-    # ── CIS / Russian ────────────────────────────────────────────────────────
-
     "ru": SearchProfile(
         name="ru",
-        description="Russian/CIS — language=ru, Startpage + Google + Brave",
+        description="SearXNG tab !general with Russian language bias",
         categories=["general"],
-        engines=["startpage", "google", "brave"],  # Yandex broken in SearXNG (parsing error)
         language="ru",
         time_range=None,
         fetch_top_n=3,
-        max_results=5,
+        max_results=20,
     ),
-
-    "ru_news": SearchProfile(
-        name="ru_news",
-        description="Russian news — Bing News + Reuters + Startpage News, last week, ru",
-        categories=["news"],
-        engines=["bing news", "startpage news", "reuters"],
-        language="ru",
-        time_range="week",
-        fetch_top_n=2,
-        max_results=7,
-    ),
-
-    # ── News ─────────────────────────────────────────────────────────────────
-
     "news": SearchProfile(
         name="news",
-        description="Recent news — Bing News + Reuters + Qwant News, last week",
+        description="SearXNG tab !news for recent news lookups",
         categories=["news"],
-        engines=[],
         language="auto",
         time_range="week",
         fetch_top_n=2,
-        max_results=7,
+        max_results=15,
     ),
-
     "news_fresh": SearchProfile(
         name="news_fresh",
-        description="Breaking news — last 24 hours",
+        description="SearXNG tab !news, last 24h",
         categories=["news"],
-        engines=[],
         language="auto",
         time_range="day",
         fetch_top_n=2,
-        max_results=7,
+        max_results=15,
     ),
-
-    # ── Academic ─────────────────────────────────────────────────────────────
-
+    "ru_news": SearchProfile(
+        name="ru_news",
+        description="SearXNG tab !news with Russian language bias",
+        categories=["news"],
+        language="ru",
+        time_range="week",
+        fetch_top_n=2,
+        max_results=15,
+    ),
     "science": SearchProfile(
         name="science",
-        description="Academic — arXiv + OpenAIRE + PubMed (abstracts, no ReaderLM)",
+        description="SearXNG tab !science / group !scientific_publications",
         categories=["science"],
-        engines=[],
         language="auto",
         time_range=None,
-        fetch_top_n=0,   # abstracts already structured in content field — ReaderLM not needed
-        max_results=7,
+        fetch_top_n=0,
+        max_results=20,
+        bang_prefixes=["!scientific_publications"],
     ),
-
-    # ── IT / Dev ─────────────────────────────────────────────────────────────
-
     "tech": SearchProfile(
         name="tech",
-        description="IT/Dev — GitHub + StackOverflow + MDN + Docker Hub + AskUbuntu",
+        description="SearXNG tab !it with native bang routing",
         categories=["it"],
-        engines=[],
         language="auto",
         time_range=None,
         fetch_top_n=3,
-        max_results=5,
+        max_results=20,
+        bang_prefixes=["!it"],
     ),
-
-    # ── Deep ─────────────────────────────────────────────────────────────────
-
+    "it_qa": SearchProfile(
+        name="it_qa",
+        description="SearXNG group !q&a for troubleshooting / errors",
+        categories=["it"],
+        language="auto",
+        time_range=None,
+        fetch_top_n=3,
+        max_results=20,
+        bang_prefixes=["!q&a"],
+    ),
+    "it_repos": SearchProfile(
+        name="it_repos",
+        description="SearXNG group !repos for code / packages / repos",
+        categories=["it"],
+        language="auto",
+        time_range=None,
+        fetch_top_n=3,
+        max_results=20,
+        bang_prefixes=["!repos"],
+    ),
     "deep": SearchProfile(
         name="deep",
-        description="Deep — general + tech + news combined, more results",
-        categories=["general", "it", "news"],
-        engines=[],
+        description="Wide search budget across multiple SearXNG tabs",
+        categories=["general", "news", "science"],
         language="auto",
         time_range=None,
         fetch_top_n=5,
-        max_results=10,
+        max_results=30,
+    ),
+    "reference": SearchProfile(
+        name="reference",
+        description="Reference fallback via encyclopedia/knowledge engines",
+        categories=["general"],
+        language="auto",
+        time_range=None,
+        fetch_top_n=2,
+        max_results=12,
+        engines=["wikipedia", "wikidata"],
     ),
 }
 
@@ -130,19 +135,21 @@ DEFAULT_PROFILE = "web"
 
 
 def get_profile(name: str) -> SearchProfile:
-    p = PROFILES.get(name)
-    if p is None:
-        raise ValueError(
-            f"Unknown profile '{name}'. Available: {list(PROFILES)}"
-        )
-    return p
+    profile = PROFILES.get(name)
+    if profile is None:
+        raise ValueError(f"Unknown profile '{name}'. Available: {list(PROFILES)}")
+    return profile
 
 
 def list_profiles() -> str:
     lines = []
-    for name, p in PROFILES.items():
-        cats = "+".join(p.categories)
-        lang = f" [{p.language}]" if p.language != "auto" else ""
-        tr = f" {p.time_range}" if p.time_range else ""
-        lines.append(f"  [bold]{name:<12}[/bold] {p.description}{lang}{tr}")
+    for name, profile in PROFILES.items():
+        categories = "+".join(profile.categories)
+        bangs = f" {' '.join(profile.bang_prefixes)}" if profile.bang_prefixes else ""
+        lang = f" [{profile.language}]" if profile.language != "auto" else ""
+        time_range = f" {profile.time_range}" if profile.time_range else ""
+        lines.append(
+            f"  [bold]{name:<12}[/bold] {profile.description} "
+            f"[dim](cats={categories}{bangs})[/dim]{lang}{time_range}"
+        )
     return "\n".join(lines)

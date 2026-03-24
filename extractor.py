@@ -8,8 +8,12 @@ First run: uv run crawl4ai-setup   (installs Chromium)
 """
 
 import asyncio
+import contextlib
+import io
+import json
 import os
 import re
+from html import unescape
 
 import requests as _requests
 
@@ -83,8 +87,183 @@ def _extract_reddit(url: str, max_comments: int = 12) -> str:
 
     return "\n".join(parts)
 
+SHALLOW_FETCH_TIMEOUT = int(os.getenv("SHALLOW_FETCH_TIMEOUT", "8"))
+_HTTP_UA = "Mozilla/5.0 (compatible; search-agent/1.0; +https://github.com)"
 EXTRACT_MAX_CHARS = int(os.getenv("EXTRACT_MAX_CHARS", "3000"))
 CRAWL4AI_TIMEOUT = int(os.getenv("CRAWL4AI_TIMEOUT", "25"))
+
+
+def _clean_html_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_first(pattern: str, html: str, flags: int = 0) -> str:
+    match = re.search(pattern, html, flags)
+    if not match:
+        return ""
+    return _clean_html_text(match.group(1))
+
+
+def _extract_all(pattern: str, html: str, limit: int = 5, flags: int = 0) -> list[str]:
+    items: list[str] = []
+    for match in re.finditer(pattern, html, flags):
+        text = _clean_html_text(match.group(1))
+        if text and text not in items:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _extract_meta_content(html: str, keys: list[str]) -> str:
+    for key in keys:
+        pattern = (
+            r'<meta[^>]+(?:name|property)=["\']%s["\'][^>]+content=["\']([^"\']+)["\'][^>]*>'
+            % re.escape(key)
+        )
+        value = _extract_first(pattern, html, flags=re.IGNORECASE)
+        if value:
+            return value
+        reverse_pattern = (
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|property)=["\']%s["\'][^>]*>'
+            % re.escape(key)
+        )
+        value = _extract_first(reverse_pattern, html, flags=re.IGNORECASE)
+        if value:
+            return value
+    return ""
+
+
+def _extract_schema_org(html: str) -> dict:
+    collected: dict[str, object] = {}
+    for match in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        queue = data if isinstance(data, list) else [data]
+        while queue:
+            item = queue.pop(0)
+            if not isinstance(item, dict):
+                continue
+            graph_items = item.get("@graph")
+            if isinstance(graph_items, list):
+                queue.extend(graph_items)
+            if "@type" in item and "@type" not in collected:
+                collected["@type"] = item["@type"]
+            if "headline" in item and "headline" not in collected:
+                collected["headline"] = item["headline"]
+            if "datePublished" in item and "datePublished" not in collected:
+                collected["datePublished"] = item["datePublished"]
+            if "dateModified" in item and "dateModified" not in collected:
+                collected["dateModified"] = item["dateModified"]
+            author = item.get("author")
+            if isinstance(author, dict) and author.get("name") and "author" not in collected:
+                collected["author"] = author["name"]
+            elif isinstance(author, list) and author and "author" not in collected:
+                names = [
+                    sub.get("name")
+                    for sub in author
+                    if isinstance(sub, dict) and sub.get("name")
+                ]
+                if names:
+                    collected["author"] = names[:3]
+    return collected
+
+
+def shallow_fetch(url: str, log=None) -> dict:
+    """Fetch lightweight page signals without browser rendering."""
+    log = log or (lambda msg: None)
+
+    short = url[:72] + "..." if len(url) > 72 else url
+    log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
+
+    if _is_reddit(url):
+        try:
+            text = _extract_reddit(url)
+        except Exception as exc:
+            log(f"    [yellow]  x shallow reddit error: {exc}[/yellow]")
+            return {}
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        title = lines[0].lstrip("# ").strip() if lines else url
+        body_lines = [line for line in lines[1:] if not line.startswith("*r/")]
+        paragraphs = body_lines[:3]
+        summary = " ".join(paragraphs[:2])[:EXTRACT_MAX_CHARS]
+        return {
+            "final_url": url,
+            "title": title,
+            "meta_description": None,
+            "headings": [],
+            "first_paragraphs": paragraphs,
+            "author": None,
+            "published_at": None,
+            "schema_org": {},
+            "content": summary,
+        }
+
+    try:
+        response = _requests.get(
+            url,
+            headers={"User-Agent": _HTTP_UA},
+            timeout=SHALLOW_FETCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        html = response.text[:250000]
+    except Exception as exc:
+        log(f"    [yellow]  x shallow fetch error: {exc}[/yellow]")
+        return {}
+
+    title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or None
+    headings = _extract_all(r"<h[12][^>]*>(.*?)</h[12]>", html, limit=6, flags=re.IGNORECASE | re.DOTALL)
+    paragraphs = [
+        text
+        for text in _extract_all(r"<p[^>]*>(.*?)</p>", html, limit=8, flags=re.IGNORECASE | re.DOTALL)
+        if len(text) >= 40
+    ][:3]
+    schema_org = _extract_schema_org(html)
+    author = (
+        _extract_meta_content(html, ["author", "article:author", "parsely-author"])
+        or str(schema_org.get("author", ""))
+        or None
+    )
+    published_at = (
+        _extract_meta_content(
+            html,
+            ["article:published_time", "og:article:published_time", "datePublished", "pubdate", "dc.date"],
+        )
+        or str(schema_org.get("datePublished", ""))
+        or None
+    )
+
+    summary_parts = [title]
+    if meta_description:
+        summary_parts.append(meta_description)
+    summary_parts.extend(headings[:3])
+    summary_parts.extend(paragraphs[:2])
+    summary = re.sub(r"\s+", " ", " ".join(part for part in summary_parts if part)).strip()[:EXTRACT_MAX_CHARS]
+
+    return {
+        "final_url": response.url,
+        "title": title or url,
+        "meta_description": meta_description,
+        "headings": headings,
+        "first_paragraphs": paragraphs,
+        "author": author,
+        "published_at": published_at,
+        "schema_org": schema_org,
+        "content": summary,
+    }
 
 _RUN_CONFIG = CrawlerRunConfig(
     page_timeout=CRAWL4AI_TIMEOUT * 1000,
@@ -169,7 +348,9 @@ def fetch_and_extract(url: str, log=None) -> str:
         asyncio.set_event_loop(loop)
 
     try:
-        text = loop.run_until_complete(_extract_async(url))
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+            text = loop.run_until_complete(_extract_async(url))
         if text:
             log(f"    [green]  ✓ {len(text)} chars[/green]")
         else:
@@ -183,18 +364,43 @@ def fetch_and_extract(url: str, log=None) -> str:
         return ""
 
 
+def _kill_playwright_node() -> None:
+    """
+    Явно убивает дочерний Node.js playwright-driver процесс (Windows).
+
+    Проблема: crawler.stop() закрывает браузер, но сам Node.js driver-процесс
+    остаётся живым и пытается отправить событие browserContextClosed в уже
+    закрытый pipe → EPIPE crash в stderr.
+    Решение: найти node.exe дочерние процессы текущего PID и kill /F.
+    """
+    import subprocess
+    current_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             f"ParentProcessId={current_pid} and Name='node.exe'",
+             "get", "ProcessId"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for line in result.stdout.splitlines():
+            pid_str = line.strip()
+            if pid_str.isdigit():
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", pid_str],
+                    capture_output=True, timeout=2,
+                )
+    except Exception:
+        pass
+
+
 def shutdown() -> None:
     """
     Gracefully stop the persistent Playwright browser on exit.
 
     Sequence:
-    1. crawler.stop()  — закрывает браузер, отправляет EOF в Node.js driver stdin
-    2. asyncio.sleep   — даём Node.js driver-процессу время завершиться (~400ms)
-    3. cancel tasks    — чистим pending asyncio задачи
-    После возврата caller вызывает os._exit(0), минуя Python GC/__del__.
-
-    Без шага 2: os._exit закрывает pipe к Node.js раньше чем тот успевает выйти
-    → Node.js падает с "EPIPE: broken pipe" в stderr.
+    1. crawler.stop()        — закрывает браузер (CDP команда)
+    2. _kill_playwright_node — явно убиваем node.exe дочерний процесс
+    3. cancel pending tasks  — чистим asyncio очередь
     """
     global _crawler
     if _crawler is None:
@@ -209,8 +415,8 @@ def shutdown() -> None:
         # 1. Останавливаем браузер
         loop.run_until_complete(_crawler.stop())
 
-        # 2. Ждём пока Node.js playwright-driver получит EOF и завершится
-        loop.run_until_complete(asyncio.sleep(0.4))
+        # 2. Убиваем Node.js playwright-driver до того как os._exit закроет pipe
+        _kill_playwright_node()
 
         # 3. Отменяем оставшиеся pending задачи
         pending = asyncio.all_tasks(loop)

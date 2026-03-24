@@ -1,0 +1,411 @@
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from openai import OpenAI
+
+from agent import run_search_agent
+from agent_types import AgentRunResult, ClaimRun
+from profiles import get_profile
+
+
+@dataclass(slots=True)
+class ExpectedClaim:
+    match: str
+    expected_verdict: str
+    requires_primary_source: bool = False
+    expected_routes: list[str] = field(default_factory=list)
+    min_independent_sources: int | None = None
+
+
+@dataclass(slots=True)
+class EvaluationCase:
+    case_id: str
+    split: str
+    query: str
+    profile: str = "web"
+    expected_claims: list[ExpectedClaim] = field(default_factory=list)
+
+
+def load_evaluation_cases(path: str) -> list[EvaluationCase]:
+    cases: list[EvaluationCase] = []
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        item = json.loads(raw)
+        cases.append(
+            EvaluationCase(
+                case_id=item["case_id"],
+                split=item["split"],
+                query=item["query"],
+                profile=item.get("profile", "web"),
+                expected_claims=[
+                    ExpectedClaim(
+                        match=claim["match"],
+                        expected_verdict=claim["expected_verdict"],
+                        requires_primary_source=bool(claim.get("requires_primary_source", False)),
+                        expected_routes=(
+                            [claim["expected_route"]]
+                            if isinstance(claim.get("expected_route"), str)
+                            else [str(route) for route in claim.get("expected_route", [])]
+                        ),
+                        min_independent_sources=claim.get("min_independent_sources"),
+                    )
+                    for claim in item.get("expected_claims", [])
+                ],
+            )
+        )
+    return cases
+
+
+def _match_claim(run_list: list[ClaimRun], expected: ExpectedClaim) -> ClaimRun | None:
+    needle = expected.match.casefold()
+    for run in run_list:
+        haystack = run.claim.claim_text.casefold()
+        if needle in haystack or haystack in needle:
+            return run
+    return None
+
+
+def _answer_source_urls(answer: str) -> list[str]:
+    urls: list[str] = []
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("["):
+            continue
+        if "http://" in stripped:
+            urls.append(stripped.rsplit("http://", 1)[1].strip())
+        elif "https://" in stripped:
+            urls.append("https://" + stripped.rsplit("https://", 1)[1].strip())
+    return urls
+
+
+def _answer_bullets(answer: str) -> list[str]:
+    bullets: list[str] = []
+    in_answer_section = False
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if stripped == "Ответ":
+            in_answer_section = True
+            continue
+        if not in_answer_section:
+            continue
+        if not stripped:
+            break
+        if stripped.startswith("- "):
+            bullets.append(stripped)
+    return bullets
+
+
+def _is_guardrail_bullet(text: str) -> bool:
+    lowered = text.casefold()
+    return (
+        "недостаточно подтвержд" in lowered
+        or "insufficient evidence" in lowered
+        or "not enough supported" in lowered
+    )
+
+
+def compute_search_cost(report: AgentRunResult) -> float:
+    if report.audit_trail.estimated_search_cost:
+        return report.audit_trail.estimated_search_cost
+
+    shallow = 0
+    deep = 0
+    snippet_only = 0
+    for run in report.claims:
+        for plan in run.fetch_plans:
+            if plan.depth == "shallow":
+                shallow += 1
+            elif plan.depth == "deep":
+                deep += 1
+            else:
+                snippet_only += 1
+    return round(
+        len(report.audit_trail.query_variants)
+        + 0.25 * shallow
+        + 1.0 * deep
+        + 0.1 * snippet_only
+        + 0.5 * len(report.claims),
+        3,
+    )
+
+
+def _detect_backend_issue(report: AgentRunResult) -> bool:
+    snapshots = report.audit_trail.serp_snapshots
+    if not snapshots:
+        return False
+    saw_unresponsive = False
+    for snapshot in snapshots:
+        if snapshot.unresponsive_engines:
+            saw_unresponsive = True
+        if snapshot.results:
+            return False
+    return saw_unresponsive
+
+
+def score_reports(
+    cases: list[EvaluationCase],
+    reports: dict[str, AgentRunResult],
+    latencies_ms: dict[str, int] | None = None,
+) -> dict:
+    latencies_ms = latencies_ms or {}
+
+    supported_expected = 0
+    supported_hits = 0
+    contradicted_expected = 0
+    contradicted_hits = 0
+    insufficient_expected = 0
+    insufficient_hits = 0
+    supported_with_primary = 0
+    actual_supported = 0
+    primary_requirements = 0
+    primary_requirement_hits = 0
+    route_expectations = 0
+    route_hits = 0
+    source_requirements = 0
+    source_requirement_hits = 0
+    backend_issue_cases = 0
+
+    valid_citations = 0
+    total_citations = 0
+    unsupported_bullets = 0
+    total_answer_bullets = 0
+    costs: list[float] = []
+    latency_values: list[int] = []
+    case_details: list[dict] = []
+
+    by_split: dict[str, dict[str, list[float] | int]] = {}
+
+    for case in cases:
+        report = reports[case.case_id]
+        case_cost = compute_search_cost(report)
+        case_latency = latencies_ms.get(case.case_id, report.audit_trail.latency_ms)
+        backend_issue = _detect_backend_issue(report)
+        if backend_issue:
+            backend_issue_cases += 1
+        costs.append(case_cost)
+        latency_values.append(case_latency)
+
+        split_bucket = by_split.setdefault(
+            case.split,
+            {
+                "supported_expected": 0,
+                "supported_hits": 0,
+                "contradicted_expected": 0,
+                "contradicted_hits": 0,
+                "insufficient_expected": 0,
+                "insufficient_hits": 0,
+                "route_expectations": 0,
+                "route_hits": 0,
+                "primary_requirements": 0,
+                "primary_requirement_hits": 0,
+                "source_requirements": 0,
+                "source_requirement_hits": 0,
+                "backend_issue_cases": 0,
+                "costs": [],
+                "latencies": [],
+            },
+        )
+        split_bucket["costs"].append(case_cost)
+        split_bucket["latencies"].append(case_latency)
+        if backend_issue:
+            split_bucket["backend_issue_cases"] += 1
+
+        supported_claim_count = 0
+        for run in report.claims:
+            bundle = run.evidence_bundle
+            if bundle and bundle.verification and bundle.verification.verdict == "supported":
+                supported_claim_count += 1
+
+        answer_bullets = [bullet for bullet in _answer_bullets(report.answer) if not _is_guardrail_bullet(bullet)]
+        total_answer_bullets += len(answer_bullets)
+        unsupported_bullets += max(0, len(answer_bullets) - supported_claim_count)
+
+        cited_urls = _answer_source_urls(report.answer)
+        valid_urls = {
+            passage.url
+            for run in report.claims
+            for passage in run.passages
+        }
+        total_citations += len(cited_urls)
+        valid_citations += sum(1 for url in cited_urls if url in valid_urls)
+
+        detail = {
+            "case_id": case.case_id,
+            "split": case.split,
+            "query": case.query,
+            "profile": case.profile,
+            "latency_ms": case_latency,
+            "search_cost": case_cost,
+            "answer": report.answer,
+            "backend_issue": backend_issue,
+            "claims": [],
+        }
+
+        for expected in case.expected_claims:
+            run = _match_claim(report.claims, expected)
+            bundle = run.evidence_bundle if run else None
+            actual_verdict = (
+                bundle.verification.verdict
+                if bundle and bundle.verification
+                else None
+            )
+            actual_route = run.routing_decision.mode if run and run.routing_decision else None
+            if expected.expected_verdict == "supported":
+                supported_expected += 1
+                split_bucket["supported_expected"] += 1
+                if actual_verdict == "supported":
+                    supported_hits += 1
+                    split_bucket["supported_hits"] += 1
+            if expected.expected_verdict == "contradicted":
+                contradicted_expected += 1
+                split_bucket["contradicted_expected"] += 1
+                if actual_verdict == "contradicted":
+                    contradicted_hits += 1
+                    split_bucket["contradicted_hits"] += 1
+            if expected.expected_verdict == "insufficient_evidence":
+                insufficient_expected += 1
+                split_bucket["insufficient_expected"] += 1
+                if actual_verdict == "insufficient_evidence":
+                    insufficient_hits += 1
+                    split_bucket["insufficient_hits"] += 1
+            if expected.expected_routes:
+                route_expectations += 1
+                split_bucket["route_expectations"] += 1
+                if actual_route in expected.expected_routes:
+                    route_hits += 1
+                    split_bucket["route_hits"] += 1
+            if expected.requires_primary_source:
+                primary_requirements += 1
+                split_bucket["primary_requirements"] += 1
+                if actual_verdict == "supported" and bundle and bundle.has_primary_source:
+                    primary_requirement_hits += 1
+                    split_bucket["primary_requirement_hits"] += 1
+            if expected.min_independent_sources is not None:
+                source_requirements += 1
+                split_bucket["source_requirements"] += 1
+                if (
+                    actual_verdict == "supported"
+                    and bundle
+                    and bundle.independent_source_count >= expected.min_independent_sources
+                ):
+                    source_requirement_hits += 1
+                    split_bucket["source_requirement_hits"] += 1
+            if actual_verdict == "supported":
+                actual_supported += 1
+                if bundle and bundle.has_primary_source:
+                    supported_with_primary += 1
+
+            detail["claims"].append({
+                "match": expected.match,
+                "expected_verdict": expected.expected_verdict,
+                "actual_verdict": actual_verdict,
+                "expected_routes": expected.expected_routes,
+                "actual_route": actual_route,
+                "route_ok": (not expected.expected_routes) or actual_route in expected.expected_routes,
+                "requires_primary_source": expected.requires_primary_source,
+                "has_primary_source": bundle.has_primary_source if bundle else False,
+                "primary_ok": (not expected.requires_primary_source) or bool(bundle and bundle.has_primary_source and actual_verdict == "supported"),
+                "min_independent_sources": expected.min_independent_sources,
+                "independent_source_count": bundle.independent_source_count if bundle else 0,
+                "source_count_ok": (
+                    expected.min_independent_sources is None
+                    or bool(bundle and actual_verdict == "supported" and bundle.independent_source_count >= expected.min_independent_sources)
+                ),
+            })
+
+        case_details.append(detail)
+
+    metrics = {
+        "claim_support_rate": round(supported_hits / supported_expected, 4) if supported_expected else 0.0,
+        "citation_validity_rate": round(valid_citations / total_citations, 4) if total_citations else 1.0,
+        "unsupported_statement_rate": round(unsupported_bullets / total_answer_bullets, 4) if total_answer_bullets else 0.0,
+        "primary_source_coverage": round(supported_with_primary / actual_supported, 4) if actual_supported else 0.0,
+        "contradiction_detection_rate": round(contradicted_hits / contradicted_expected, 4) if contradicted_expected else 0.0,
+        "insufficient_detection_rate": round(insufficient_hits / insufficient_expected, 4) if insufficient_expected else 0.0,
+        "route_match_rate": round(route_hits / route_expectations, 4) if route_expectations else 0.0,
+        "primary_requirement_rate": round(primary_requirement_hits / primary_requirements, 4) if primary_requirements else 0.0,
+        "source_requirement_rate": round(source_requirement_hits / source_requirements, 4) if source_requirements else 0.0,
+        "backend_issue_rate": round(backend_issue_cases / len(cases), 4) if cases else 0.0,
+        "median_search_cost": round(statistics.median(costs), 3) if costs else 0.0,
+        "median_answer_latency": round(statistics.median(latency_values), 1) if latency_values else 0.0,
+    }
+
+    split_metrics: dict[str, dict] = {}
+    for split, bucket in by_split.items():
+        split_metrics[split] = {
+            "claim_support_rate": round(
+                bucket["supported_hits"] / bucket["supported_expected"], 4
+            ) if bucket["supported_expected"] else 0.0,
+            "contradiction_detection_rate": round(
+                bucket["contradicted_hits"] / bucket["contradicted_expected"], 4
+            ) if bucket["contradicted_expected"] else 0.0,
+            "insufficient_detection_rate": round(
+                bucket["insufficient_hits"] / bucket["insufficient_expected"], 4
+            ) if bucket["insufficient_expected"] else 0.0,
+            "route_match_rate": round(
+                bucket["route_hits"] / bucket["route_expectations"], 4
+            ) if bucket["route_expectations"] else 0.0,
+            "primary_requirement_rate": round(
+                bucket["primary_requirement_hits"] / bucket["primary_requirements"], 4
+            ) if bucket["primary_requirements"] else 0.0,
+            "source_requirement_rate": round(
+                bucket["source_requirement_hits"] / bucket["source_requirements"], 4
+            ) if bucket["source_requirements"] else 0.0,
+            "backend_issue_rate": round(
+                bucket["backend_issue_cases"] / max(1, len(bucket["costs"])), 4
+            ),
+            "median_search_cost": round(statistics.median(bucket["costs"]), 3) if bucket["costs"] else 0.0,
+            "median_answer_latency": round(statistics.median(bucket["latencies"]), 1) if bucket["latencies"] else 0.0,
+        }
+
+    return {
+        "case_count": len(cases),
+        "metrics": metrics,
+        "by_split": split_metrics,
+        "cases": case_details,
+    }
+
+
+def evaluate_dataset(
+    dataset_path: str,
+    client: OpenAI | None = None,
+    receipts_dir: str | None = None,
+    delay_between_cases: float | None = None,
+    log=None,
+) -> dict:
+    log = log or (lambda msg: None)
+    cases = load_evaluation_cases(dataset_path)
+    reports: dict[str, AgentRunResult] = {}
+    latencies_ms: dict[str, int] = {}
+    case_delay = (
+        delay_between_cases
+        if delay_between_cases is not None
+        else float(os.getenv("EVAL_CASE_DELAY_SEC", "2.0"))
+    )
+
+    for idx, case in enumerate(cases, 1):
+        if idx > 1 and case_delay > 0:
+            time.sleep(case_delay)
+        log(f"[eval] case {idx}/{len(cases)}: {case.case_id}")
+        start = time.perf_counter()
+        report = run_search_agent(
+            case.query,
+            profile=get_profile(case.profile),
+            client=client,
+            log=log,
+            receipts_dir=receipts_dir,
+        )
+        latencies_ms[case.case_id] = int((time.perf_counter() - start) * 1000)
+        reports[case.case_id] = report
+
+    summary = score_reports(cases, reports, latencies_ms)
+    summary["dataset_path"] = str(Path(dataset_path))
+    return summary
