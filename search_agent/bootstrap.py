@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from functools import lru_cache
+
+from search_agent.application.legacy_steps import LegacyAgentStepLibrary
+from search_agent.application.use_cases import SearchAgentUseCase
+from search_agent.infrastructure.fetch_gateway import LegacyFetchGateway
+from search_agent.infrastructure.gateway_factory import build_search_gateway
+from search_agent.infrastructure.intelligence import PydanticAIQueryIntelligence
+from search_agent.infrastructure.receipt_gateway import JsonReceiptWriter
+from search_agent.infrastructure.telemetry import configure_logfire
+from search_agent.settings import get_settings
+
+
+@lru_cache(maxsize=1)
+def build_search_agent_use_case() -> SearchAgentUseCase:
+    settings = get_settings()
+    configure_logfire(settings)
+    return SearchAgentUseCase(
+        intelligence=PydanticAIQueryIntelligence(settings),
+        search_gateway=build_search_gateway(settings),
+        fetch_gateway=LegacyFetchGateway(),
+        receipt_writer=JsonReceiptWriter(),
+        steps=LegacyAgentStepLibrary(),
+    )

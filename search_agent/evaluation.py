@@ -9,9 +9,9 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from agent import run_search_agent
-from agent_types import AgentRunResult, ClaimRun
-from profiles import get_profile
+from search_agent.application.agent_steps import run_search_agent
+from search_agent.config.profiles import get_profile
+from search_agent.domain.models import AgentRunResult, ClaimRun
 
 
 @dataclass(slots=True)

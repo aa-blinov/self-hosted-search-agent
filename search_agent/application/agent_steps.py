@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Iterable
 
-from openai import OpenAI
-
-from agent_types import (
+from search_agent.domain.models import (
     AgentRunResult,
     AuditTrail,
     Claim,
@@ -29,10 +26,8 @@ from agent_types import (
     SourceAssessment,
     VerificationResult,
 )
-from search import search_searxng_with_fallback
-from source_priors import lookup_source_prior
+from search_agent.domain.source_priors import lookup_source_prior
 
-MAX_CLAIMS = int(os.getenv("AGENT_MAX_CLAIMS", "4"))
 MAX_CLAIM_ITERATIONS = int(os.getenv("AGENT_MAX_CLAIM_ITERATIONS", "3"))
 DEFAULT_FETCH_TOP_N = int(os.getenv("AGENT_FETCH_TOP_N", "4"))
 PASSAGE_TOP_K = int(os.getenv("AGENT_PASSAGE_TOP_K", "8"))
@@ -57,20 +52,6 @@ _STOPWORDS = {
     "than", "about", "between", "latest", "current",
 }
 
-_RELATIVE_TIME_MARKERS = {
-    "today", "tomorrow", "yesterday", "this week", "next week", "last week",
-    "this month", "next month", "last month", "this quarter", "next quarter",
-    "last quarter", "current", "latest",
-    "сегодня", "завтра", "вчера", "эта неделя", "на этой неделе",
-    "следующая неделя", "прошлая неделя", "этот месяц", "следующий месяц",
-    "прошлый месяц", "этот квартал", "следующий квартал", "прошлый квартал",
-    "текущий", "последний",
-}
-
-_COMPARISON_MARKERS = {
-    "compare", "comparison", "difference", "versus", "vs", "contrast",
-    "сравни", "сравнение", "разница", "отличается", "лучше", "хуже",
-}
 
 _OFFICIAL_HOST_MARKERS = (
     ".gov", ".mil", ".gouv", "europa.eu", "who.int", "sec.gov", "irs.gov",
@@ -125,28 +106,6 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 def _build_run_id(query: str, started_at: datetime) -> str:
     digest = hashlib.sha1(f"{query}|{started_at.isoformat()}".encode("utf-8")).hexdigest()[:8]
     return f"{started_at.strftime('%Y%m%dT%H%M%S')}-{digest}"
-
-
-def _parse_json_object(text: str):
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def _parse_json_array(text: str):
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
 
 
 def _normalized_text(text: str) -> str:
@@ -215,165 +174,6 @@ def _extract_time_scope(text: str) -> str | None:
             return match.group(0)
     return None
 
-
-def _extract_region_hint(text: str) -> str | None:
-    patterns = [
-        r"\b(?:in|for|within)\s+([A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,2})",
-        r"\b(?:в|для|по)\s+([А-ЯЁ][А-Яа-яЁё.-]+(?:\s+[А-ЯЁ][А-Яа-яЁё.-]+){0,2})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _needs_freshness(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in _RELATIVE_TIME_MARKERS)
-
-
-def _should_decompose(text: str) -> bool:
-    lowered = text.lower()
-    return (
-        any(marker in lowered for marker in _COMPARISON_MARKERS)
-        or " and " in lowered
-        or " и " in lowered
-        or len(text) > 90
-        or text.count("?") > 1
-    )
-
-
-def _normalize_time_references(query: str, client: OpenAI | None, log=None) -> str:
-    log = log or (lambda msg: None)
-    if client is None or not _needs_freshness(query):
-        return query
-
-    today = datetime.now().strftime("%d %B %Y, %A")
-    prompt = (
-        f"Today is {today}.\n"
-        "Rewrite the search query by replacing only relative time references with explicit dates.\n"
-        "Keep all named entities exactly as written.\n"
-        "Return only the rewritten query.\n\n"
-        f"Query: {query}"
-    )
-    try:
-        from llm import MODEL, _extra
-
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=80,
-            extra_body=_extra(),
-        )
-        normalized = _normalized_text(response.choices[0].message.content or "")
-        if normalized:
-            if normalized != query:
-                log(f"  [dim]↳ normalized query: [italic]{normalized}[/italic][/dim]")
-            return normalized
-    except Exception as exc:
-        log(f"  [dim yellow]⚠ time normalization failed: {exc}[/dim yellow]")
-    return query
-
-
-def classify_query(query: str, client: OpenAI | None = None, log=None) -> QueryClassification:
-    normalized_query = _normalize_time_references(query, client, log=log)
-    lowered = normalized_query.lower()
-    intent = "comparison" if any(marker in lowered for marker in _COMPARISON_MARKERS) else "factual"
-    complexity = "multi_hop" if _should_decompose(normalized_query) else "single_hop"
-    entities = _extract_entities(normalized_query)
-    entity_disambiguation = any(len(entity) <= 4 for entity in entities)
-    return QueryClassification(
-        query=query,
-        normalized_query=normalized_query,
-        intent=intent,
-        complexity=complexity,
-        needs_freshness=_needs_freshness(query),
-        time_scope=_extract_time_scope(normalized_query),
-        region_hint=_extract_region_hint(normalized_query),
-        entity_disambiguation=entity_disambiguation,
-    )
-
-
-def _fallback_claims(classification: QueryClassification) -> list[Claim]:
-    return [
-        Claim(
-            claim_id="claim-1",
-            claim_text=classification.normalized_query,
-            priority=1,
-            needs_freshness=classification.needs_freshness,
-            entity_set=_extract_entities(classification.normalized_query),
-            time_scope=classification.time_scope,
-        )
-    ]
-
-
-def decompose_claims(
-    classification: QueryClassification,
-    client: OpenAI | None = None,
-    log=None,
-) -> list[Claim]:
-    log = log or (lambda msg: None)
-    if client is None or not _should_decompose(classification.normalized_query):
-        return _fallback_claims(classification)
-
-    prompt = (
-        "Break the user request into atomic factual claims or subquestions that can be verified on the web.\n"
-        "Return a JSON array. Each item must have:\n"
-        "- claim_text\n"
-        "- priority (1 = highest)\n"
-        "- needs_freshness (true/false)\n"
-        "- entity_set (array of exact entities)\n"
-        "- time_scope (string or null)\n"
-        "Rules:\n"
-        "- Preserve exact named entities.\n"
-        "- Keep claims atomic.\n"
-        "- Do not invent missing facts.\n"
-        "- Use at most 4 claims.\n\n"
-        f"User request: {classification.normalized_query}"
-    )
-    try:
-        from llm import MODEL, _extra
-
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=400,
-            extra_body=_extra(),
-        )
-        parsed = _parse_json_array(response.choices[0].message.content or "")
-        if isinstance(parsed, list):
-            claims: list[Claim] = []
-            for idx, item in enumerate(parsed[:MAX_CLAIMS], 1):
-                if not isinstance(item, dict) or not item.get("claim_text"):
-                    continue
-                claims.append(
-                    Claim(
-                        claim_id=f"claim-{idx}",
-                        claim_text=_normalized_text(str(item["claim_text"])),
-                        priority=max(1, int(item.get("priority", idx))),
-                        needs_freshness=bool(item.get("needs_freshness", classification.needs_freshness)),
-                        entity_set=[
-                            _normalized_text(str(entity))
-                            for entity in item.get("entity_set", [])
-                            if _normalized_text(str(entity))
-                        ] or _extract_entities(str(item["claim_text"])),
-                        time_scope=(
-                            _normalized_text(str(item["time_scope"]))
-                            if item.get("time_scope") not in (None, "", "null")
-                            else _extract_time_scope(str(item["claim_text"]))
-                        ),
-                    )
-                )
-            if claims:
-                return claims
-    except Exception as exc:
-        log(f"  [dim yellow]⚠ claim decomposition failed: {exc}[/dim yellow]")
-    return _fallback_claims(classification)
-
-
 def _variant_keywords(text: str, entities: Iterable[str]) -> str:
     entity_tokens = {token.casefold() for entity in entities for token in _tokenize(entity)}
     tokens: list[str] = []
@@ -394,6 +194,108 @@ def _source_restricted_query(claim: Claim) -> tuple[str, str] | None:
     if any(term in lowered for term in ("official", "announcement", "пресс-релиз", "официаль")) and claim.entity_set:
         return (f'"{claim.entity_set[0]}" official announcement', "Prefer an official source path.")
     return None
+
+
+def _is_cyrillic_text(text: str) -> bool:
+    return bool(re.search(r"[а-яёА-ЯЁ]", text or ""))
+
+
+def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
+    if not time_scope:
+        return []
+    terms = [time_scope]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", time_scope):
+        try:
+            dt = datetime.fromisoformat(time_scope)
+        except ValueError:
+            return terms
+        if cyrillic:
+            ru_months = [
+                "января", "февраля", "марта", "апреля", "мая", "июня",
+                "июля", "августа", "сентября", "октября", "ноября", "декабря",
+            ]
+            terms.append(f"{dt.day} {ru_months[dt.month - 1]} {dt.year}")
+        else:
+            terms.append(dt.strftime("%B %d %Y"))
+    return terms
+
+
+def _news_digest_region_terms(claim: Claim, classification: QueryClassification) -> list[str]:
+    candidates: list[str] = []
+    if classification.region_hint:
+        candidates.append(_normalized_text(classification.region_hint))
+    for entity in claim.entity_set:
+        cleaned = _normalized_text(entity)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+    return candidates[:3]
+
+
+def _build_news_digest_query_variants(
+    claim: Claim,
+    classification: QueryClassification,
+) -> list[tuple[str, str, str, str | None, str | None]]:
+    cyrillic = _is_cyrillic_text(claim.claim_text)
+    region_terms = _news_digest_region_terms(claim, classification)
+    primary_region = region_terms[0] if region_terms else claim.claim_text
+    time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
+    primary_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
+
+    if cyrillic:
+        return [
+            (
+                _normalized_text(f"{primary_region} новости {primary_time}"),
+                "news_digest_broad",
+                "Target recent local news for the requested place and date.",
+                None,
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f'"{primary_region}" события {primary_time}'),
+                "news_digest_events",
+                "Prefer event-style coverage for the requested location and date.",
+                None,
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f"{primary_region} новости {primary_time} site:.kz"),
+                "news_digest_local",
+                "Bias retrieval toward local Kazakhstan news domains.",
+                "site:.kz",
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f"{primary_region} происшествия {primary_time}"),
+                "news_digest_incidents",
+                "Catch notable incidents that may not use generic news wording.",
+                None,
+                claim.time_scope,
+            ),
+        ]
+
+    return [
+        (
+            _normalized_text(f"{primary_region} news {primary_time}"),
+            "news_digest_broad",
+            "Target recent local news for the requested place and date.",
+            None,
+            claim.time_scope,
+        ),
+        (
+            _normalized_text(f'"{primary_region}" events {primary_time}'),
+            "news_digest_events",
+            "Prefer event coverage for the requested location and date.",
+            None,
+            claim.time_scope,
+        ),
+        (
+            _normalized_text(f"{primary_region} breaking news {primary_time}"),
+            "news_digest_breaking",
+            "Catch breaking-news style coverage for the requested place and date.",
+            None,
+            claim.time_scope,
+        ),
+    ]
 
 
 def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
@@ -448,6 +350,210 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
             query_text.split()[-1] if "site:" in query_text else "official",
             claim.time_scope,
         ))
+
+    deduped: list[QueryVariant] = []
+    seen: set[str] = set()
+    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
+        key = query_text.casefold()
+        if not query_text or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            QueryVariant(
+                variant_id=f"{claim.claim_id}-q{idx}",
+                claim_id=claim.claim_id,
+                query_text=query_text,
+                strategy=strategy,
+                rationale=rationale,
+                source_restriction=source_restriction,
+                freshness_hint=freshness_hint,
+            )
+        )
+    return deduped[:6]
+
+
+def _is_cyrillic_text(text: str) -> bool:
+    return bool(re.search(r"[\u0400-\u04FF]", text or ""))
+
+
+def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
+    if not time_scope:
+        return []
+    terms = [time_scope]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", time_scope):
+        try:
+            dt = datetime.fromisoformat(time_scope)
+        except ValueError:
+            return terms
+        if cyrillic:
+            ru_months = [
+                "\u044f\u043d\u0432\u0430\u0440\u044f",
+                "\u0444\u0435\u0432\u0440\u0430\u043b\u044f",
+                "\u043c\u0430\u0440\u0442\u0430",
+                "\u0430\u043f\u0440\u0435\u043b\u044f",
+                "\u043c\u0430\u044f",
+                "\u0438\u044e\u043d\u044f",
+                "\u0438\u044e\u043b\u044f",
+                "\u0430\u0432\u0433\u0443\u0441\u0442\u0430",
+                "\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044f",
+                "\u043e\u043a\u0442\u044f\u0431\u0440\u044f",
+                "\u043d\u043e\u044f\u0431\u0440\u044f",
+                "\u0434\u0435\u043a\u0430\u0431\u0440\u044f",
+            ]
+            terms.append(f"{dt.day} {ru_months[dt.month - 1]} {dt.year}")
+            terms.append(str(dt.year))
+        else:
+            terms.append(dt.strftime("%B %d %Y"))
+            terms.append(str(dt.year))
+    return terms
+
+
+def _news_digest_region_terms(claim: Claim, classification: QueryClassification) -> list[str]:
+    candidates: list[str] = []
+    if classification.region_hint:
+        candidates.append(_normalized_text(classification.region_hint))
+    for entity in claim.entity_set:
+        cleaned = _normalized_text(entity)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+    return candidates[:3]
+
+
+def _build_news_digest_query_variants(
+    claim: Claim,
+    classification: QueryClassification,
+) -> list[tuple[str, str, str, str | None, str | None]]:
+    cyrillic = _is_cyrillic_text(claim.claim_text)
+    region_terms = _news_digest_region_terms(claim, classification)
+    primary_region = region_terms[0] if region_terms else claim.claim_text
+    time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
+    primary_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
+    fallback_time = primary_time
+
+    if cyrillic:
+        return [
+            (
+                _normalized_text(f"{primary_region} \u043d\u043e\u0432\u043e\u0441\u0442\u0438 {primary_time}"),
+                "news_digest_broad",
+                "Target recent local news for the requested place and date.",
+                None,
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f'"{primary_region}" \u0441\u043e\u0431\u044b\u0442\u0438\u044f {primary_time}'),
+                "news_digest_events",
+                "Prefer event-style coverage for the requested location and date.",
+                None,
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f"{primary_region} \u043d\u043e\u0432\u043e\u0441\u0442\u0438 {fallback_time} site:.kz"),
+                "news_digest_local",
+                "Bias retrieval toward local Kazakhstan news domains.",
+                "site:.kz",
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f"{primary_region} \u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432\u0438\u044f {fallback_time}"),
+                "news_digest_incidents",
+                "Catch notable incidents that may not use generic news wording.",
+                None,
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f'"{primary_region}" {fallback_time} site:.kz'),
+                "news_digest_exact_local",
+                "Force the requested place and time into a local-domain search.",
+                "site:.kz",
+                claim.time_scope,
+            ),
+        ]
+
+    return [
+        (
+            _normalized_text(f"{primary_region} news {primary_time}"),
+            "news_digest_broad",
+            "Target recent local news for the requested place and date.",
+            None,
+            claim.time_scope,
+        ),
+        (
+            _normalized_text(f'"{primary_region}" events {primary_time}'),
+            "news_digest_events",
+            "Prefer event coverage for the requested location and date.",
+            None,
+            claim.time_scope,
+        ),
+        (
+            _normalized_text(f"{primary_region} breaking news {primary_time}"),
+            "news_digest_breaking",
+            "Catch breaking-news style coverage for the requested place and date.",
+            None,
+            claim.time_scope,
+        ),
+    ]
+
+
+def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
+    if classification.intent == "news_digest":
+        candidates: list[tuple[str, str, str, str | None, str | None]] = _build_news_digest_query_variants(
+            claim,
+            classification,
+        )
+    else:
+        candidates = []
+
+    keywords = _variant_keywords(claim.claim_text, claim.entity_set)
+
+    if classification.intent != "news_digest":
+        candidates.append((
+            claim.claim_text,
+            "broad",
+            "Broad query to preserve recall and capture general evidence.",
+            None,
+            claim.time_scope,
+        ))
+
+        if claim.entity_set:
+            locked = " ".join(f'"{entity}"' for entity in claim.entity_set[:3])
+            locked = _normalized_text(f"{locked} {keywords}")
+            candidates.append((
+                locked,
+                "entity_locked",
+                "Hard-lock named entities to reduce entity drift.",
+                None,
+                claim.time_scope,
+            ))
+
+        exact_target = claim.claim_text if len(claim.claim_text.split()) <= 12 else f"{' '.join(claim.entity_set[:2])} {keywords}"
+        candidates.append((
+            f'"{_normalized_text(exact_target)}"',
+            "exact_match",
+            "Exact-match variant for literal phrasing and narrow factual lookups.",
+            None,
+            claim.time_scope,
+        ))
+
+        if claim.needs_freshness or claim.time_scope:
+            freshness_suffix = claim.time_scope or str(datetime.now().year)
+            candidates.append((
+                _normalized_text(f"{claim.claim_text} {freshness_suffix}"),
+                "freshness_aware",
+                "Adds explicit time scope so retrieval stays aligned to the intended period.",
+                None,
+                freshness_suffix,
+            ))
+
+        restricted = _source_restricted_query(claim)
+        if restricted:
+            query_text, rationale = restricted
+            candidates.append((
+                _normalized_text(query_text),
+                "source_restricted",
+                rationale,
+                query_text.split()[-1] if "site:" in query_text else "official",
+                claim.time_scope,
+            ))
 
     deduped: list[QueryVariant] = []
     seen: set[str] = set()
@@ -562,8 +668,37 @@ def _entity_overlap(entities: list[str], candidate_text: str) -> float:
     if not entities:
         return 0.0
     lowered = candidate_text.casefold()
-    hits = sum(1 for entity in entities if entity.casefold() in lowered)
-    return hits / len(entities)
+    compact_candidate = _compact_text(candidate_text)
+    hits = 0.0
+    for entity in entities:
+        if entity.casefold() in lowered:
+            hits += 1.0
+            continue
+        compact_entity = _compact_text(entity)
+        if compact_entity and compact_entity in compact_candidate:
+            hits += 1.0
+            continue
+        if len(compact_entity) >= 5 and compact_entity[:5] in compact_candidate:
+            hits += 0.75
+    return _clamp(hits / len(entities))
+
+
+def _time_scope_alignment(claim: Claim, result) -> float:
+    if not claim.time_scope:
+        return 0.0
+    scope = claim.time_scope.casefold()
+    haystack = f"{result.title} {result.snippet} {result.url}".casefold()
+    if scope in haystack:
+        return 1.0
+    if result.published_at and result.published_at.startswith(claim.time_scope):
+        return 1.0
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", claim.time_scope or "") and result.published_at:
+        if result.published_at[:7] == claim.time_scope[:7]:
+            return 0.45
+    if re.fullmatch(r"20\d{2}", claim.time_scope or "") and result.published_at:
+        if result.published_at.startswith(claim.time_scope):
+            return 0.8
+    return 0.0
 
 
 def _freshness_score(claim: Claim, result) -> float:
@@ -644,15 +779,17 @@ def gate_serp_results(
             entity_match = _entity_overlap(claim.entity_set, f"{result.title} {result.snippet}")
             host_entity_match = _entity_host_match_score(claim, result.host)
             freshness = _freshness_score(claim, result)
+            time_alignment = _time_scope_alignment(claim, result)
             spam = _spam_risk(result)
             primary = _primary_source_likelihood(claim, result, domain_type)
             source_score = _clamp(
-                0.24 * domain_prior
-                + 0.24 * primary
-                + 0.14 * freshness
+                0.22 * domain_prior
+                + 0.22 * primary
+                + 0.12 * freshness
                 + 0.16 * entity_match
-                + 0.14 * semantic_match
-                + 0.08 * host_entity_match
+                + 0.12 * semantic_match
+                + 0.06 * host_entity_match
+                + 0.10 * time_alignment
                 + prior.source_prior
                 - 0.25 * spam
             )
@@ -662,6 +799,7 @@ def gate_serp_results(
                 f"primary={primary:.2f}",
                 f"host_entity={host_entity_match:.2f}",
                 f"freshness={freshness:.2f}",
+                f"time_alignment={time_alignment:.2f}",
                 f"entity_match={entity_match:.2f}",
                 f"spam={spam:.2f}",
             ]
@@ -981,7 +1119,7 @@ def fetch_claim_documents(
     log=None,
 ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
     log = log or (lambda msg: None)
-    from extractor import fetch_and_extract, shallow_fetch
+    from search_agent.infrastructure.extractor import fetch_and_extract, shallow_fetch
 
     seen_urls = seen_urls or set()
     shallow_limit, deep_limit = _routing_limits(profile, routing_decision)
@@ -1319,145 +1457,174 @@ def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = 
     return selected
 
 
-def _heuristic_verifier(claim: Claim, passages: list[Passage]) -> VerificationResult:
-    if not passages:
-        return VerificationResult(
-            verdict="insufficient_evidence",
-            confidence=0.1,
-            missing_dimensions=["source"],
-            rationale="No passages were available for verification.",
+def _news_digest_region_hint_from_claim(claim: Claim) -> str | None:
+    if claim.entity_set:
+        return claim.entity_set[0]
+    match = re.search(
+        r"\b(?:in|for|within|at|from|\u0432|\u0434\u043b\u044f|\u043f\u043e)\s+([A-Z\u0410-\u042f\u0401][A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451.-]+(?:\s+[A-Z\u0410-\u042f\u0401][A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451.-]+){0,2})",
+        claim.claim_text,
+    )
+    if match:
+        return _normalized_text(match.group(1))
+    return None
+
+
+def _is_news_digest_claim(claim: Claim) -> bool:
+    lowered = claim.claim_text.casefold()
+    return bool(
+        (claim.needs_freshness or claim.time_scope)
+        and (
+            re.search(r"\bwhat\b.*\bhappened\b", lowered)
+            or re.search(r"\b\u0447\u0442\u043e\b.*\b(?:\u043f\u0440\u043e\u0438\u0437\u043e\u0448\u043b\u043e|\u0441\u043b\u0443\u0447\u0438\u043b\u043e\u0441\u044c|\u0431\u044b\u043b\u043e)\b", lowered)
+            or "\u043d\u043e\u0432\u043e\u0441\u0442\u0438" in lowered
+            or "\u0441\u043e\u0431\u044b\u0442\u0438\u044f" in lowered
+            or "\u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432\u0438\u044f" in lowered
         )
-
-    strong = [passage for passage in passages if passage.utility_score >= 0.35]
-    if len(strong) >= 2 and len({_host_root(p.host) for p in strong[:3]}) >= 2:
-        supporting = [
-            EvidenceSpan(
-                passage_id=passage.passage_id,
-                url=passage.url,
-                title=passage.title,
-                section=passage.section,
-                text=passage.text[:220],
-            )
-            for passage in strong[:3]
-        ]
-        return VerificationResult(
-            verdict="supported",
-            confidence=0.6,
-            supporting_spans=supporting,
-            rationale="Multiple passages from independent sources align with the claim.",
-        )
-
-    missing: list[str] = []
-    if claim.time_scope and not any(claim.time_scope.casefold() in passage.text.casefold() for passage in passages):
-        missing.append("time")
-    if claim.entity_set and not any(
-        entity.casefold() in passage.text.casefold()
-        for entity in claim.entity_set
-        for passage in passages
-    ):
-        missing.append("entity")
-    if re.search(r"\d", claim.claim_text) and not any(re.search(r"\d", passage.text) for passage in passages):
-        missing.append("number")
-
-    return VerificationResult(
-        verdict="insufficient_evidence",
-        confidence=0.35,
-        supporting_spans=[
-            EvidenceSpan(
-                passage_id=passage.passage_id,
-                url=passage.url,
-                title=passage.title,
-                section=passage.section,
-                text=passage.text[:220],
-            )
-            for passage in strong[:2]
-        ],
-        missing_dimensions=missing or ["coverage"],
-        rationale="Evidence is partial or does not fully cover the claim scope.",
     )
 
 
-def verify_claim(claim: Claim, passages: list[Passage], client: OpenAI | None = None, log=None) -> VerificationResult:
-    log = log or (lambda msg: None)
-    if client is None:
-        return _heuristic_verifier(claim, passages)
+def _news_digest_time_match(claim: Claim, passage: Passage) -> float:
+    if not claim.time_scope:
+        return 0.5
+    haystack = f"{passage.title} {passage.text}".casefold()
+    if claim.time_scope.casefold() in haystack:
+        return 1.0
+    if passage.published_at and passage.published_at.startswith(claim.time_scope):
+        return 1.0
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", claim.time_scope):
+        return 0.0
+    return 0.0
 
-    prompt_lines = []
-    for passage in passages[:PASSAGE_TOP_K]:
-        prompt_lines.append(
-            f"[{passage.passage_id}] {passage.title} | {passage.url}\n"
-            f"Section: {passage.section}\n"
-            f"Text: {passage.text}"
+
+def _local_news_host_bonus(host: str) -> float:
+    lowered = (host or "").casefold()
+    if lowered.endswith(".kz") or ".kz" in lowered:
+        return 1.0
+    if any(marker in lowered for marker in ("astana", "kaz", "tengri", "zakon", "inform", "kt.kz")):
+        return 0.7
+    return 0.0
+
+
+def cheap_passage_score(claim: Claim, passage: Passage) -> float:
+    overlap = _semantic_overlap(claim.claim_text, passage.text)
+    entity_overlap = _entity_overlap(claim.entity_set, passage.text)
+    dimension_overlap = _dimension_coverage_score(claim, passage.text)
+    claim_numbers = set(re.findall(r"\d+(?:\.\d+)?", claim.claim_text))
+    passage_numbers = set(re.findall(r"\d+(?:\.\d+)?", passage.text))
+    number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
+
+    if _is_news_digest_claim(claim):
+        region = _news_digest_region_hint_from_claim(claim)
+        haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
+        region_match = _entity_overlap([region], haystack) if region else entity_overlap
+        time_match = _news_digest_time_match(claim, passage)
+        local_bonus = _local_news_host_bonus(passage.host)
+        event_terms = 1.0 if any(
+            term in haystack.casefold()
+            for term in (
+                "\u043d\u043e\u0432\u043e\u0441\u0442",
+                "\u0441\u043e\u0431\u044b\u0442",
+                "\u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432",
+                "news",
+                "events",
+                "breaking",
+            )
+        ) else 0.0
+        score = (
+            0.14 * overlap
+            + 0.34 * region_match
+            + 0.24 * time_match
+            + 0.12 * local_bonus
+            + 0.08 * event_terms
+            + 0.08 * passage.source_score
         )
-    prompt = (
-        "You are a claim verifier. Decide whether the evidence supports, contradicts, or is insufficient.\n"
-        "Return one JSON object with keys:\n"
-        "- verdict: supported | contradicted | insufficient_evidence\n"
-        "- confidence: number between 0 and 1\n"
-        "- supporting_passages: array of {passage_id, quote}\n"
-        "- contradicting_passages: array of {passage_id, quote}\n"
-        "- missing_dimensions: array from [time, entity, number, location, source, coverage]\n"
-        "- rationale: short string\n"
-        "Rules:\n"
-        "- Use only explicit evidence.\n"
-        "- If entity, time, number, or location scope is missing, prefer insufficient_evidence.\n"
-        "- Quotes must be short excerpts copied from the passage.\n\n"
-        f"Claim: {claim.claim_text}\n\n"
-        + "\n\n".join(prompt_lines)
+        if region and region_match < 0.25:
+            score -= 0.30
+        if claim.time_scope and time_match <= 0.0:
+            score -= 0.20
+        return _clamp(score)
+
+    return _clamp(
+        0.35 * overlap
+        + 0.25 * entity_overlap
+        + 0.20 * dimension_overlap
+        + 0.10 * number_overlap
+        + 0.10 * passage.source_score
     )
-    try:
-        from llm import MODEL, _extra
 
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=500,
-            extra_body=_extra(),
+
+def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
+    lowered = passage.text.casefold()
+    if _is_news_digest_claim(claim):
+        region = _news_digest_region_hint_from_claim(claim)
+        haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
+        region_match = _entity_overlap([region], haystack) if region else _entity_overlap(claim.entity_set, haystack)
+        time_match = _news_digest_time_match(claim, passage)
+        local_bonus = _local_news_host_bonus(passage.host)
+        title_match = 1.0 if region and _entity_overlap([region], passage.title) >= 0.6 else 0.0
+        source_bonus = _verification_source_bonus(
+            claim,
+            host=passage.host,
+            title=passage.title,
+            url=passage.url,
         )
-        parsed = _parse_json_object(response.choices[0].message.content or "")
-        if not isinstance(parsed, dict):
-            return _heuristic_verifier(claim, passages)
-
-        passage_map = {passage.passage_id: passage for passage in passages}
-
-        def build_spans(items: list[dict]) -> list[EvidenceSpan]:
-            spans: list[EvidenceSpan] = []
-            for item in items:
-                passage = passage_map.get(str(item.get("passage_id", "")))
-                if passage is None:
-                    continue
-                quote = _normalized_text(str(item.get("quote", ""))) or passage.text[:220]
-                spans.append(
-                    EvidenceSpan(
-                        passage_id=passage.passage_id,
-                        url=passage.url,
-                        title=passage.title,
-                        section=passage.section,
-                        text=quote,
-                    )
-                )
-            return spans
-
-        verdict = str(parsed.get("verdict", "insufficient_evidence"))
-        if verdict not in {"supported", "contradicted", "insufficient_evidence"}:
-            verdict = "insufficient_evidence"
-        return VerificationResult(
-            verdict=verdict,
-            confidence=_clamp(float(parsed.get("confidence", 0.0))),
-            supporting_spans=build_spans(parsed.get("supporting_passages", [])),
-            contradicting_spans=build_spans(parsed.get("contradicting_passages", [])),
-            missing_dimensions=[
-                _normalized_text(str(item))
-                for item in parsed.get("missing_dimensions", [])
-                if _normalized_text(str(item))
-            ],
-            rationale=_normalized_text(str(parsed.get("rationale", ""))),
+        score = (
+            0.24 * cheap_passage_score(claim, passage)
+            + 0.28 * region_match
+            + 0.18 * time_match
+            + 0.12 * local_bonus
+            + 0.08 * title_match
+            + 0.05 * max(source_bonus, 0.0)
+            + 0.05 * passage.source_score
         )
-    except Exception as exc:
-        log(f"  [dim yellow]⚠ verifier failed: {exc}[/dim yellow]")
-        return _heuristic_verifier(claim, passages)
+        if region and region_match < 0.25:
+            score -= 0.30
+        if claim.time_scope and time_match <= 0.0:
+            score -= 0.20
+        return _clamp(score)
 
+    directness = 0.0
+    answer_type = _answer_type(claim)
+    source_bonus = _verification_source_bonus(
+        claim,
+        host=passage.host,
+        title=passage.title,
+        url=passage.url,
+    )
+
+    if answer_type == "time":
+        if re.search(r"\b(?:released on|release date|announced on|dated)\b", lowered):
+            directness += 0.35
+        if _contains_date_like(passage.text):
+            directness += 0.25
+        if any(
+            cue in f"{passage.title} {passage.url}".casefold()
+            for cue in ("release", "released", "announcement", "downloads/release", "whatsnew")
+        ):
+            directness += 0.15
+        if "release date:" in lowered:
+            directness += 0.15
+    elif answer_type == "person":
+        if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
+            directness += 0.35
+        if re.search(r"(?:[A-ZРђ-РЇРЃ][A-Za-zРђ-РЇР°-СЏРЃС‘.-]+(?:\s+[A-ZРђ-РЇРЃ][A-Za-zРђ-РЇР°-СЏРЃС‘.-]+){1,2})", passage.text):
+            directness += 0.2
+    elif answer_type == "number":
+        if re.search(r"\b\d+(?:\.\d+)?\b", passage.text):
+            directness += 0.35
+    elif answer_type == "location":
+        if re.search(r"\b(?:in|at|from)\s+[A-ZРђ-РЇРЃ]", passage.text):
+            directness += 0.25
+
+    contradiction_signal = 0.15 if re.search(r"\b(?:not|no|never|false|incorrect|debunked|contradict)\b", lowered) else 0.0
+    return _clamp(
+        0.28 * cheap_passage_score(claim, passage)
+        + 0.24 * _dimension_coverage_score(claim, passage.text)
+        + 0.20 * directness
+        + 0.18 * max(source_bonus, 0.0)
+        + 0.10 * passage.source_score
+        + 0.05 * contradiction_signal
+    )
 
 def _select_passages_from_spans(passages: list[Passage], spans: list[EvidenceSpan]) -> list[Passage]:
     wanted = {span.passage_id for span in spans}
@@ -1539,6 +1706,160 @@ def refine_query_variants(
     iteration: int,
     existing_queries: set[str],
 ) -> list[QueryVariant]:
+    candidates: list[tuple[str, str, str, str | None, str | None]] = []
+    base_keywords = _variant_keywords(claim.claim_text, claim.entity_set)
+    missing_primary_support = bool(
+        bundle
+        and verification.verdict == "supported"
+        and claim.entity_set
+        and not bundle.has_primary_source
+    )
+
+    if "time" in verification.missing_dimensions:
+        explicit_time = claim.time_scope or str(datetime.now().year)
+        candidates.append((
+            _normalized_text(f"{claim.claim_text} {explicit_time}"),
+            "refined_time",
+            "Add explicit temporal constraint for verification.",
+            None,
+            explicit_time,
+        ))
+
+    if "entity" in verification.missing_dimensions:
+        aliases = _candidate_aliases(claim, gated_results)
+        for alias in aliases[:2]:
+            candidates.append((
+                _normalized_text(f'"{alias}" {base_keywords}'),
+                "refined_alias",
+                "Add alias discovered from retrieved results.",
+                None,
+                claim.time_scope,
+            ))
+
+    if (
+        "source" in verification.missing_dimensions
+        or missing_primary_support
+        or not any(result.assessment.primary_source_likelihood >= 0.7 for result in gated_results[:5])
+    ):
+        source_host = _preferred_source_host(gated_results)
+        if source_host:
+            candidates.append((
+                _normalized_text(f"{claim.claim_text} site:{source_host}"),
+                "refined_source",
+                "Restrict search to the most promising primary source host.",
+                source_host,
+                claim.time_scope,
+            ))
+            candidates.append((
+                _normalized_text(f'"{base_keywords}" site:{source_host}'),
+                "refined_source_exact",
+                "Force evidence retrieval from a primary-source host with tighter wording.",
+                source_host,
+                claim.time_scope,
+            ))
+
+    if verification.verdict != "supported" or missing_primary_support:
+        candidates.append((
+            f'"{claim.claim_text}"',
+            "refined_exact",
+            "Switch to exact-match wording for narrower evidence retrieval.",
+            None,
+            claim.time_scope,
+        ))
+
+    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < MAX_CLAIM_ITERATIONS:
+        candidates.append((
+            _normalized_text(f"{claim.claim_text} contradiction OR false OR debunked"),
+            "refined_contradiction",
+            "Search specifically for contradiction or correction evidence.",
+            None,
+            claim.time_scope,
+        ))
+
+    variants: list[QueryVariant] = []
+    seen = set(existing_queries)
+    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
+        key = query_text.casefold()
+        if not query_text or key in seen:
+            continue
+        seen.add(key)
+        variants.append(
+            QueryVariant(
+                variant_id=f"{claim.claim_id}-r{iteration}-{idx}",
+                claim_id=claim.claim_id,
+                query_text=query_text,
+                strategy=strategy,
+                rationale=rationale,
+                source_restriction=source_restriction,
+                freshness_hint=freshness_hint,
+            )
+        )
+    return variants
+
+
+def refine_query_variants(
+    claim: Claim,
+    classification: QueryClassification,
+    verification: VerificationResult,
+    gated_results: list[GatedSerpResult],
+    bundle: EvidenceBundle | None,
+    iteration: int,
+    existing_queries: set[str],
+) -> list[QueryVariant]:
+    if classification.intent == "news_digest":
+        region = classification.region_hint or (claim.entity_set[0] if claim.entity_set else claim.claim_text)
+        cyrillic = _is_cyrillic_text(claim.claim_text)
+        time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
+        explicit_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
+        fallback_time = explicit_time
+        local_word = "\u043d\u043e\u0432\u043e\u0441\u0442\u0438" if cyrillic else "news"
+        event_word = "\u0441\u043e\u0431\u044b\u0442\u0438\u044f" if cyrillic else "events"
+
+        candidates: list[tuple[str, str, str, str | None, str | None]] = [
+            (
+                _normalized_text(f"{region} {local_word} {explicit_time} site:.kz"),
+                "refined_local_news",
+                "Tighten the search around local news coverage for the exact place and date.",
+                "site:.kz",
+                claim.time_scope,
+            ),
+            (
+                _normalized_text(f'"{region}" {event_word} {fallback_time} site:.kz'),
+                "refined_local_events",
+                "Bias toward local event recaps for the requested place and date.",
+                "site:.kz",
+                claim.time_scope,
+            ),
+        ]
+        if "source" in verification.missing_dimensions or verification.verdict != "supported":
+            candidates.append((
+                _normalized_text(f'"{region}" {fallback_time} site:.kz'),
+                "refined_local_exact",
+                "Force retrieval from local Kazakhstan domains for a precise place/date match.",
+                "site:.kz",
+                claim.time_scope,
+            ))
+
+        variants: list[QueryVariant] = []
+        seen = set(existing_queries)
+        for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
+            key = query_text.casefold()
+            if not query_text or key in seen:
+                continue
+            seen.add(key)
+            variants.append(
+                QueryVariant(
+                    variant_id=f"{claim.claim_id}-r{iteration}-{idx}",
+                    claim_id=claim.claim_id,
+                    query_text=query_text,
+                    strategy=strategy,
+                    rationale=rationale,
+                    source_restriction=source_restriction,
+                    freshness_hint=freshness_hint,
+                )
+            )
+        return variants
+
     candidates: list[tuple[str, str, str, str | None, str | None]] = []
     base_keywords = _variant_keywords(claim.claim_text, claim.entity_set)
     missing_primary_support = bool(
@@ -1760,6 +2081,306 @@ def compose_answer(report: AgentRunResult) -> str:
     return "\n".join(lines)
 
 
+def _digest_sentence(passage: Passage) -> str:
+    sentence = _best_sentence_for_claim(
+        Claim(
+            claim_id="digest",
+            claim_text=passage.title,
+            priority=1,
+            needs_freshness=False,
+        ),
+        passage,
+    )
+    title = _normalized_text(passage.title)
+    if title and title.casefold() not in sentence.casefold():
+        combined = f"{title}. {sentence}"
+    else:
+        combined = sentence
+    if len(combined) > 260:
+        combined = combined[:257].rstrip() + "..."
+    return combined
+
+
+def _compose_news_digest_answer(
+    report: AgentRunResult,
+    url_to_index: dict[str, int],
+    indexed_sources: list[tuple[int, str, str]],
+) -> str | None:
+    digest_lines: list[str] = []
+    for run in sorted(report.claims, key=lambda item: item.claim.priority):
+        bundle = run.evidence_bundle
+        if bundle is None or bundle.verification is None or bundle.verification.verdict != "supported":
+            continue
+        seen_urls: set[str] = set()
+        selected: list[Passage] = []
+        for passage in bundle.supporting_passages or bundle.considered_passages:
+            if passage.url in seen_urls:
+                continue
+            seen_urls.add(passage.url)
+            selected.append(passage)
+            if len(selected) >= 3:
+                break
+        for passage in selected:
+            citations = _format_citations(url_to_index, [passage])
+            digest_lines.append(f"- {_digest_sentence(passage)} {citations}".rstrip())
+
+    if not digest_lines:
+        return None
+
+    lines = [
+        "\u041e\u0442\u0432\u0435\u0442",
+        "- \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f \u043f\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u043c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430\u043c:",
+    ]
+    lines.extend(digest_lines[:4])
+    if indexed_sources:
+        lines.append("")
+        lines.append("РСЃС‚РѕС‡РЅРёРєРё")
+        for idx, title, url in indexed_sources:
+            lines.append(f"[{idx}] {title} вЂ” {url}")
+    return "\n".join(lines)
+
+
+def compose_answer(report: AgentRunResult) -> str:
+    cited_passages: list[Passage] = []
+    for run in report.claims:
+        bundle = run.evidence_bundle
+        if bundle is None or bundle.verification is None:
+            continue
+        if bundle.verification.verdict == "supported":
+            cited_passages.extend((bundle.supporting_passages[:3] or bundle.considered_passages[:3]))
+        elif bundle.verification.verdict == "contradicted":
+            cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
+
+    url_to_index: dict[str, int] = {}
+    indexed_sources: list[tuple[int, str, str]] = []
+    for passage in cited_passages:
+        if passage.url in url_to_index:
+            continue
+        idx = len(url_to_index) + 1
+        url_to_index[passage.url] = idx
+        indexed_sources.append((idx, passage.title, passage.url))
+
+    if report.classification.intent == "news_digest":
+        digest_answer = _compose_news_digest_answer(report, url_to_index, indexed_sources)
+        if digest_answer:
+            return digest_answer
+
+    supported_lines: list[str] = []
+    caveat_lines: list[str] = []
+    gap_lines: list[str] = []
+
+    for run in sorted(report.claims, key=lambda item: item.claim.priority):
+        bundle = run.evidence_bundle
+        if bundle is None or bundle.verification is None:
+            continue
+        verification = bundle.verification
+        if verification.verdict == "supported":
+            passages = bundle.supporting_passages[:2] or bundle.considered_passages[:1]
+            if not passages:
+                continue
+            sentence = _best_span_text(verification, passages, run.claim)
+            if not sentence:
+                continue
+            citations = _format_citations(url_to_index, passages)
+            qualifier = ""
+            if bundle.independent_source_count < 2:
+                qualifier = " (supported by fewer than two independent sources)"
+            elif not bundle.has_primary_source:
+                qualifier = " (without a detected primary source)"
+            supported_lines.append(f"- {sentence}{qualifier} {citations}".rstrip())
+        elif verification.verdict == "contradicted":
+            passages = bundle.contradicting_passages[:2] or bundle.considered_passages[:1]
+            if not passages:
+                continue
+            sentence = _best_span_text(verification, passages, run.claim, contradicted=True)
+            if not sentence:
+                continue
+            citations = _format_citations(url_to_index, passages)
+            caveat_lines.append(f"- {run.claim.claim_text}: contradicted. {sentence} {citations}".rstrip())
+        else:
+            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else "coverage"
+            gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
+
+    lines: list[str] = []
+    lines.append("РћС‚РІРµС‚")
+    if supported_lines:
+        lines.extend(supported_lines)
+    else:
+        lines.append("- РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅС‹С… claim-level РґРѕРєР°Р·Р°С‚РµР»СЊСЃС‚РІ РґР»СЏ РїСЂСЏРјРѕРіРѕ РѕС‚РІРµС‚Р°.")
+
+    if caveat_lines:
+        lines.append("")
+        lines.append("РћРіРѕРІРѕСЂРєРё")
+        lines.extend(caveat_lines)
+
+    if gap_lines:
+        lines.append("")
+        lines.append("РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С…")
+        lines.extend(gap_lines)
+
+    if indexed_sources:
+        lines.append("")
+        lines.append("РСЃС‚РѕС‡РЅРёРєРё")
+        for idx, title, url in indexed_sources:
+            lines.append(f"[{idx}] {title} вЂ” {url}")
+
+    return "\n".join(lines)
+
+
+def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
+    bundle = run.evidence_bundle
+    if bundle is None:
+        return []
+
+    region = _news_digest_region_hint_from_claim(run.claim)
+    scored: list[tuple[float, Passage]] = []
+    for passage in bundle.considered_passages or bundle.supporting_passages:
+        lead = f"{passage.title} {passage.text[:220]}"
+        region_match = _entity_overlap([region], lead) if region else 0.0
+        time_match = _news_digest_time_match(run.claim, passage)
+        local_bonus = _local_news_host_bonus(passage.host)
+        if region and region_match < 0.25:
+            continue
+        if run.claim.time_scope and time_match <= 0.0:
+            continue
+        score = (
+            0.42 * region_match
+            + 0.25 * time_match
+            + 0.15 * local_bonus
+            + 0.18 * max(passage.utility_score, passage.source_score)
+        )
+        scored.append((score, passage))
+
+    if not scored:
+        for passage in bundle.supporting_passages:
+            scored.append((max(passage.utility_score, passage.source_score), passage))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected: list[Passage] = []
+    seen_urls: set[str] = set()
+    for _, passage in scored:
+        if passage.url in seen_urls:
+            continue
+        seen_urls.add(passage.url)
+        selected.append(passage)
+        if len(selected) >= 4:
+            break
+    return selected
+
+
+def compose_answer(report: AgentRunResult) -> str:
+    if report.classification.intent == "news_digest":
+        selected_passages: list[Passage] = []
+        for run in sorted(report.claims, key=lambda item: item.claim.priority):
+            bundle = run.evidence_bundle
+            if bundle is None or bundle.verification is None or bundle.verification.verdict != "supported":
+                continue
+            selected_passages.extend(_aligned_news_digest_passages(run))
+
+        url_to_index: dict[str, int] = {}
+        indexed_sources: list[tuple[int, str, str]] = []
+        digest_lines: list[str] = []
+        for passage in selected_passages:
+            if passage.url not in url_to_index:
+                idx = len(url_to_index) + 1
+                url_to_index[passage.url] = idx
+                indexed_sources.append((idx, passage.title, passage.url))
+            digest_lines.append(f"- {_digest_sentence(passage)} {_format_citations(url_to_index, [passage])}".rstrip())
+
+        if digest_lines:
+            lines = [
+                "\u041e\u0442\u0432\u0435\u0442",
+                "- \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f \u043f\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u043c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430\u043c:",
+            ]
+            lines.extend(digest_lines[:4])
+            if indexed_sources:
+                lines.append("")
+                lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438")
+                for idx, title, url in indexed_sources:
+                    lines.append(f"[{idx}] {title} - {url}")
+            return "\n".join(lines)
+
+    cited_passages: list[Passage] = []
+    for run in report.claims:
+        bundle = run.evidence_bundle
+        if bundle is None or bundle.verification is None:
+            continue
+        if bundle.verification.verdict == "supported":
+            cited_passages.extend((bundle.supporting_passages[:3] or bundle.considered_passages[:3]))
+        elif bundle.verification.verdict == "contradicted":
+            cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
+
+    url_to_index: dict[str, int] = {}
+    indexed_sources: list[tuple[int, str, str]] = []
+    for passage in cited_passages:
+        if passage.url in url_to_index:
+            continue
+        idx = len(url_to_index) + 1
+        url_to_index[passage.url] = idx
+        indexed_sources.append((idx, passage.title, passage.url))
+
+    supported_lines: list[str] = []
+    caveat_lines: list[str] = []
+    gap_lines: list[str] = []
+
+    for run in sorted(report.claims, key=lambda item: item.claim.priority):
+        bundle = run.evidence_bundle
+        if bundle is None or bundle.verification is None:
+            continue
+        verification = bundle.verification
+        if verification.verdict == "supported":
+            passages = bundle.supporting_passages[:2] or bundle.considered_passages[:1]
+            if not passages:
+                continue
+            sentence = _best_span_text(verification, passages, run.claim)
+            if not sentence:
+                continue
+            citations = _format_citations(url_to_index, passages)
+            qualifier = ""
+            if bundle.independent_source_count < 2:
+                qualifier = " (supported by fewer than two independent sources)"
+            elif not bundle.has_primary_source:
+                qualifier = " (without a detected primary source)"
+            supported_lines.append(f"- {sentence}{qualifier} {citations}".rstrip())
+        elif verification.verdict == "contradicted":
+            passages = bundle.contradicting_passages[:2] or bundle.considered_passages[:1]
+            if not passages:
+                continue
+            sentence = _best_span_text(verification, passages, run.claim, contradicted=True)
+            if not sentence:
+                continue
+            citations = _format_citations(url_to_index, passages)
+            caveat_lines.append(f"- {run.claim.claim_text}: contradicted. {sentence} {citations}".rstrip())
+        else:
+            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else "coverage"
+            gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
+
+    lines: list[str] = []
+    lines.append("\u041e\u0442\u0432\u0435\u0442")
+    if supported_lines:
+        lines.extend(supported_lines)
+    else:
+        lines.append("- \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0445 claim-level \u0434\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432 \u0434\u043b\u044f \u043f\u0440\u044f\u043c\u043e\u0433\u043e \u043e\u0442\u0432\u0435\u0442\u0430.")
+
+    if caveat_lines:
+        lines.append("")
+        lines.append("\u041e\u0433\u043e\u0432\u043e\u0440\u043a\u0438")
+        lines.extend(caveat_lines)
+
+    if gap_lines:
+        lines.append("")
+        lines.append("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u0434\u0430\u043d\u043d\u044b\u0445")
+        lines.extend(gap_lines)
+
+    if indexed_sources:
+        lines.append("")
+        lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438")
+        for idx, title, url in indexed_sources:
+            lines.append(f"[{idx}] {title} - {url}")
+
+    return "\n".join(lines)
+
+
 def _estimate_search_cost(claim_runs: list[ClaimRun]) -> float:
     shallow = 0
     deep = 0
@@ -1787,192 +2408,15 @@ def _estimate_search_cost(claim_runs: list[ClaimRun]) -> float:
 def run_search_agent(
     query: str,
     profile,
-    client: OpenAI | None = None,
+    client=None,
     receipts_dir: str | None = None,
     log=None,
 ) -> AgentRunResult:
-    log = log or (lambda msg: None)
-    started_at = datetime.now(UTC)
+    from search_agent import build_search_agent_use_case
 
-    classification = classify_query(query, client=client, log=log)
-    claims = decompose_claims(classification, client=client, log=log)
-    log(f"\n[bold]Agent Search[/bold] [dim]{len(claims)} claim(s)[/dim]")
-
-    claim_runs: list[ClaimRun] = []
-    audit = AuditTrail(
-        run_id=_build_run_id(query, started_at),
-        profile_name=getattr(profile, "name", None),
-        started_at=started_at.isoformat(),
+    return build_search_agent_use_case().run(
+        query,
+        profile,
+        receipts_dir=receipts_dir,
+        log=log,
     )
-
-    for claim in claims:
-        log(f"\n[bold]  Claim[/bold] [italic]{claim.claim_text}[/italic]")
-        all_variants: list[QueryVariant] = []
-        snapshots: list[SearchSnapshot] = []
-        gated_results: list[GatedSerpResult] = []
-        fetch_plans: list[FetchPlan] = []
-        documents: list[FetchedDocument] = []
-        final_passages: list[Passage] = []
-        routing_decision = RoutingDecision(
-            mode="iterative_loop",
-            certainty=0.0,
-            consistency=0.0,
-            evidence_sufficiency=0.0,
-            rationale="Not evaluated yet.",
-        )
-        bundle: EvidenceBundle | None = None
-
-        existing_queries: set[str] = set()
-        seen_urls: set[str] = set()
-        seen_documents: set[tuple[str, str, str]] = set()
-        next_variants = build_query_variants(claim, classification)
-        iterations_used = 0
-
-        for iteration in range(1, MAX_CLAIM_ITERATIONS + 1):
-            if not next_variants:
-                break
-            iterations_used = iteration
-
-            log(f"  [bold]Iteration {iteration}/{MAX_CLAIM_ITERATIONS}[/bold]")
-            for variant in next_variants:
-                log(f"  [dim]↳ {variant.strategy}: {variant.query_text}[/dim]")
-                existing_queries.add(variant.query_text.casefold())
-            all_variants.extend(next_variants)
-
-            new_snapshots: list[SearchSnapshot] = []
-            for variant in next_variants:
-                variant_snapshots = search_searxng_with_fallback(variant.query_text, profile, log=log)
-                new_snapshots.extend(_retag_snapshot(snapshot, variant) for snapshot in variant_snapshots)
-            snapshots.extend(new_snapshots)
-
-            gated_limit = min(SERP_GATE_MAX_URLS, max(SERP_GATE_MIN_URLS, profile.max_results))
-            gated_results = gate_serp_results(claim, snapshots, gated_limit)
-            routing_decision = route_claim_retrieval(claim, gated_results)
-            if bundle and bundle.verification and bundle.verification.verdict != "supported":
-                if routing_decision.mode == "short_path":
-                    routing_decision = replace(
-                        routing_decision,
-                        mode="targeted_retrieval",
-                        rationale=routing_decision.rationale + " | escalated after weak verification",
-                    )
-                elif iteration > 1:
-                    routing_decision = replace(
-                        routing_decision,
-                        mode="iterative_loop",
-                        rationale=routing_decision.rationale + " | iterative escalation",
-                    )
-
-            log(
-                f"  [dim]route={routing_decision.mode} · "
-                f"certainty={routing_decision.certainty:.2f} · "
-                f"consistency={routing_decision.consistency:.2f} · "
-                f"sufficiency={routing_decision.evidence_sufficiency:.2f}[/dim]"
-            )
-            log(f"  [dim]SERP gate kept {len(gated_results)} URLs[/dim]")
-
-            new_fetch_plans, new_documents = fetch_claim_documents(
-                claim,
-                gated_results,
-                profile,
-                routing_decision,
-                seen_urls=seen_urls,
-                log=log,
-            )
-            fetch_plans.extend(new_fetch_plans)
-            for document in new_documents:
-                key = (document.url, document.fetch_depth, document.content_hash)
-                if key in seen_documents:
-                    continue
-                seen_documents.add(key)
-                seen_urls.add(document.url)
-                documents.append(document)
-
-            passage_documents = _documents_for_passage_extraction(documents)
-            passages: list[Passage] = []
-            for document in passage_documents:
-                passages.extend(_split_into_passages(document))
-
-            cheap_filtered = cheap_passage_filter(claim, passages, CHEAP_PASSAGE_LIMIT)
-            final_passages = utility_rerank_passages(claim, cheap_filtered, PASSAGE_TOP_K)
-            log(
-                f"  [dim]passages: {len(passages)} total · "
-                f"{len(cheap_filtered)} after cheap filter · "
-                f"{len(final_passages)} after utility rerank[/dim]"
-            )
-
-            verification = verify_claim(claim, final_passages, client=client, log=log)
-            bundle = build_evidence_bundle(claim, final_passages, verification, gated_results)
-            log(
-                f"  [dim]verdict={verification.verdict} · "
-                f"confidence={verification.confidence:.2f} · "
-                f"independent_sources={bundle.independent_source_count}[/dim]"
-            )
-
-            if should_stop_claim_loop(claim, bundle, iteration):
-                break
-
-            next_variants = refine_query_variants(
-                claim,
-                classification,
-                verification,
-                gated_results,
-                bundle,
-                iteration + 1,
-                existing_queries,
-            )
-        else:
-            next_variants = []
-
-        claim_runs.append(
-            ClaimRun(
-                claim=claim,
-                query_variants=all_variants,
-                search_snapshots=snapshots,
-                gated_results=gated_results,
-                fetch_plans=fetch_plans,
-                fetched_documents=documents,
-                passages=final_passages,
-                evidence_bundle=bundle,
-                routing_decision=routing_decision,
-            )
-        )
-
-        audit.query_variants.extend(all_variants)
-        audit.serp_snapshots.extend(snapshots)
-        audit.selected_urls.extend([result.serp.url for result in gated_results])
-        audit.crawl_events.extend(
-            {
-                "claim_id": claim.claim_id,
-                "url": document.url,
-                "fetched_at": document.extracted_at,
-                "content_hash": document.content_hash,
-                "fetch_depth": document.fetch_depth,
-            }
-            for document in documents
-        )
-        audit.passage_ids.extend([passage.passage_id for passage in final_passages])
-        audit.claim_to_passages[claim.claim_id] = [passage.passage_id for passage in final_passages]
-        audit.claim_iterations[claim.claim_id] = iterations_used
-        if bundle and bundle.verification:
-            audit.verification_results[claim.claim_id] = bundle.verification
-            audit.final_verdicts[claim.claim_id] = bundle.verification.verdict
-
-    report = AgentRunResult(
-        user_query=query,
-        classification=classification,
-        claims=claim_runs,
-        answer="",
-        audit_trail=audit,
-    )
-    report.answer = compose_answer(report)
-    completed_at = datetime.now(UTC)
-    report.audit_trail.completed_at = completed_at.isoformat()
-    report.audit_trail.latency_ms = int((completed_at - started_at).total_seconds() * 1000)
-    report.audit_trail.estimated_search_cost = _estimate_search_cost(claim_runs)
-
-    resolved_receipts_dir = receipts_dir or os.getenv("AGENT_RECEIPTS_DIR", "").strip() or None
-    if resolved_receipts_dir:
-        from receipts import write_receipt
-
-        report.audit_trail.receipt_path = write_receipt(report, output_dir=resolved_receipts_dir)
-    return report

@@ -1,9 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-from agent_types import SearchSnapshot, SerpResult
-from profiles import get_profile
-from search import search_searxng_with_fallback
+from search_agent.config.profiles import get_profile
+from search_agent.domain.models import SearchSnapshot, SerpResult
+from search_agent.infrastructure.searxng import search_searxng_with_fallback
 
 
 class SearchFallbackTests(unittest.TestCase):
@@ -41,7 +41,10 @@ class SearchFallbackTests(unittest.TestCase):
                 unresponsive_engines=[],
             )
 
-        with patch("search.search_searxng", side_effect=fake_search), patch("search.time.sleep", return_value=None):
+        with patch("search_agent.infrastructure.searxng.search_searxng", side_effect=fake_search), patch(
+            "search_agent.infrastructure.searxng.time.sleep",
+            return_value=None,
+        ):
             snapshots = search_searxng_with_fallback("Who is the CEO of Microsoft?", get_profile("web"))
 
         self.assertGreaterEqual(len(snapshots), 2)

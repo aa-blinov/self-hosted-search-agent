@@ -1,12 +1,8 @@
 """
-SearXNG search helpers.
+SearXNG search helpers for the claim-level agent runtime.
 
-Two layers are exposed:
-  1. `search_searxng()` returns a structured SERP snapshot.
-  2. `search_web()` keeps the legacy flow (score filter -> rerank -> fetch).
-
-The new agent pipeline uses `search_searxng()` directly so source gating and
-claim-level verification can happen before deep crawling.
+The module exposes raw SERP snapshots plus backend fallback handling. Higher
+level retrieval, crawling, and verification are orchestrated elsewhere.
 """
 
 from __future__ import annotations
@@ -20,12 +16,10 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
-from agent_types import SearchSnapshot, SerpResult
+from search_agent.domain.models import SearchSnapshot, SerpResult
 
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8888")
 SEARCH_BACKEND_FALLBACK_DELAY_SEC = float(os.getenv("SEARCH_BACKEND_FALLBACK_DELAY_SEC", "1.0"))
-
-SearchResult = dict  # {title: str, url: str, snippet: str, score: float}
 
 _TRACKING_QUERY_KEYS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
@@ -106,7 +100,7 @@ def _simplify_fallback_query(query: str) -> str:
 
 
 def _fallback_profiles(profile) -> list:
-    from profiles import get_profile
+    from search_agent.config.profiles import get_profile
 
     chain: list[str] = []
     if getattr(profile, "name", "") != "reference":
@@ -246,79 +240,6 @@ def search_searxng_with_fallback(query: str, profile, log=None) -> list[SearchSn
             break
 
     return attempts
-
-
-def _fetch_with_budget(candidates, fetch_top_n, log):
-    """
-    Fetch candidates with budget. Budget is consumed only on success.
-    """
-    from extractor import fetch_and_extract
-
-    results = []
-    budget = fetch_top_n
-
-    for result in candidates:
-        url = result["url"]
-        snippet = result["snippet"]
-
-        if budget > 0 and url:
-            full_text = fetch_and_extract(url, log=log)
-            if full_text and len(full_text) > len(snippet):
-                snippet = full_text
-
-            if snippet:
-                budget -= 1
-            else:
-                log(f"    [dim]· no content, skipping (budget={budget})[/dim]")
-                continue
-
-        if snippet:
-            results.append({"title": result["title"], "url": url, "snippet": snippet})
-
-    return results
-
-
-def search_web(
-    query: str,
-    profile,
-    client=None,
-    log=None,
-) -> tuple[list[SearchResult], list[str]]:
-    """
-    Legacy flow: SearXNG -> score filter -> snippet rerank -> fetch.
-
-    Kept for compatibility while the new agentic runtime uses `search_searxng()`.
-    """
-    from reranker import filter_by_score, llm_rerank
-
-    log = log or (lambda msg: None)
-    snapshot = search_searxng(query, profile, log=log)
-    suggestions = snapshot.suggestions
-
-    candidates: list[SearchResult] = []
-    for result in snapshot.results:
-        candidates.append({
-            "title": result.title,
-            "url": result.url,
-            "snippet": result.snippet,
-            "score": result.score,
-        })
-
-    candidates = filter_by_score(candidates, log=log)
-    if client and len(candidates) > 1:
-        candidates = llm_rerank(query, candidates, client, log=log)
-
-    if profile.fetch_top_n > 0:
-        results = _fetch_with_budget(candidates, profile.fetch_top_n, log)
-    else:
-        results = [
-            {"title": row["title"], "url": row["url"], "snippet": row["snippet"]}
-            for row in candidates
-            if row.get("snippet")
-        ]
-
-    return results, suggestions
-
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 ARXIV_NS = "http://www.w3.org/2005/Atom"

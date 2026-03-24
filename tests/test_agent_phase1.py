@@ -1,7 +1,13 @@
 import unittest
 
-from agent import build_evidence_bundle, build_query_variants, compose_answer, gate_serp_results, should_stop_claim_loop
-from agent_types import (
+from search_agent.application.agent_steps import (
+    build_evidence_bundle,
+    build_query_variants,
+    compose_answer,
+    gate_serp_results,
+    should_stop_claim_loop,
+)
+from search_agent.domain.models import (
     AgentRunResult,
     Claim,
     ClaimRun,
@@ -286,6 +292,189 @@ class AgentPhase1Tests(unittest.TestCase):
         bundle.has_primary_source = False
 
         self.assertFalse(should_stop_claim_loop(claim, bundle, iteration=1))
+
+    def test_news_digest_query_variants_bias_local_news_and_date(self):
+        classification = QueryClassification(
+            query="что сегодня было в Астане",
+            normalized_query="что 2026-03-25 было в Астане",
+            intent="news_digest",
+            complexity="single_hop",
+            needs_freshness=True,
+            time_scope="2026-03-25",
+            region_hint="Астане",
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="что 2026-03-25 было в Астане",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["Астане"],
+            time_scope="2026-03-25",
+        )
+
+        variants = build_query_variants(claim, classification)
+
+        self.assertGreaterEqual(len(variants), 4)
+        self.assertTrue(all(variant.strategy.startswith("news_digest_") for variant in variants))
+        self.assertTrue(any("site:.kz" in variant.query_text for variant in variants))
+        self.assertTrue(any("2026-03-25" in variant.query_text for variant in variants))
+        self.assertTrue(
+            any("\u043d\u043e\u0432\u043e\u0441\u0442\u0438" in variant.query_text or "\u0441\u043e\u0431\u044b\u0442\u0438\u044f" in variant.query_text for variant in variants)
+        )
+
+    def test_compose_answer_formats_news_digest_from_supported_passages(self):
+        first = Passage(
+            passage_id="p1",
+            url="https://local.example/traffic",
+            canonical_url="https://local.example/traffic",
+            host="local.example",
+            title="Astana traffic restrictions",
+            section="City",
+            published_at="2026-03-25T10:00:00+05:00",
+            author=None,
+            extracted_at="2026-03-25T11:00:00+05:00",
+            chunk_id="p1",
+            text="Authorities reported temporary traffic restrictions in central Astana on March 25, 2026.",
+            source_score=0.8,
+            utility_score=0.7,
+        )
+        second = Passage(
+            passage_id="p2",
+            url="https://city.example/weather",
+            canonical_url="https://city.example/weather",
+            host="city.example",
+            title="Astana weather alert",
+            section="Weather",
+            published_at="2026-03-25T08:00:00+05:00",
+            author=None,
+            extracted_at="2026-03-25T11:00:00+05:00",
+            chunk_id="p2",
+            text="Forecasters issued a wind warning for Astana for March 25, 2026.",
+            source_score=0.75,
+            utility_score=0.68,
+        )
+        bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="что 2026-03-25 было в Астане",
+            supporting_passages=[first, second],
+            considered_passages=[first, second],
+            independent_source_count=2,
+            has_primary_source=False,
+            freshness_ok=True,
+            verification=VerificationResult(verdict="supported", confidence=0.55),
+        )
+        report = AgentRunResult(
+            user_query="что сегодня было в Астане",
+            classification=QueryClassification(
+                query="что сегодня было в Астане",
+                normalized_query="что 2026-03-25 было в Астане",
+                intent="news_digest",
+                complexity="single_hop",
+                needs_freshness=True,
+                time_scope="2026-03-25",
+                region_hint="Астане",
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="что 2026-03-25 было в Астане",
+                        priority=1,
+                        needs_freshness=True,
+                        entity_set=["Астане"],
+                        time_scope="2026-03-25",
+                    ),
+                    evidence_bundle=bundle,
+                )
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("Astana traffic restrictions", answer)
+        self.assertIn("Astana weather alert", answer)
+        self.assertIn("[1]", answer)
+        self.assertIn("[2]", answer)
+
+    def test_answer_composer_only_uses_supported_claims_as_answer(self):
+        supported_passage = Passage(
+            passage_id="p1",
+            url="https://example.com/openai",
+            canonical_url="https://example.com/openai",
+            host="example.com",
+            title="OpenAI announcement",
+            section="Intro",
+            published_at="2026-03-20T00:00:00+00:00",
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p1",
+            text="OpenAI announced GPT-4.1 in March 2026 with updated API features.",
+            source_score=0.9,
+            utility_score=0.8,
+        )
+        supported_bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="OpenAI announced GPT-4.1 in March 2026.",
+            supporting_passages=[supported_passage],
+            considered_passages=[supported_passage],
+            independent_source_count=1,
+            has_primary_source=False,
+            freshness_ok=True,
+            verification=VerificationResult(verdict="supported", confidence=0.8),
+        )
+        unsupported_bundle = EvidenceBundle(
+            claim_id="claim-2",
+            claim_text="The Moon is made of cheese.",
+            considered_passages=[],
+            independent_source_count=0,
+            has_primary_source=False,
+            freshness_ok=False,
+            verification=VerificationResult(
+                verdict="insufficient_evidence",
+                confidence=0.1,
+                missing_dimensions=["coverage"],
+            ),
+        )
+        report = AgentRunResult(
+            user_query="Tell me about OpenAI and whether the Moon is made of cheese.",
+            classification=QueryClassification(
+                query="Tell me about OpenAI and whether the Moon is made of cheese.",
+                normalized_query="Tell me about OpenAI and whether the Moon is made of cheese.",
+                intent="factual",
+                complexity="multi_hop",
+                needs_freshness=False,
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="OpenAI announced GPT-4.1 in March 2026.",
+                        priority=1,
+                        needs_freshness=False,
+                    ),
+                    evidence_bundle=supported_bundle,
+                ),
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-2",
+                        claim_text="The Moon is made of cheese.",
+                        priority=2,
+                        needs_freshness=False,
+                    ),
+                    evidence_bundle=unsupported_bundle,
+                ),
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("OpenAI announced GPT-4.1 in March 2026", answer)
+        self.assertIn("[1]", answer)
+        self.assertIn("The Moon is made of cheese.: insufficient evidence", answer)
+        self.assertIn("OpenAI announcement", answer)
+        self.assertIn("https://example.com/openai", answer)
 
 
 if __name__ == "__main__":

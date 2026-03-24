@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent_types import AgentRunResult
+from search_agent.domain.models import AgentRunResult
 
 
 DEFAULT_RECEIPTS_DIR = "receipts"

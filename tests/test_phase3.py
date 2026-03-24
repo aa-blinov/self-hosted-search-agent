@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_types import (
+from search_agent.domain.models import (
     AgentRunResult,
     AuditTrail,
     Claim,
@@ -13,8 +13,8 @@ from agent_types import (
     QueryClassification,
     VerificationResult,
 )
-from evaluation import EvaluationCase, ExpectedClaim, load_evaluation_cases, score_reports
-from receipts import build_receipt_payload, write_receipt
+from search_agent.evaluation import EvaluationCase, ExpectedClaim, load_evaluation_cases, score_reports
+from search_agent.infrastructure.receipts import build_receipt_payload, write_receipt
 
 
 def _make_supported_report() -> AgentRunResult:
