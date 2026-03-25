@@ -28,7 +28,7 @@ RAG_ANALYSIS_PROMPT = """\
 You are a research analyst reviewing papers on RAG and hallucination reduction.
 For each paper abstract below, describe in 2-3 sentences:
 1. The core technique proposed.
-2. Whether it could improve a search assistant pipeline (SearXNG -> LLM).
+2. Whether it could improve a search assistant pipeline (Brave Search -> LLM).
 Use only the provided abstracts.
 """
 

@@ -157,7 +157,7 @@ class PydanticAIQueryIntelligence:
                 )
             return claims or self._fallback_claims(classification)
         except Exception as exc:
-            log(f"  [dim yellow]⚠ claim decomposition failed: {exc}[/dim yellow]")
+            log(f"  [dim yellow]warn claim decomposition failed: {exc}[/dim yellow]")
             return self._fallback_claims(classification)
 
     def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
@@ -224,14 +224,14 @@ class PydanticAIQueryIntelligence:
                 rationale=normalized_text(output.rationale),
             )
         except Exception as exc:
-            log(f"  [dim yellow]⚠ verifier failed: {exc}[/dim yellow]")
+            log(f"  [dim yellow]warn verifier failed: {exc}[/dim yellow]")
             return heuristic_verifier(claim, passages)
 
     def _normalize_time_references(self, query: str, log=None) -> str:
         log = log or (lambda msg: None)
         deterministic = normalize_relative_time_references(query)
         if deterministic != query:
-            log(f"  [dim]в†і normalized query: [italic]{deterministic}[/italic][/dim]")
+            log(f"  [dim]-> normalized query: [italic]{deterministic}[/italic][/dim]")
             return deterministic
 
         if not self._enabled or not needs_freshness(query):
@@ -250,10 +250,10 @@ class PydanticAIQueryIntelligence:
                 )
             normalized = normalized_text(result.output.normalized_query)
             if normalized and normalized != query:
-                log(f"  [dim]↳ normalized query: [italic]{normalized}[/italic][/dim]")
+                log(f"  [dim]-> normalized query: [italic]{normalized}[/italic][/dim]")
             return normalized or query
         except Exception as exc:
-            log(f"  [dim yellow]⚠ time normalization failed: {exc}[/dim yellow]")
+            log(f"  [dim yellow]warn time normalization failed: {exc}[/dim yellow]")
             return query
 
     @staticmethod

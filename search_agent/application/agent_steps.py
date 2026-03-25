@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -27,20 +26,7 @@ from search_agent.domain.models import (
     VerificationResult,
 )
 from search_agent.domain.source_priors import lookup_source_prior
-
-MAX_CLAIM_ITERATIONS = int(os.getenv("AGENT_MAX_CLAIM_ITERATIONS", "3"))
-DEFAULT_FETCH_TOP_N = int(os.getenv("AGENT_FETCH_TOP_N", "4"))
-PASSAGE_TOP_K = int(os.getenv("AGENT_PASSAGE_TOP_K", "8"))
-SERP_GATE_MIN_URLS = int(os.getenv("SERP_GATE_MIN_URLS", "15"))
-SERP_GATE_MAX_URLS = int(os.getenv("SERP_GATE_MAX_URLS", "30"))
-SNIPPET_FALLBACK_DOCS = int(os.getenv("AGENT_SNIPPET_FALLBACK_DOCS", "2"))
-SHALLOW_SHORT_LIMIT = int(os.getenv("SHALLOW_FETCH_SHORT_LIMIT", "8"))
-SHALLOW_TARGETED_LIMIT = int(os.getenv("SHALLOW_FETCH_TARGETED_LIMIT", "12"))
-SHALLOW_ITERATIVE_LIMIT = int(os.getenv("SHALLOW_FETCH_ITERATIVE_LIMIT", "15"))
-DEEP_SHORT_LIMIT = int(os.getenv("DEEP_FETCH_SHORT_LIMIT", "2"))
-DEEP_TARGETED_LIMIT = int(os.getenv("DEEP_FETCH_TARGETED_LIMIT", "3"))
-DEEP_ITERATIVE_LIMIT = int(os.getenv("DEEP_FETCH_ITERATIVE_LIMIT", "4"))
-CHEAP_PASSAGE_LIMIT = int(os.getenv("CHEAP_PASSAGE_LIMIT", "12"))
+from search_agent.settings import get_settings
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
@@ -157,7 +143,7 @@ def _extract_entities(text: str) -> list[str]:
         if key not in seen:
             seen.add(key)
             deduped.append(entity)
-    return deduped[:6]
+    return deduped[:get_settings().agent_max_query_variants]
 
 
 def _extract_time_scope(text: str) -> str | None:
@@ -369,7 +355,7 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
                 freshness_hint=freshness_hint,
             )
         )
-    return deduped[:6]
+    return deduped[:get_settings().agent_max_query_variants]
 
 
 def _is_cyrillic_text(text: str) -> bool:
@@ -573,7 +559,7 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
                 freshness_hint=freshness_hint,
             )
         )
-    return deduped[:6]
+    return deduped[:get_settings().agent_max_query_variants]
 
 
 def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSnapshot:
@@ -1016,19 +1002,19 @@ def _select_fetch_candidates(gated_results: list[GatedSerpResult], limit: int) -
 
 def _routing_limits(profile, decision: RoutingDecision) -> tuple[int, int]:
     shallow_limit = {
-        "short_path": SHALLOW_SHORT_LIMIT,
-        "targeted_retrieval": SHALLOW_TARGETED_LIMIT,
-        "iterative_loop": SHALLOW_ITERATIVE_LIMIT,
+        "short_path": get_settings().shallow_fetch_short_limit,
+        "targeted_retrieval": get_settings().shallow_fetch_targeted_limit,
+        "iterative_loop": get_settings().shallow_fetch_iterative_limit,
     }[decision.mode]
     deep_limit = {
-        "short_path": DEEP_SHORT_LIMIT,
-        "targeted_retrieval": DEEP_TARGETED_LIMIT,
-        "iterative_loop": DEEP_ITERATIVE_LIMIT,
+        "short_path": get_settings().deep_fetch_short_limit,
+        "targeted_retrieval": get_settings().deep_fetch_targeted_limit,
+        "iterative_loop": get_settings().deep_fetch_iterative_limit,
     }[decision.mode]
     if profile.fetch_top_n == 0:
         deep_limit = 0
     else:
-        deep_limit = min(deep_limit, max(profile.fetch_top_n, DEFAULT_FETCH_TOP_N))
+        deep_limit = min(deep_limit, max(profile.fetch_top_n, get_settings().agent_fetch_top_n))
     return shallow_limit, deep_limit
 
 
@@ -1119,7 +1105,7 @@ def fetch_claim_documents(
     log=None,
 ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
     log = log or (lambda msg: None)
-    from search_agent.infrastructure.extractor import fetch_and_extract, shallow_fetch
+    from search_agent.infrastructure.extractor import fetch_and_extract_many, shallow_fetch_many
 
     seen_urls = seen_urls or set()
     shallow_limit, deep_limit = _routing_limits(profile, routing_decision)
@@ -1139,19 +1125,22 @@ def fetch_claim_documents(
     ]
 
     shallow_documents: list[FetchedDocument] = []
-    for candidate in selected:
-        payload = shallow_fetch(candidate.serp.url, log=log)
-        if payload:
-            shallow_documents.append(_make_shallow_document(candidate, payload))
-        elif candidate.serp.snippet:
-            shallow_documents.append(
-                _make_document(
-                    candidate,
-                    candidate.serp.snippet,
-                    "snippet_only",
-                    title=candidate.serp.title,
+    if selected:
+        for candidate, payload in zip(
+            selected,
+            shallow_fetch_many([c.serp.url for c in selected], log=log),
+        ):
+            if payload:
+                shallow_documents.append(_make_shallow_document(candidate, payload))
+            elif candidate.serp.snippet:
+                shallow_documents.append(
+                    _make_document(
+                        candidate,
+                        candidate.serp.snippet,
+                        "snippet_only",
+                        title=candidate.serp.title,
+                    )
                 )
-            )
 
     shallow_ranked = sorted(
         shallow_documents,
@@ -1213,22 +1202,25 @@ def fetch_claim_documents(
                 source_score=candidate.assessment.source_score,
             )
         )
-        content = fetch_and_extract(candidate.serp.url, log=log)
-        if content:
-            deep_documents.append(
-                _make_document(
-                    candidate,
-                    content,
-                    "deep",
-                    title=shallow_document.title,
-                    author=shallow_document.author,
-                    published_at=shallow_document.published_at,
-                    meta_description=shallow_document.meta_description,
-                    headings=shallow_document.headings,
-                    first_paragraphs=shallow_document.first_paragraphs,
-                    schema_org=shallow_document.schema_org,
+    if deep_candidates:
+        deep_urls = [c.serp.url for c, _ in deep_candidates]
+        deep_contents = fetch_and_extract_many(deep_urls, log=log)
+        for (candidate, shallow_document), content in zip(deep_candidates, deep_contents):
+            if content:
+                deep_documents.append(
+                    _make_document(
+                        candidate,
+                        content,
+                        "deep",
+                        title=shallow_document.title,
+                        author=shallow_document.author,
+                        published_at=shallow_document.published_at,
+                        meta_description=shallow_document.meta_description,
+                        headings=shallow_document.headings,
+                        first_paragraphs=shallow_document.first_paragraphs,
+                        schema_org=shallow_document.schema_org,
+                    )
                 )
-            )
 
     documents = shallow_ranked + deep_documents
     if not deep_documents:
@@ -1245,7 +1237,7 @@ def fetch_claim_documents(
                 first_paragraphs=document.first_paragraphs,
                 schema_org=document.schema_org,
             )
-            for document in shallow_ranked[:SNIPPET_FALLBACK_DOCS]
+            for document in shallow_ranked[:get_settings().agent_snippet_fallback_docs]
             if document.fetch_depth == "shallow"
         )
 
@@ -1425,7 +1417,7 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     )
 
 
-def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = CHEAP_PASSAGE_LIMIT) -> list[Passage]:
+def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = get_settings().cheap_passage_limit) -> list[Passage]:
     scored: list[tuple[float, Passage]] = []
     for passage in passages:
         score = cheap_passage_score(claim, passage)
@@ -1437,7 +1429,7 @@ def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = CHE
     return [passage for _, passage in scored[:limit]]
 
 
-def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = PASSAGE_TOP_K) -> list[Passage]:
+def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = get_settings().agent_passage_top_k) -> list[Passage]:
     reranked = [
         replace(passage, utility_score=utility_score_for_claim(claim, passage))
         for passage in passages
@@ -1607,13 +1599,13 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     elif answer_type == "person":
         if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
             directness += 0.35
-        if re.search(r"(?:[A-ZРђ-РЇРЃ][A-Za-zРђ-РЇР°-СЏРЃС‘.-]+(?:\s+[A-ZРђ-РЇРЃ][A-Za-zРђ-РЇР°-СЏРЃС‘.-]+){1,2})", passage.text):
+        if re.search(r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})", passage.text):
             directness += 0.2
     elif answer_type == "number":
         if re.search(r"\b\d+(?:\.\d+)?\b", passage.text):
             directness += 0.35
     elif answer_type == "location":
-        if re.search(r"\b(?:in|at|from)\s+[A-ZРђ-РЇРЃ]", passage.text):
+        if re.search(r"\b(?:in|at|from)\s+[A-ZА-ЯЁ]", passage.text):
             directness += 0.25
 
     contradiction_signal = 0.15 if re.search(r"\b(?:not|no|never|false|incorrect|debunked|contradict)\b", lowered) else 0.0
@@ -1706,106 +1698,6 @@ def refine_query_variants(
     iteration: int,
     existing_queries: set[str],
 ) -> list[QueryVariant]:
-    candidates: list[tuple[str, str, str, str | None, str | None]] = []
-    base_keywords = _variant_keywords(claim.claim_text, claim.entity_set)
-    missing_primary_support = bool(
-        bundle
-        and verification.verdict == "supported"
-        and claim.entity_set
-        and not bundle.has_primary_source
-    )
-
-    if "time" in verification.missing_dimensions:
-        explicit_time = claim.time_scope or str(datetime.now().year)
-        candidates.append((
-            _normalized_text(f"{claim.claim_text} {explicit_time}"),
-            "refined_time",
-            "Add explicit temporal constraint for verification.",
-            None,
-            explicit_time,
-        ))
-
-    if "entity" in verification.missing_dimensions:
-        aliases = _candidate_aliases(claim, gated_results)
-        for alias in aliases[:2]:
-            candidates.append((
-                _normalized_text(f'"{alias}" {base_keywords}'),
-                "refined_alias",
-                "Add alias discovered from retrieved results.",
-                None,
-                claim.time_scope,
-            ))
-
-    if (
-        "source" in verification.missing_dimensions
-        or missing_primary_support
-        or not any(result.assessment.primary_source_likelihood >= 0.7 for result in gated_results[:5])
-    ):
-        source_host = _preferred_source_host(gated_results)
-        if source_host:
-            candidates.append((
-                _normalized_text(f"{claim.claim_text} site:{source_host}"),
-                "refined_source",
-                "Restrict search to the most promising primary source host.",
-                source_host,
-                claim.time_scope,
-            ))
-            candidates.append((
-                _normalized_text(f'"{base_keywords}" site:{source_host}'),
-                "refined_source_exact",
-                "Force evidence retrieval from a primary-source host with tighter wording.",
-                source_host,
-                claim.time_scope,
-            ))
-
-    if verification.verdict != "supported" or missing_primary_support:
-        candidates.append((
-            f'"{claim.claim_text}"',
-            "refined_exact",
-            "Switch to exact-match wording for narrower evidence retrieval.",
-            None,
-            claim.time_scope,
-        ))
-
-    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < MAX_CLAIM_ITERATIONS:
-        candidates.append((
-            _normalized_text(f"{claim.claim_text} contradiction OR false OR debunked"),
-            "refined_contradiction",
-            "Search specifically for contradiction or correction evidence.",
-            None,
-            claim.time_scope,
-        ))
-
-    variants: list[QueryVariant] = []
-    seen = set(existing_queries)
-    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
-        key = query_text.casefold()
-        if not query_text or key in seen:
-            continue
-        seen.add(key)
-        variants.append(
-            QueryVariant(
-                variant_id=f"{claim.claim_id}-r{iteration}-{idx}",
-                claim_id=claim.claim_id,
-                query_text=query_text,
-                strategy=strategy,
-                rationale=rationale,
-                source_restriction=source_restriction,
-                freshness_hint=freshness_hint,
-            )
-        )
-    return variants
-
-
-def refine_query_variants(
-    claim: Claim,
-    classification: QueryClassification,
-    verification: VerificationResult,
-    gated_results: list[GatedSerpResult],
-    bundle: EvidenceBundle | None,
-    iteration: int,
-    existing_queries: set[str],
-) -> list[QueryVariant]:
     if classification.intent == "news_digest":
         region = classification.region_hint or (claim.entity_set[0] if claim.entity_set else claim.claim_text)
         cyrillic = _is_cyrillic_text(claim.claim_text)
@@ -1858,7 +1750,7 @@ def refine_query_variants(
                     freshness_hint=freshness_hint,
                 )
             )
-        return variants
+        return variants[:get_settings().agent_max_refine_variants]
 
     candidates: list[tuple[str, str, str, str | None, str | None]] = []
     base_keywords = _variant_keywords(claim.claim_text, claim.entity_set)
@@ -1921,7 +1813,7 @@ def refine_query_variants(
             claim.time_scope,
         ))
 
-    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < MAX_CLAIM_ITERATIONS:
+    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < get_settings().agent_max_claim_iterations:
         candidates.append((
             _normalized_text(f"{claim.claim_text} contradiction OR false OR debunked"),
             "refined_contradiction",
@@ -1948,19 +1840,19 @@ def refine_query_variants(
                 freshness_hint=freshness_hint,
             )
         )
-    return variants
+    return variants[:get_settings().agent_max_refine_variants]
 
 
 def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int) -> bool:
     verification = bundle.verification
     if verification is None:
-        return iteration >= MAX_CLAIM_ITERATIONS
+        return iteration >= get_settings().agent_max_claim_iterations
     if verification.verdict == "supported":
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
         if not claim.entity_set and verification.confidence >= 0.95 and bundle.independent_source_count >= 2:
             return True
-    return iteration >= MAX_CLAIM_ITERATIONS
+    return iteration >= get_settings().agent_max_claim_iterations
 
 
 def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:
@@ -1999,88 +1891,6 @@ def _format_citations(url_to_index: dict[str, int], passages: list[Passage]) -> 
     return "".join(f"[{idx}]" for idx in seen)
 
 
-def compose_answer(report: AgentRunResult) -> str:
-    cited_passages: list[Passage] = []
-    for run in report.claims:
-        bundle = run.evidence_bundle
-        if bundle is None or bundle.verification is None:
-            continue
-        if bundle.verification.verdict == "supported":
-            cited_passages.extend((bundle.supporting_passages[:2] or bundle.considered_passages[:2]))
-        elif bundle.verification.verdict == "contradicted":
-            cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
-
-    url_to_index: dict[str, int] = {}
-    indexed_sources: list[tuple[int, str, str]] = []
-    for passage in cited_passages:
-        if passage.url in url_to_index:
-            continue
-        idx = len(url_to_index) + 1
-        url_to_index[passage.url] = idx
-        indexed_sources.append((idx, passage.title, passage.url))
-
-    supported_lines: list[str] = []
-    caveat_lines: list[str] = []
-    gap_lines: list[str] = []
-
-    for run in sorted(report.claims, key=lambda item: item.claim.priority):
-        bundle = run.evidence_bundle
-        if bundle is None or bundle.verification is None:
-            continue
-        verification = bundle.verification
-        if verification.verdict == "supported":
-            passages = bundle.supporting_passages[:2] or bundle.considered_passages[:1]
-            if not passages:
-                continue
-            sentence = _best_span_text(verification, passages, run.claim)
-            if not sentence:
-                continue
-            citations = _format_citations(url_to_index, passages)
-            qualifier = ""
-            if bundle.independent_source_count < 2:
-                qualifier = " (пока подтверждено менее чем двумя независимыми источниками)"
-            elif not bundle.has_primary_source:
-                qualifier = " (без найденного первичного источника)"
-            supported_lines.append(f"- {sentence}{qualifier} {citations}".rstrip())
-        elif verification.verdict == "contradicted":
-            passages = bundle.contradicting_passages[:2] or bundle.considered_passages[:1]
-            if not passages:
-                continue
-            sentence = _best_span_text(verification, passages, run.claim, contradicted=True)
-            if not sentence:
-                continue
-            citations = _format_citations(url_to_index, passages)
-            caveat_lines.append(f"- {run.claim.claim_text}: найдено опровержение. {sentence} {citations}".rstrip())
-        else:
-            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else "coverage"
-            gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
-
-    lines: list[str] = []
-    lines.append("Ответ")
-    if supported_lines:
-        lines.extend(supported_lines)
-    else:
-        lines.append("- Недостаточно подтверждённых claim-level доказательств для прямого ответа.")
-
-    if caveat_lines:
-        lines.append("")
-        lines.append("Оговорки")
-        lines.extend(caveat_lines)
-
-    if gap_lines:
-        lines.append("")
-        lines.append("Недостаточно данных")
-        lines.extend(gap_lines)
-
-    if indexed_sources:
-        lines.append("")
-        lines.append("Источники")
-        for idx, title, url in indexed_sources:
-            lines.append(f"[{idx}] {title} — {url}")
-
-    return "\n".join(lines)
-
-
 def _digest_sentence(passage: Passage) -> str:
     sentence = _best_sentence_for_claim(
         Claim(
@@ -2099,132 +1909,6 @@ def _digest_sentence(passage: Passage) -> str:
     if len(combined) > 260:
         combined = combined[:257].rstrip() + "..."
     return combined
-
-
-def _compose_news_digest_answer(
-    report: AgentRunResult,
-    url_to_index: dict[str, int],
-    indexed_sources: list[tuple[int, str, str]],
-) -> str | None:
-    digest_lines: list[str] = []
-    for run in sorted(report.claims, key=lambda item: item.claim.priority):
-        bundle = run.evidence_bundle
-        if bundle is None or bundle.verification is None or bundle.verification.verdict != "supported":
-            continue
-        seen_urls: set[str] = set()
-        selected: list[Passage] = []
-        for passage in bundle.supporting_passages or bundle.considered_passages:
-            if passage.url in seen_urls:
-                continue
-            seen_urls.add(passage.url)
-            selected.append(passage)
-            if len(selected) >= 3:
-                break
-        for passage in selected:
-            citations = _format_citations(url_to_index, [passage])
-            digest_lines.append(f"- {_digest_sentence(passage)} {citations}".rstrip())
-
-    if not digest_lines:
-        return None
-
-    lines = [
-        "\u041e\u0442\u0432\u0435\u0442",
-        "- \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f \u043f\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u043c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430\u043c:",
-    ]
-    lines.extend(digest_lines[:4])
-    if indexed_sources:
-        lines.append("")
-        lines.append("РСЃС‚РѕС‡РЅРёРєРё")
-        for idx, title, url in indexed_sources:
-            lines.append(f"[{idx}] {title} вЂ” {url}")
-    return "\n".join(lines)
-
-
-def compose_answer(report: AgentRunResult) -> str:
-    cited_passages: list[Passage] = []
-    for run in report.claims:
-        bundle = run.evidence_bundle
-        if bundle is None or bundle.verification is None:
-            continue
-        if bundle.verification.verdict == "supported":
-            cited_passages.extend((bundle.supporting_passages[:3] or bundle.considered_passages[:3]))
-        elif bundle.verification.verdict == "contradicted":
-            cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
-
-    url_to_index: dict[str, int] = {}
-    indexed_sources: list[tuple[int, str, str]] = []
-    for passage in cited_passages:
-        if passage.url in url_to_index:
-            continue
-        idx = len(url_to_index) + 1
-        url_to_index[passage.url] = idx
-        indexed_sources.append((idx, passage.title, passage.url))
-
-    if report.classification.intent == "news_digest":
-        digest_answer = _compose_news_digest_answer(report, url_to_index, indexed_sources)
-        if digest_answer:
-            return digest_answer
-
-    supported_lines: list[str] = []
-    caveat_lines: list[str] = []
-    gap_lines: list[str] = []
-
-    for run in sorted(report.claims, key=lambda item: item.claim.priority):
-        bundle = run.evidence_bundle
-        if bundle is None or bundle.verification is None:
-            continue
-        verification = bundle.verification
-        if verification.verdict == "supported":
-            passages = bundle.supporting_passages[:2] or bundle.considered_passages[:1]
-            if not passages:
-                continue
-            sentence = _best_span_text(verification, passages, run.claim)
-            if not sentence:
-                continue
-            citations = _format_citations(url_to_index, passages)
-            qualifier = ""
-            if bundle.independent_source_count < 2:
-                qualifier = " (supported by fewer than two independent sources)"
-            elif not bundle.has_primary_source:
-                qualifier = " (without a detected primary source)"
-            supported_lines.append(f"- {sentence}{qualifier} {citations}".rstrip())
-        elif verification.verdict == "contradicted":
-            passages = bundle.contradicting_passages[:2] or bundle.considered_passages[:1]
-            if not passages:
-                continue
-            sentence = _best_span_text(verification, passages, run.claim, contradicted=True)
-            if not sentence:
-                continue
-            citations = _format_citations(url_to_index, passages)
-            caveat_lines.append(f"- {run.claim.claim_text}: contradicted. {sentence} {citations}".rstrip())
-        else:
-            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else "coverage"
-            gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
-
-    lines: list[str] = []
-    lines.append("РћС‚РІРµС‚")
-    if supported_lines:
-        lines.extend(supported_lines)
-    else:
-        lines.append("- РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅС‹С… claim-level РґРѕРєР°Р·Р°С‚РµР»СЊСЃС‚РІ РґР»СЏ РїСЂСЏРјРѕРіРѕ РѕС‚РІРµС‚Р°.")
-
-    if caveat_lines:
-        lines.append("")
-        lines.append("РћРіРѕРІРѕСЂРєРё")
-        lines.extend(caveat_lines)
-
-    if gap_lines:
-        lines.append("")
-        lines.append("РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С…")
-        lines.extend(gap_lines)
-
-    if indexed_sources:
-        lines.append("")
-        lines.append("РСЃС‚РѕС‡РЅРёРєРё")
-        for idx, title, url in indexed_sources:
-            lines.append(f"[{idx}] {title} вЂ” {url}")
-
-    return "\n".join(lines)
 
 
 def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
@@ -2288,14 +1972,11 @@ def compose_answer(report: AgentRunResult) -> str:
             digest_lines.append(f"- {_digest_sentence(passage)} {_format_citations(url_to_index, [passage])}".rstrip())
 
         if digest_lines:
-            lines = [
-                "\u041e\u0442\u0432\u0435\u0442",
-                "- \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f \u043f\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u043c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430\u043c:",
-            ]
+            lines = ["- Events from retrieved sources:"]
             lines.extend(digest_lines[:4])
             if indexed_sources:
                 lines.append("")
-                lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438")
+                lines.append("Sources")
                 for idx, title, url in indexed_sources:
                     lines.append(f"[{idx}] {title} - {url}")
             return "\n".join(lines)
@@ -2356,25 +2037,24 @@ def compose_answer(report: AgentRunResult) -> str:
             gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
 
     lines: list[str] = []
-    lines.append("\u041e\u0442\u0432\u0435\u0442")
     if supported_lines:
         lines.extend(supported_lines)
     else:
-        lines.append("- \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0445 claim-level \u0434\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432 \u0434\u043b\u044f \u043f\u0440\u044f\u043c\u043e\u0433\u043e \u043e\u0442\u0432\u0435\u0442\u0430.")
+        lines.append("- Not enough claim-level evidence for a direct answer.")
 
     if caveat_lines:
         lines.append("")
-        lines.append("\u041e\u0433\u043e\u0432\u043e\u0440\u043a\u0438")
+        lines.append("Caveats")
         lines.extend(caveat_lines)
 
     if gap_lines:
         lines.append("")
-        lines.append("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u0434\u0430\u043d\u043d\u044b\u0445")
+        lines.append("Insufficient data")
         lines.extend(gap_lines)
 
     if indexed_sources:
         lines.append("")
-        lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438")
+        lines.append("Sources")
         for idx, title, url in indexed_sources:
             lines.append(f"[{idx}] {title} - {url}")
 

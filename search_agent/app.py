@@ -5,7 +5,7 @@ Search assistant entrypoint.
 
 Usage:
   uv run search-agent
-  uv run search-agent -q "..."
+  uv run search-agent -q "..." [-p web] [-S brave|ddgs]
   uv run search-agent --research
 """
 
@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 from rich.rule import Rule
 from rich.status import Status
 
@@ -29,7 +30,9 @@ console = Console()
 
 
 def require_api_key() -> str:
-    key = os.getenv("LLM_API_KEY", "").strip()
+    from search_agent.settings import get_settings
+
+    key = (get_settings().llm_api_key or "").strip()
     if not key:
         console.print(
             "[bold red]Error:[/] LLM_API_KEY is not set.\n"
@@ -40,22 +43,33 @@ def require_api_key() -> str:
 
 
 def make_client(api_key: str):
-    base_url = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
     from openai import OpenAI
 
+    from search_agent.settings import get_settings
+
+    s = get_settings()
     return OpenAI(
         api_key=api_key,
-        base_url=base_url,
-        default_headers={"HTTP-Referer": "https://github.com/local/search-agent"},
+        base_url=s.llm_base_url,
+        default_headers={"HTTP-Referer": s.llm_http_referer},
     )
 
 
-def run_single_query(query: str, use_case, receipts_dir: str | None = None) -> None:
+def run_single_query(
+    query: str,
+    use_case,
+    receipts_dir: str | None = None,
+    profile_name: str | None = None,
+) -> None:
     from search_agent.config.profiles import get_profile
 
     console.print(Rule(f"[bold]Query:[/] {query}"))
 
-    profile = get_profile(os.getenv("DEFAULT_PROFILE", "web"))
+    from search_agent.settings import get_settings
+
+    name = (profile_name or get_settings().default_profile).strip()
+    profile = get_profile(name)
+    console.print(f"[dim]Profile:[/] [cyan]{profile.name}[/] - {profile.description}")
     with Status("[cyan]Searching (claim-level agent)...[/]", console=console):
         report = use_case.run(query, profile=profile, receipts_dir=receipts_dir, log=console.print)
 
@@ -68,17 +82,18 @@ def run_single_query(query: str, use_case, receipts_dir: str | None = None) -> N
         )
         source_count = run.evidence_bundle.independent_source_count if run.evidence_bundle else 0
         console.print(f"  - {run.claim.claim_text}")
-        console.print(f"    [dim]verdict={verdict} · independent_sources={source_count}[/dim]")
+        console.print(f"    [dim]verdict={verdict} | independent_sources={source_count}[/dim]")
 
     console.print()
-    console.print(Panel(Markdown(report.answer), title="[bold green]Answer[/]", border_style="green"))
+    # Text() avoids Rich interpreting [1] citations as markup.
+    console.print(Panel(Text(report.answer), title="[bold green]Answer[/]", border_style="green"))
     if report.audit_trail.receipt_path:
         console.print(f"\n[dim]Receipt: {report.audit_trail.receipt_path}[/dim]")
 
 
 def run_research(client: OpenAI) -> None:
     from search_agent.infrastructure.llm import analyze_rag_papers
-    from search_agent.infrastructure.searxng import fetch_rag_research
+    from search_agent.infrastructure.arxiv_research import fetch_rag_research
 
     console.print(Rule("[bold magenta]arXiv Pipeline Research[/]"))
     with Status("[magenta]Fetching arXiv papers...[/]", console=console):
@@ -99,14 +114,36 @@ def run_research(client: OpenAI) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search Assistant Prototype")
-    parser.add_argument("--query", "-q", help="Single query (non-interactive, uses 'web' profile)")
+    parser.add_argument("--query", "-q", help="Single query (non-interactive)")
+    parser.add_argument(
+        "--profile",
+        "-p",
+        default=None,
+        help="Search profile name (default: DEFAULT_PROFILE or web)",
+    )
     parser.add_argument("--research", action="store_true", help="Run arXiv research analysis")
     parser.add_argument("--eval", help="Run evaluation dataset JSONL")
     parser.add_argument("--receipts-dir", help="Persist audit receipts to this directory")
+    parser.add_argument(
+        "--search-provider",
+        "-S",
+        choices=("brave", "ddgs"),
+        default=None,
+        metavar="NAME",
+        help="Override search_provider for this run (sets SEARCH_PROVIDER_OVERRIDE; use if .env is fixed)",
+    )
     args = parser.parse_args()
 
-    require_api_key()
-    client = make_client(os.getenv("LLM_API_KEY", "").strip())
+    if args.search_provider:
+        os.environ["SEARCH_PROVIDER_OVERRIDE"] = args.search_provider
+        from search_agent.bootstrap import build_search_agent_use_case
+        from search_agent.settings import get_settings
+
+        get_settings.cache_clear()
+        build_search_agent_use_case.cache_clear()
+
+    api_key = require_api_key()
+    client = make_client(api_key)
     from search_agent import build_search_agent_use_case
 
     use_case = build_search_agent_use_case()
@@ -135,7 +172,7 @@ def main() -> None:
         return
 
     if args.query:
-        run_single_query(args.query, use_case, receipts_dir=args.receipts_dir)
+        run_single_query(args.query, use_case, receipts_dir=args.receipts_dir, profile_name=args.profile)
         if args.research:
             console.print()
             run_research(client)

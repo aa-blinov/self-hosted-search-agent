@@ -10,7 +10,6 @@ Flow:
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -23,17 +22,14 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 from rich.rule import Rule
 from rich.status import Status
 
 from search_agent.config.profiles import DEFAULT_PROFILE, PROFILES, SearchProfile, get_profile, list_profiles
-from search_agent.infrastructure.extractor import (
-    CRAWL4AI_TIMEOUT,
-    EXTRACT_MAX_CHARS,
-    shutdown as shutdown_crawler,
-)
+from search_agent.infrastructure.extractor import shutdown as shutdown_crawler
 from search_agent.infrastructure.llm import analyze_rag_papers
-from search_agent.infrastructure.searxng import fetch_rag_research
+from search_agent.infrastructure.arxiv_research import fetch_rag_research
 from search_agent.settings import get_settings
 
 console = Console()
@@ -48,6 +44,11 @@ _STYLE = Style.from_dict({
 _NEWS_KW = {
     "новости", "новость", "news", "latest", "today", "breaking",
     "вчера", "сегодня", "прямо сейчас", "last hour",
+}
+# «Сегодня / вчера / сейчас» → узкое окно свежести (Brave freshness=day)
+_NEWS_FRESH_KW = {
+    "сегодня", "вчера", "прямо сейчас", "сейчас", "за сутки", "за день",
+    "today", "yesterday", "last 24", "past 24",
 }
 _SCI_KW = {
     "paper", "research", "study", "arxiv", "статья", "исследование",
@@ -77,6 +78,8 @@ def _suggest_profile(query: str) -> str:
     has_cyrillic = bool(re.search(r"[а-яёА-ЯЁ]", query))
 
     if any(keyword in lowered for keyword in _NEWS_KW):
+        if any(keyword in lowered for keyword in _NEWS_FRESH_KW):
+            return "ru_news_fresh" if has_cyrillic else "news_fresh"
         return "ru_news" if has_cyrillic else "news"
     if any(keyword in lowered for keyword in _SCI_KW):
         return "science"
@@ -132,7 +135,7 @@ class SearchCLI:
     def __init__(self, client, use_case) -> None:
         self.client = client
         self.use_case = use_case
-        self._last_profile_name = os.getenv("DEFAULT_PROFILE", DEFAULT_PROFILE)
+        self._last_profile_name = get_settings().default_profile or DEFAULT_PROFILE
 
     def _prompt(self):
         return HTML(
@@ -163,16 +166,16 @@ class SearchCLI:
 
         console.print(Rule(f"[bold]{query}[/]"))
         console.print(
-            f"[dim]Profile: {profile.name} · "
-            f"categories: {'+'.join(profile.categories)} · "
-            f"lang: {profile.language} · "
+            f"[dim]Profile: {profile.name} | "
+            f"categories: {'+'.join(profile.categories)} | "
+            f"lang: {profile.language} | "
             f"fetch_top: {profile.fetch_top_n}[/dim]"
         )
 
         report = self.use_case.run(
             query,
             profile=profile,
-            receipts_dir=os.getenv("AGENT_RECEIPTS_DIR", "").strip() or None,
+            receipts_dir=(get_settings().agent_receipts_dir or "").strip() or None,
             log=console.print,
         )
 
@@ -185,11 +188,11 @@ class SearchCLI:
             )
             source_count = run.evidence_bundle.independent_source_count if run.evidence_bundle else 0
             console.print(f"  [[cyan]{run.claim.claim_id}[/]] {run.claim.claim_text}")
-            console.print(f"       [dim]verdict={verdict} · independent_sources={source_count}[/dim]")
+            console.print(f"       [dim]verdict={verdict} | independent_sources={source_count}[/dim]")
 
         console.print()
         console.print(Panel(
-            Markdown(report.answer),
+            Text(report.answer),
             title="[bold green]Answer[/]",
             border_style="green",
             width=min(console.width, 100),
@@ -214,20 +217,33 @@ class SearchCLI:
 
     def _cmd_config(self, _: str) -> None:
         settings = get_settings()
-        search_backend = (
-            f"{settings.search_provider} @ {os.getenv('SEARXNG_URL', 'http://localhost:8888')}"
-            if settings.search_provider == "searxng"
-            else f"{settings.search_provider} (region={settings.ddgs_region})"
-        )
+        prov = settings.resolved_search_provider()
+        override_note = ""
+        if (settings.search_provider_override or "").strip():
+            override_note = (
+                f" [dim](SEARCH_PROVIDER_OVERRIDE overrides SEARCH_PROVIDER={settings.search_provider})[/dim]"
+            )
+        if prov == "ddgs":
+            search_backend = f"ddgs (region={settings.ddgs_region}){override_note}"
+        elif prov == "brave":
+            key_ok = bool((settings.brave_api_key or "").strip())
+            g_n = len(settings.resolved_brave_goggles())
+            g_note = f", global_goggles={g_n}" if g_n else ""
+            search_backend = (
+                f"brave (country={settings.brave_country}, BRAVE_API_KEY={'set' if key_ok else 'missing'}"
+                f"{g_note}){override_note}"
+            )
+        else:
+            search_backend = f"{prov}{override_note}"
         console.print(Panel(
-            f"Model         : [cyan]{os.getenv('LLM_MODEL', 'qwen/qwen3.5-35b-a3b')}[/]\n"
-            f"Provider      : [cyan]{os.getenv('LLM_PROVIDER') or 'any (no routing)'}[/]\n"
+            f"Model         : [cyan]{settings.llm_model}[/]\n"
+            f"Provider      : [cyan]{settings.llm_provider or 'any (no routing)'}[/]\n"
             f"Search        : [cyan]{search_backend}[/]\n"
-            f"Extractor     : [cyan]crawl4ai[/] (timeout: {CRAWL4AI_TIMEOUT}s)\n"
-            f"Extract limit : [cyan]{EXTRACT_MAX_CHARS}[/] chars\n"
-            f"Agent fetch   : [cyan]{os.getenv('AGENT_FETCH_TOP_N', '4')}[/] deep docs per claim (min budget)\n"
-            f"SERP gate     : [cyan]{os.getenv('SERP_GATE_MIN_URLS', '15')}..{os.getenv('SERP_GATE_MAX_URLS', '30')}[/] URLs\n\n"
-            f"Receipts dir  : [cyan]{os.getenv('AGENT_RECEIPTS_DIR') or 'disabled'}[/]\n\n"
+            f"Extractor     : [cyan]crawl4ai[/] (timeout: {settings.crawl4ai_timeout}s)\n"
+            f"Extract limit : [cyan]{settings.extract_max_chars}[/] chars\n"
+            f"Agent fetch   : [cyan]{settings.agent_fetch_top_n}[/] deep docs per claim (min budget)\n"
+            f"SERP gate     : [cyan]{settings.serp_gate_min_urls}..{settings.serp_gate_max_urls}[/] URLs\n\n"
+            f"Receipts dir  : [cyan]{settings.agent_receipts_dir or 'disabled'}[/]\n\n"
             f"[dim]Last profile used: {self._last_profile_name}[/dim]",
             title="[bold]Config[/]",
             border_style="blue",
@@ -293,9 +309,10 @@ class SearchCLI:
         )
 
         llm_ok = self._check_llm()
+        boot = get_settings()
         model_line = (
-            f"Model  : [cyan]{os.getenv('LLM_MODEL', 'qwen/qwen3.5-35b-a3b')}[/]"
-            + (f" via [cyan]{os.getenv('LLM_PROVIDER')}[/]" if os.getenv("LLM_PROVIDER") else "")
+            f"Model  : [cyan]{boot.llm_model}[/]"
+            + (f" via [cyan]{boot.llm_provider}[/]" if boot.llm_provider else "")
             + ("  [green]OK[/]" if llm_ok else "  [red]unreachable[/]")
         )
         console.print(Panel(

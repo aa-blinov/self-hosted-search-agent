@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import logfire
 
-from search_agent.application.agent_steps import MAX_CLAIM_ITERATIONS, SERP_GATE_MAX_URLS, SERP_GATE_MIN_URLS
+from search_agent.settings import get_settings
 from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, RoutingDecision
 
 from search_agent.application.contracts import (
@@ -89,7 +88,7 @@ class SearchAgentUseCase:
             report.audit_trail.latency_ms = int((completed_at - started_at).total_seconds() * 1000)
             report.audit_trail.estimated_search_cost = self._steps.estimate_search_cost(claim_runs)
 
-            resolved_receipts_dir = receipts_dir or os.getenv("AGENT_RECEIPTS_DIR", "").strip() or None
+            resolved_receipts_dir = receipts_dir or (get_settings().agent_receipts_dir or "").strip() or None
             if resolved_receipts_dir:
                 report.audit_trail.receipt_path = self._receipt_writer.write(
                     report,
@@ -122,14 +121,15 @@ class SearchAgentUseCase:
         next_variants = self._steps.build_query_variants(claim, classification)
 
         iterations_used = 0
-        for iteration in range(1, MAX_CLAIM_ITERATIONS + 1):
+        claim_cap = get_settings().agent_max_claim_iterations
+        for iteration in range(1, claim_cap + 1):
             if not next_variants:
                 break
             iterations_used = iteration
 
-            log(f"  [bold]Iteration {iteration}/{MAX_CLAIM_ITERATIONS}[/bold]")
+            log(f"  [bold]Iteration {iteration}/{claim_cap}[/bold]")
             for variant in next_variants:
-                log(f"  [dim]↳ {variant.strategy}: {variant.query_text}[/dim]")
+                log(f"  [dim]-> {variant.strategy}: {variant.query_text}[/dim]")
                 existing_queries.add(variant.query_text.casefold())
             all_variants.extend(next_variants)
 
@@ -139,7 +139,8 @@ class SearchAgentUseCase:
                 new_snapshots.extend(self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots)
             snapshots.extend(new_snapshots)
 
-            gated_limit = min(SERP_GATE_MAX_URLS, max(SERP_GATE_MIN_URLS, profile.max_results))
+            s = get_settings()
+            gated_limit = min(s.serp_gate_max_urls, max(s.serp_gate_min_urls, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
             if bundle and bundle.verification and bundle.verification.verdict != "supported":
@@ -157,9 +158,9 @@ class SearchAgentUseCase:
                     )
 
             log(
-                f"  [dim]route={routing_decision.mode} · "
-                f"certainty={routing_decision.certainty:.2f} · "
-                f"consistency={routing_decision.consistency:.2f} · "
+                f"  [dim]route={routing_decision.mode} | "
+                f"certainty={routing_decision.certainty:.2f} | "
+                f"consistency={routing_decision.consistency:.2f} | "
                 f"sufficiency={routing_decision.evidence_sufficiency:.2f}[/dim]"
             )
             log(f"  [dim]SERP gate kept {len(gated_results)} URLs[/dim]")
@@ -189,16 +190,16 @@ class SearchAgentUseCase:
             cheap_filtered = self._steps.cheap_passage_filter(claim, passages)
             final_passages = self._steps.utility_rerank_passages(claim, cheap_filtered)
             log(
-                f"  [dim]passages: {len(passages)} total · "
-                f"{len(cheap_filtered)} after cheap filter · "
+                f"  [dim]passages: {len(passages)} total | "
+                f"{len(cheap_filtered)} after cheap filter | "
                 f"{len(final_passages)} after utility rerank[/dim]"
             )
 
             verification = self._intelligence.verify_claim(claim, final_passages, log=log)
             bundle = self._steps.build_evidence_bundle(claim, final_passages, verification, gated_results)
             log(
-                f"  [dim]verdict={verification.verdict} · "
-                f"confidence={verification.confidence:.2f} · "
+                f"  [dim]verdict={verification.verdict} | "
+                f"confidence={verification.confidence:.2f} | "
                 f"independent_sources={bundle.independent_source_count}[/dim]"
             )
 

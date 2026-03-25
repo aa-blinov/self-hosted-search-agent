@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from openai import OpenAI
 from search_agent.application.agent_steps import run_search_agent
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import AgentRunResult, ClaimRun
+from search_agent.settings import get_settings
 
 
 @dataclass(slots=True)
@@ -87,15 +87,25 @@ def _answer_source_urls(answer: str) -> list[str]:
 
 
 def _answer_bullets(answer: str) -> list[str]:
+    """Bullets in the main answer block (before first blank line). Supports legacy 'Ответ' and plain '- ...' opens."""
+    lines = answer.splitlines()
     bullets: list[str] = []
-    in_answer_section = False
-    for line in answer.splitlines():
+    start_idx: int | None = None
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == "Ответ":
-            in_answer_section = True
-            continue
-        if not in_answer_section:
-            continue
+            start_idx = i + 1
+            break
+        if stripped == "Answer":
+            start_idx = i + 1
+            break
+        if stripped.startswith("- "):
+            start_idx = i
+            break
+    if start_idx is None:
+        return []
+    for line in lines[start_idx:]:
+        stripped = line.strip()
         if not stripped:
             break
         if stripped.startswith("- "):
@@ -388,7 +398,7 @@ def evaluate_dataset(
     case_delay = (
         delay_between_cases
         if delay_between_cases is not None
-        else float(os.getenv("EVAL_CASE_DELAY_SEC", "2.0"))
+        else get_settings().eval_case_delay_sec
     )
 
     for idx, case in enumerate(cases, 1):

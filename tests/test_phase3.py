@@ -66,10 +66,9 @@ def _make_supported_report() -> AgentRunResult:
             )
         ],
         answer=(
-            "Ответ\n"
             "- Longtime Microsoft executive Satya Nadella was named CEO [1]\n\n"
-            "Источники\n"
-            "[1] Satya Nadella named CEO — https://news.microsoft.com/announcement/satya-nadella-named-ceo/\n"
+            "Sources\n"
+            "[1] Satya Nadella named CEO - https://news.microsoft.com/announcement/satya-nadella-named-ceo/\n"
         ),
         audit_trail=AuditTrail(
             run_id="test-run",

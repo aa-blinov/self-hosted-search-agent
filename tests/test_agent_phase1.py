@@ -181,7 +181,7 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertIn("OpenAI announced GPT-4.1 in March 2026", answer)
         self.assertIn("[1]", answer)
         self.assertIn("The Moon is made of cheese.: insufficient evidence", answer)
-        self.assertIn("Источники", answer)
+        self.assertIn("Sources", answer)
 
     def test_serp_gate_prefers_entity_matched_official_host(self):
         claim = Claim(

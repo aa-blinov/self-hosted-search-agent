@@ -1,7 +1,7 @@
 [project]
 name = "self-hosted-search-agent"
 version = "0.1.0"
-description = "Grounded search assistant: SearXNG + crawl4ai + EvidenceLoop"
+description = "Grounded search assistant: Brave Search + crawl4ai + EvidenceLoop"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.0.0",
@@ -25,3 +25,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["search_agent"]
+
+# Suppress LogfireNotConfiguredWarning when LOGFIRE_TOKEN is unset (local / tests)
+[tool.logfire]
+ignore_no_config = true

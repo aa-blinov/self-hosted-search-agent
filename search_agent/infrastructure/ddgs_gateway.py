@@ -7,8 +7,36 @@ import logfire
 from ddgs import DDGS
 
 from search_agent.domain.models import SearchSnapshot, SerpResult
-from search_agent.infrastructure.searxng import _canonicalize_url
+from search_agent.infrastructure.serp_query import build_routed_query
+from search_agent.infrastructure.url_utils import canonicalize_url
 from search_agent.settings import AppSettings
+
+_DDGS_TIMELIMIT_FROM_TIME_RANGE: dict[str, str] = {
+    "day": "d",
+    "week": "w",
+    "month": "m",
+    "year": "y",
+}
+
+
+def _ddgs_timelimit(profile) -> str | None:
+    override = getattr(profile, "ddgs_timelimit", None)
+    if override is not None:
+        return override.strip() or None
+    tr = getattr(profile, "time_range", None)
+    if not tr:
+        return None
+    return _DDGS_TIMELIMIT_FROM_TIME_RANGE.get(tr)
+
+
+def _ddgs_region(profile, settings: AppSettings) -> str:
+    r = getattr(profile, "ddgs_region", None)
+    return r if r is not None else settings.ddgs_region
+
+
+def _ddgs_safesearch(profile, settings: AppSettings) -> str:
+    s = getattr(profile, "ddgs_safesearch", None)
+    return s if s is not None else settings.ddgs_safesearch
 
 
 class DDGSSearchGateway:
@@ -22,18 +50,29 @@ class DDGSSearchGateway:
             query=query,
             profile=getattr(profile, "name", None),
         ):
+            routed = build_routed_query(query, profile)
+            region = _ddgs_region(profile, self._settings)
+            safesearch = _ddgs_safesearch(profile, self._settings)
+            timelimit = _ddgs_timelimit(profile)
             log(
-                f"  [cyan]DDGS[/cyan]  [italic]\"{query}\"[/italic]  "
-                f"[dim](region={self._settings.ddgs_region}, safesearch={self._settings.ddgs_safesearch})[/dim]"
+                f"  [cyan]DDGS[/cyan]  [italic]\"{routed}\"[/italic]  "
+                f"[dim](region={region}, safesearch={safesearch}, timelimit={timelimit})[/dim]"
             )
-            results = DDGS().text(
-                query,
-                region=self._settings.ddgs_region,
-                safesearch=self._settings.ddgs_safesearch,
-                max_results=profile.max_results,
-                timelimit=profile.time_range,
-                timeout=self._settings.ddgs_timeout,
-            )
+            ddgs_failed = False
+            try:
+                results = DDGS(timeout=self._settings.ddgs_timeout).text(
+                    routed,
+                    region=region,
+                    safesearch=safesearch,
+                    max_results=profile.max_results,
+                    timelimit=timelimit,
+                    timeout=self._settings.ddgs_timeout,
+                )
+            except Exception as exc:
+                ddgs_failed = True
+                logfire.warning("search_gateway.ddgs.text_failed", error=str(exc), query=routed[:200])
+                log(f"  [yellow]DDGS error (empty results):[/yellow] {exc}")
+                results = []
 
             serp_results: list[SerpResult] = []
             for idx, row in enumerate(results[: profile.max_results], 1):
@@ -51,20 +90,21 @@ class DDGSSearchGateway:
                         title=str(row.get("title", "")),
                         url=url,
                         snippet=str(row.get("body", "")).strip(),
-                        canonical_url=_canonicalize_url(url),
+                        canonical_url=canonicalize_url(url),
                         host=host,
                         position=idx,
                         raw=row,
                     )
                 )
 
+            unresponsive: list[str] = ["ddgs"] if ddgs_failed else []
             return [
                 SearchSnapshot(
-                    query=query,
+                    query=routed,
                     suggestions=[],
                     results=serp_results,
                     retrieved_at=datetime.now(UTC).isoformat(),
                     profile_name=f"ddgs:{getattr(profile, 'name', 'default')}",
-                    unresponsive_engines=[],
+                    unresponsive_engines=unresponsive,
                 )
             ]
