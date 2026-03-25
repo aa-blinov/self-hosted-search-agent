@@ -333,6 +333,11 @@ def score_reports(
 
         case_details.append(detail)
 
+    def _rate(hits: int, expectations: int) -> float | None:
+        if not expectations:
+            return None
+        return round(hits / expectations, 4)
+
     metrics = {
         "claim_support_rate": round(supported_hits / supported_expected, 4) if supported_expected else 0.0,
         "citation_validity_rate": round(valid_citations / total_citations, 4) if total_citations else 1.0,
@@ -340,9 +345,9 @@ def score_reports(
         "primary_source_coverage": round(supported_with_primary / actual_supported, 4) if actual_supported else 0.0,
         "contradiction_detection_rate": round(contradicted_hits / contradicted_expected, 4) if contradicted_expected else 0.0,
         "insufficient_detection_rate": round(insufficient_hits / insufficient_expected, 4) if insufficient_expected else 0.0,
-        "route_match_rate": round(route_hits / route_expectations, 4) if route_expectations else 0.0,
-        "primary_requirement_rate": round(primary_requirement_hits / primary_requirements, 4) if primary_requirements else 0.0,
-        "source_requirement_rate": round(source_requirement_hits / source_requirements, 4) if source_requirements else 0.0,
+        "route_match_rate": _rate(route_hits, route_expectations),
+        "primary_requirement_rate": _rate(primary_requirement_hits, primary_requirements),
+        "source_requirement_rate": _rate(source_requirement_hits, source_requirements),
         "backend_issue_rate": round(backend_issue_cases / len(cases), 4) if cases else 0.0,
         "median_search_cost": round(statistics.median(costs), 3) if costs else 0.0,
         "median_answer_latency": round(statistics.median(latency_values), 1) if latency_values else 0.0,
@@ -360,15 +365,13 @@ def score_reports(
             "insufficient_detection_rate": round(
                 bucket["insufficient_hits"] / bucket["insufficient_expected"], 4
             ) if bucket["insufficient_expected"] else 0.0,
-            "route_match_rate": round(
-                bucket["route_hits"] / bucket["route_expectations"], 4
-            ) if bucket["route_expectations"] else 0.0,
-            "primary_requirement_rate": round(
-                bucket["primary_requirement_hits"] / bucket["primary_requirements"], 4
-            ) if bucket["primary_requirements"] else 0.0,
-            "source_requirement_rate": round(
-                bucket["source_requirement_hits"] / bucket["source_requirements"], 4
-            ) if bucket["source_requirements"] else 0.0,
+            "route_match_rate": _rate(bucket["route_hits"], bucket["route_expectations"]),
+            "primary_requirement_rate": _rate(
+                bucket["primary_requirement_hits"], bucket["primary_requirements"]
+            ),
+            "source_requirement_rate": _rate(
+                bucket["source_requirement_hits"], bucket["source_requirements"]
+            ),
             "backend_issue_rate": round(
                 bucket["backend_issue_cases"] / max(1, len(bucket["costs"])), 4
             ),

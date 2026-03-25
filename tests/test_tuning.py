@@ -17,7 +17,14 @@ class TuningModuleTests(unittest.TestCase):
         self.assertGreater(tuning.AGENT_MAX_QUERY_VARIANTS, 0)
         self.assertGreaterEqual(tuning.AGENT_MAX_REFINE_VARIANTS, tuning.AGENT_MAX_QUERY_VARIANTS)
 
+    def test_intelligence_token_caps(self) -> None:
+        self.assertGreater(tuning.CLAIM_DECOMPOSE_MAX_TOKENS, 0)
+        self.assertGreater(tuning.VERIFY_CLAIM_MAX_TOKENS, 0)
+        self.assertGreater(tuning.TIME_NORMALIZE_MAX_TOKENS, 0)
+
     def test_compose_answer_limits(self) -> None:
+        self.assertGreater(tuning.COMPOSE_ANSWER_MAX_TOKENS, 0)
+        self.assertGreater(tuning.RAG_ANALYSIS_MAX_TOKENS, 0)
         self.assertGreater(tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS, 500)
         self.assertGreater(tuning.COMPOSE_ANSWER_DIGEST_LINE_CHARS, 0)
         self.assertGreater(tuning.TRAIFILATURA_MIN_MAIN_CHARS, 0)

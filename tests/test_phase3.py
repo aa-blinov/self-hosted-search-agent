@@ -128,6 +128,26 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(summary["metrics"]["median_answer_latency"], 1000)
         self.assertEqual(summary["cases"][0]["claims"][0]["actual_route"], "targeted_retrieval")
 
+    def test_evaluation_metrics_null_without_route_primary_source_expectations(self):
+        report = _make_supported_report()
+        cases = [
+            EvaluationCase(
+                case_id="case-1",
+                split="factual_single-hop",
+                query=report.user_query,
+                expected_claims=[
+                    ExpectedClaim(
+                        match="CEO of Microsoft",
+                        expected_verdict="supported",
+                    )
+                ],
+            )
+        ]
+        summary = score_reports(cases, {"case-1": report}, {"case-1": 1000})
+        self.assertIsNone(summary["metrics"]["route_match_rate"])
+        self.assertIsNone(summary["metrics"]["primary_requirement_rate"])
+        self.assertIsNone(summary["metrics"]["source_requirement_rate"])
+
     def test_load_evaluation_cases_reads_split_dataset(self):
         cases = load_evaluation_cases("eval_data/sample_cases.jsonl")
 

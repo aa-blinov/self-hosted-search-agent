@@ -24,6 +24,12 @@ from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 from search_agent import tuning
+from search_agent.settings import get_settings
+
+
+def _extract_cap() -> int:
+    return get_settings().resolved_extract_max_chars()
+
 
 # --------------------------------------------------------------------------- #
 #  Reddit — официальный JSON API, без браузера                                #
@@ -246,7 +252,7 @@ def _legacy_shallow_payload(html: str, response, max_chars: int) -> dict:
 def shallow_fetch(url: str, log=None) -> dict:
     """Fetch lightweight page signals without browser rendering."""
     log = log or (lambda msg: None)
-    max_chars = tuning.EXTRACT_MAX_CHARS
+    max_chars = _extract_cap()
 
     short = url[:72] + "..." if len(url) > 72 else url
     log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
@@ -359,9 +365,10 @@ def _http_article_text(url: str) -> str:
     except Exception:
         return ""
 
+    cap = _extract_cap()
     main = _trafilatura_main_text(html, response.url)
     if main:
-        return main[: tuning.EXTRACT_MAX_CHARS]
+        return main[:cap]
 
     title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
     meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or ""
@@ -378,7 +385,7 @@ def _http_article_text(url: str) -> str:
     summary_parts.extend(headings[:4])
     summary_parts.extend(paragraphs[:14])
     text = re.sub(r"\s+", " ", " ".join(summary_parts)).strip()
-    return text[: tuning.EXTRACT_MAX_CHARS]
+    return text[:cap]
 
 
 def _build_crawler_config() -> CrawlerRunConfig:
@@ -425,7 +432,7 @@ async def _extract_async(url: str) -> str:
         text = md.raw_markdown or md.fit_markdown or ""
     else:
         text = md.fit_markdown or md.raw_markdown or ""
-    return text[: tuning.EXTRACT_MAX_CHARS].strip()
+    return text[: _extract_cap()].strip()
 
 
 async def _fetch_url_content(url: str, log=None) -> str:
@@ -434,7 +441,7 @@ async def _fetch_url_content(url: str, log=None) -> str:
     if _is_reddit(url):
         try:
             text = await asyncio.wait_for(asyncio.to_thread(_extract_reddit, url), timeout=20.0)
-            return (text or "")[: tuning.EXTRACT_MAX_CHARS].strip()
+            return (text or "")[: _extract_cap()].strip()
         except Exception:
             return ""
     try:
@@ -442,7 +449,7 @@ async def _fetch_url_content(url: str, log=None) -> str:
         text = (text or "").strip()
         if len(text) >= min_http:
             log("    [dim][http+trafilatura/legacy][/dim]")
-            return text[: tuning.EXTRACT_MAX_CHARS].strip()
+            return text[: _extract_cap()].strip()
     except Exception:
         pass
     return await _extract_async(url)

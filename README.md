@@ -43,7 +43,7 @@ uv run search-agent -S ddgs -q "..."
 
 ## Конфигурация
 
-Переменные окружения — только то, что нужно для ключей и выбора провайдеров (`search_agent/settings.py`). Таймауты, лимиты агента, crawl4ai и т.п. — константы в `search_agent/tuning.py`. См. `.env.example`.
+Переменные окружения — ключи, провайдеры и связанные URL (`search_agent/settings.py`). Дополнительно: **`EXTRACT_MAX_CHARS`**, лимиты LLM для grounded-ответа и arXiv (**`COMPOSE_ANSWER_MAX_TOKENS`**, **`RAG_ANALYSIS_MAX_TOKENS`**), а также для intelligence (**`CLAIM_DECOMPOSE_MAX_TOKENS`**, **`VERIFY_CLAIM_MAX_TOKENS`**, **`TIME_NORMALIZE_MAX_TOKENS`**); итог по токенам не выше **`LLM_MAX_TOKENS`**. Остальные таймауты и лимиты агента — в `search_agent/tuning.py`. См. `.env.example`.
 
 ## Оценка качества (eval)
 

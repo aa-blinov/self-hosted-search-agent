@@ -1866,6 +1866,35 @@ def _truncate_compose_line(text: str, max_chars: int) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _sanitize_compose_fragment(text: str) -> str:
+    """Remove Markdown heading markers that leak from source pages into one line."""
+    if not text:
+        return text
+    t = re.sub(r"\s*#{1,6}\s+", " ", text)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _compose_ui_labels(user_query: str) -> dict[str, str]:
+    """Section titles: Russian if the user query contains Cyrillic, else English."""
+    rq = user_query or ""
+    ru = bool(re.search(r"[а-яёА-ЯЁ]", rq))
+    if ru:
+        return {
+            "sources": "Источники",
+            "insufficient": "Недостаточно данных",
+            "caveats": "Оговорки",
+            "no_evidence": "Недостаточно подтверждённых утверждений для прямого ответа.",
+            "digest_header": "События из источников:",
+        }
+    return {
+        "sources": "Sources",
+        "insufficient": "Insufficient data",
+        "caveats": "Caveats",
+        "no_evidence": "Not enough claim-level evidence for a direct answer.",
+        "digest_header": "Events from retrieved sources:",
+    }
+
+
 def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:
     cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
     head = passage.text[: max(cap, 4000)]
@@ -1961,6 +1990,7 @@ def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
 
 
 def compose_answer(report: AgentRunResult) -> str:
+    lb = _compose_ui_labels(report.user_query)
     if report.classification.intent == "news_digest":
         selected_passages: list[Passage] = []
         for run in sorted(report.claims, key=lambda item: item.claim.priority):
@@ -1977,14 +2007,14 @@ def compose_answer(report: AgentRunResult) -> str:
                 idx = len(url_to_index) + 1
                 url_to_index[passage.url] = idx
                 indexed_sources.append((idx, passage.title, passage.url))
-            digest_lines.append(f"- {_digest_sentence(passage)} {_format_citations(url_to_index, [passage])}".rstrip())
+            digest_lines.append(f"- {_sanitize_compose_fragment(_digest_sentence(passage))} {_format_citations(url_to_index, [passage])}".rstrip())
 
         if digest_lines:
-            lines = ["- Events from retrieved sources:"]
+            lines = [f"- {lb['digest_header']}"]
             lines.extend(digest_lines[:4])
             if indexed_sources:
                 lines.append("")
-                lines.append("Sources")
+                lines.append(lb["sources"])
                 for idx, title, url in indexed_sources:
                     lines.append(f"[{idx}] {title} - {url}")
             return "\n".join(lines)
@@ -2024,6 +2054,7 @@ def compose_answer(report: AgentRunResult) -> str:
             sentence = _best_span_text(verification, passages, run.claim)
             if not sentence:
                 continue
+            sentence = _sanitize_compose_fragment(sentence)
             citations = _format_citations(url_to_index, passages)
             qualifier = ""
             if bundle.independent_source_count < 2:
@@ -2038,6 +2069,7 @@ def compose_answer(report: AgentRunResult) -> str:
             sentence = _best_span_text(verification, passages, run.claim, contradicted=True)
             if not sentence:
                 continue
+            sentence = _sanitize_compose_fragment(sentence)
             citations = _format_citations(url_to_index, passages)
             caveat_lines.append(f"- {run.claim.claim_text}: contradicted. {sentence} {citations}".rstrip())
         else:
@@ -2048,21 +2080,21 @@ def compose_answer(report: AgentRunResult) -> str:
     if supported_lines:
         lines.extend(supported_lines)
     else:
-        lines.append("- Not enough claim-level evidence for a direct answer.")
+        lines.append(f"- {lb['no_evidence']}")
 
     if caveat_lines:
         lines.append("")
-        lines.append("Caveats")
+        lines.append(lb["caveats"])
         lines.extend(caveat_lines)
 
     if gap_lines:
         lines.append("")
-        lines.append("Insufficient data")
+        lines.append(lb["insufficient"])
         lines.extend(gap_lines)
 
     if indexed_sources:
         lines.append("")
-        lines.append("Sources")
+        lines.append(lb["sources"])
         for idx, title, url in indexed_sources:
             lines.append(f"[{idx}] {title} - {url}")
 

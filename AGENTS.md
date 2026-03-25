@@ -10,7 +10,7 @@ Grounded **web search agent**: iterative retrieval per **claim**, not one-shot g
 
 | Area | Entry points |
 |------|----------------|
-| Config | `search_agent/settings.py` — env only for keys/URLs/providers; tuning in `search_agent/tuning.py` |
+| Config | `search_agent/settings.py` — env for keys/URLs/providers and optional caps (`EXTRACT_MAX_CHARS`, compose/RAG/intelligence token limits); tuning in `search_agent/tuning.py` |
 | Agent loop | `search_agent/application/use_cases.py` — `_run_claim` iterations |
 | Steps | `search_agent/application/agent_steps.py` — query variants, SERP gate, fetch, passages, compose answer |
 | Contracts | `search_agent/application/contracts.py` |

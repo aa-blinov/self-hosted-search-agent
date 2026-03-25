@@ -129,6 +129,94 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(len(verification.supporting_spans), 1)
         self.assertIn("Chief Executive Officer", verification.supporting_spans[0].text)
 
+    def test_verify_claim_floors_supported_confidence_when_near_zero(self) -> None:
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Satya Nadella leads Microsoft.",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Microsoft"],
+        )
+        passage = Passage(
+            passage_id="p1",
+            url="https://news.microsoft.com/source/exec/satya-nadella/",
+            canonical_url="https://news.microsoft.com/source/exec/satya-nadella/",
+            host="news.microsoft.com",
+            title="Satya Nadella",
+            section="Leadership",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p1",
+            text="Satya Nadella is Chairman and CEO of Microsoft.",
+            source_score=0.9,
+            utility_score=0.9,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _VerificationOutput(
+                    verdict="supported",
+                    confidence=0.0,
+                    supporting_passages=[_EvidenceQuote(passage_id="p1", quote="CEO")],
+                    rationale="",
+                )
+            },
+        )()
+
+        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+            verification = service.verify_claim(claim, [passage])
+
+        self.assertEqual(verification.verdict, "supported")
+        self.assertGreaterEqual(verification.confidence, 0.38)
+
+    def test_verify_claim_boosts_insufficient_when_official_python_docs(self) -> None:
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Python 3.8 introduced assignment expressions (walrus operator).",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Python"],
+        )
+        long_body = "Introductory prose about assignment expressions. " * 20
+        passage = Passage(
+            passage_id="p-doc",
+            url="https://docs.python.org/3/whatsnew/3.8.html",
+            canonical_url="https://docs.python.org/3/whatsnew/3.8.html",
+            host="docs.python.org",
+            title="What is new in Python 3.8",
+            section="",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p-doc",
+            text=long_body,
+            source_score=0.9,
+            utility_score=0.3,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _VerificationOutput(
+                    verdict="insufficient_evidence",
+                    confidence=0.15,
+                    supporting_passages=[],
+                    rationale="Need clearer quote.",
+                )
+            },
+        )()
+
+        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+            verification = service.verify_claim(claim, [passage])
+
+        self.assertEqual(verification.verdict, "supported")
+        self.assertGreaterEqual(verification.confidence, 0.46)
+        self.assertTrue(verification.supporting_spans)
+
 
 if __name__ == "__main__":
     unittest.main()

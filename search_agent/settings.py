@@ -41,6 +41,13 @@ class AppSettings(BaseSettings):
 
     logfire_token: str | None = None
 
+    extract_max_chars: int | None = None
+    compose_answer_max_tokens: int | None = None
+    rag_analysis_max_tokens: int | None = None
+    claim_decompose_max_tokens: int | None = None
+    verify_claim_max_tokens: int | None = None
+    time_normalize_max_tokens: int | None = None
+
     def resolved_brave_goggles(self) -> list[str]:
         """Parse ``brave_goggles``: JSON array, or semicolon/newline-separated URLs / inline rules."""
         raw = (self.brave_goggles or "").strip()
@@ -61,6 +68,60 @@ class AppSettings(BaseSettings):
         if o:
             return o
         return (self.search_provider or "brave").strip().lower()
+
+    def resolved_extract_max_chars(self) -> int:
+        """Env ``EXTRACT_MAX_CHARS`` overrides :data:`search_agent.tuning.EXTRACT_MAX_CHARS` when set and positive."""
+        v = self.extract_max_chars
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.EXTRACT_MAX_CHARS
+
+    def resolved_compose_answer_max_tokens(self) -> int:
+        """Env ``COMPOSE_ANSWER_MAX_TOKENS`` overrides :data:`search_agent.tuning.COMPOSE_ANSWER_MAX_TOKENS` when set and positive."""
+        v = self.compose_answer_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.COMPOSE_ANSWER_MAX_TOKENS
+
+    def resolved_rag_analysis_max_tokens(self) -> int:
+        """Env ``RAG_ANALYSIS_MAX_TOKENS`` overrides :data:`search_agent.tuning.RAG_ANALYSIS_MAX_TOKENS` when set and positive."""
+        v = self.rag_analysis_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.RAG_ANALYSIS_MAX_TOKENS
+
+    def resolved_claim_decompose_max_tokens(self) -> int:
+        """Env ``CLAIM_DECOMPOSE_MAX_TOKENS`` overrides :data:`search_agent.tuning.CLAIM_DECOMPOSE_MAX_TOKENS` when set and positive."""
+        v = self.claim_decompose_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.CLAIM_DECOMPOSE_MAX_TOKENS
+
+    def resolved_verify_claim_max_tokens(self) -> int:
+        """Env ``VERIFY_CLAIM_MAX_TOKENS`` overrides :data:`search_agent.tuning.VERIFY_CLAIM_MAX_TOKENS` when set and positive."""
+        v = self.verify_claim_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.VERIFY_CLAIM_MAX_TOKENS
+
+    def resolved_time_normalize_max_tokens(self) -> int:
+        """Env ``TIME_NORMALIZE_MAX_TOKENS`` overrides :data:`search_agent.tuning.TIME_NORMALIZE_MAX_TOKENS` when set and positive."""
+        v = self.time_normalize_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.TIME_NORMALIZE_MAX_TOKENS
 
 
 @lru_cache(maxsize=1)

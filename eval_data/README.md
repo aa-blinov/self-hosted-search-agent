@@ -67,7 +67,7 @@ uv run python -m search_agent.eval eval_runs/a.json eval_runs/b.json --json
 
 ## Метрики (итоговый объект)
 
-Среди прочего: `claim_support_rate`, `citation_validity_rate`, `unsupported_statement_rate`, `primary_source_coverage`, `contradiction_detection_rate`, `median_search_cost`, `median_answer_latency`, разрез `by_split`.
+Среди прочего: `claim_support_rate`, `citation_validity_rate`, `unsupported_statement_rate`, `primary_source_coverage`, `contradiction_detection_rate`, `median_search_cost`, `median_answer_latency`, разрез `by_split`. Поля `route_match_rate`, `primary_requirement_rate`, `source_requirement_rate` в JSON равны **`null`**, если в датасете нет соответствующих ожиданий (так в smoke без `expected_route` не выглядит как «ноль процентов»).
 
 ## Примечания
 

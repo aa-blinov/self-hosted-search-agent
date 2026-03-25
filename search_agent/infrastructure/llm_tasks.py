@@ -18,8 +18,11 @@ _SYSTEM_PROMPT_TEMPLATE = """\
 1. Используй только факты из контекста.
 2. Если источники противоречат друг другу, укажи это явно.
 3. Если данных недостаточно, так и напиши.
-4. Каждый фактический тезис должен иметь inline-ссылку [1], [2] и т.д.
-5. В конце добавь список источников в формате:
+4. Язык ответа: совпадай с языком вопроса пользователя (русский вопрос → русский ответ, и т.д.). Не смешивай языки без необходимости.
+5. Цитаты [n] в тексте ответа должны ссылаться ровно на блок контекста с тем же номером [n] ниже. Не приписывай факт источнику, если его нет в соответствующем блоке.
+6. Не вставляй заголовки Markdown (##, ###) в середину маркированного списка; используй обычные фразы или короткие подзаголовки без ##.
+7. Каждый фактический тезис должен иметь inline-ссылку [1], [2] и т.д.
+8. В конце добавь список источников в формате:
 [1] Название — URL
 [2] Название — URL
 """
@@ -65,7 +68,7 @@ class PydanticAITaskRunner:
             prompt,
             model_settings=build_model_settings(
                 self._settings,
-                max_tokens=1600,
+                max_tokens=self._settings.resolved_compose_answer_max_tokens(),
                 temperature=0.1,
             ),
         )
@@ -88,7 +91,7 @@ class PydanticAITaskRunner:
             prompt,
             model_settings=build_model_settings(
                 self._settings,
-                max_tokens=1400,
+                max_tokens=self._settings.resolved_rag_analysis_max_tokens(),
                 temperature=0.2,
             ),
         )
@@ -96,16 +99,21 @@ class PydanticAITaskRunner:
 
 
 def _build_context_block(query: str, sources: list[dict]) -> str:
+    char_budget = get_settings().resolved_extract_max_chars()
+    n = max(1, len(sources))
+    per_source = max(1, char_budget // n)
+
     blocks = []
     for i, src in enumerate(sources, 1):
         text = src.get("snippet") or src.get("abstract") or ""
-        blocks.append(f"[{i}] {src.get('title', '')}\nURL: {src.get('url', '')}\n{text}")
+        text = text[:per_source]
+        blocks.append(f"Источник [{i}] — заголовок: {src.get('title', '')}\nURL: {src.get('url', '')}\nТекст:\n{text}")
     context = "\n\n---\n\n".join(blocks)
     return (
-        f"Контекст из найденных источников:\n\n{context}\n\n"
+        f"Контекст (каждый блок помечен номером [n]; в ответе ссылка [n] означает только этот блок):\n\n{context}\n\n"
         f"---\n\n"
         f"Вопрос: {query}\n\n"
-        "Извлеки конкретные данные из контекста выше и ответь напрямую."
+        "Извлеки конкретные данные из контекста выше и ответь напрямую. Номера [n] в ответе должны соответствовать блокам с тем же [n]."
     )
 
 

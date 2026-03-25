@@ -39,7 +39,16 @@ DEEP_FETCH_TARGETED_LIMIT = 3
 DEEP_FETCH_ITERATIVE_LIMIT = 4
 CHEAP_PASSAGE_LIMIT = 12
 
+# --- Query intelligence (PydanticAIQueryIntelligence) ---
+CLAIM_DECOMPOSE_MAX_TOKENS = 500
+VERIFY_CLAIM_MAX_TOKENS = 700
+TIME_NORMALIZE_MAX_TOKENS = 120
+
 # --- Composed answer (CLI / Panel) ---
+# Grounded LLM answer (``llm_tasks.answer_with_sources``): capped by ``min(..., AppSettings.llm_max_tokens)``.
+COMPOSE_ANSWER_MAX_TOKENS = 1600
+# ``/research`` arXiv paper summaries (``llm_tasks.analyze_rag_papers``).
+RAG_ANALYSIS_MAX_TOKENS = 1400
 # Max characters per span/sentence line in compose_answer (verifier span or best sentence).
 COMPOSE_ANSWER_MAX_SPAN_CHARS = 2000
 # News-digest single line cap (slightly tighter for list readability).
