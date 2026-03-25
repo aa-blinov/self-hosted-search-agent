@@ -6,16 +6,24 @@ Change here when profiling; keeps .env limited to keys, URLs, and provider choic
 
 # --- Extractor / crawl ---
 SHALLOW_FETCH_TIMEOUT = 8
+# GET retries (429 / 5xx / transient network) before giving up on shallow fetch.
+SHALLOW_FETCH_HTTP_ATTEMPTS = 3
+SHALLOW_FETCH_RETRY_BACKOFF_SEC = 0.35
 EXTRACT_MAX_CHARS = 4000
 # Minimum extracted main text (trafilatura) before accepting vs legacy HTML heuristics.
 TRAIFILATURA_MIN_MAIN_CHARS = 200
 CRAWL4AI_TIMEOUT = 25
+# Slightly longer for shallow browser-only path (e.g. vc.ru) — one Playwright load, no prior HTTP.
+CRAWL4AI_BROWSER_ONLY_TIMEOUT = 30
 CRAWL4AI_DELAY_BEFORE_HTML = 1.0
 CRAWL4AI_PREFER_RAW = False
 # Deprecated: deep fetch always tries HTTP (trafilatura + legacy) before crawl4ai.
 FETCH_TRY_HTTP_FIRST = False
 FETCH_HTTP_MIN_CHARS = 1200
-FETCH_SHALLOW_CONCURRENCY = 8
+# Host suffixes where plain ``requests`` often hits TLS/bot walls; shallow uses crawl4ai only.
+SHALLOW_BROWSER_FIRST_HOST_SUFFIXES = (".vc.ru",)
+# Lower than max workers reduces same-host rate limits and bot wall trips during SERP batch fetches.
+FETCH_SHALLOW_CONCURRENCY = 5
 FETCH_DEEP_CONCURRENCY = 2
 
 # --- Agent loop ---

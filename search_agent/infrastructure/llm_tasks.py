@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from pydantic_ai import Agent
 
+from search_agent.infrastructure.llm_log import LogFn, log_llm_call, output_char_len
 from search_agent.infrastructure.pydantic_ai_factory import build_model_settings, build_openai_model
 from search_agent.infrastructure.telemetry import configure_logfire
 from search_agent.settings import AppSettings, get_settings
@@ -55,7 +56,7 @@ class PydanticAITaskRunner:
             system_prompt=RAG_ANALYSIS_PROMPT,
         )
 
-    def answer_with_sources(self, query: str, sources: list[dict], *, today: str) -> str:
+    def answer_with_sources(self, query: str, sources: list[dict], *, today: str, log: LogFn = None) -> str:
         if not sources:
             return "No sources retrieved. Cannot answer without context."
 
@@ -64,17 +65,25 @@ class PydanticAITaskRunner:
             + "\n\n"
             + _build_context_block(query, sources)
         )
-        result = self._grounded_answer_agent.run_sync(
-            prompt,
-            model_settings=build_model_settings(
-                self._settings,
-                max_tokens=self._settings.resolved_compose_answer_max_tokens(),
-                temperature=0.1,
-            ),
-        )
+        with log_llm_call(
+            log,
+            task="grounded_answer",
+            model=self._settings.llm_model,
+            detail=query,
+            input_chars=len(prompt),
+        ) as metrics:
+            result = self._grounded_answer_agent.run_sync(
+                prompt,
+                model_settings=build_model_settings(
+                    self._settings,
+                    max_tokens=self._settings.resolved_compose_answer_max_tokens(),
+                    temperature=0.1,
+                ),
+            )
+            metrics.output_chars = output_char_len(result.output)
         return result.output.strip()
 
-    def analyze_rag_papers(self, papers: list[dict]) -> str:
+    def analyze_rag_papers(self, papers: list[dict], *, log: LogFn = None) -> str:
         if not papers:
             return "No papers retrieved."
 
@@ -87,14 +96,22 @@ class PydanticAITaskRunner:
                 for i, paper in enumerate(papers, 1)
             ]
         )
-        result = self._research_analysis_agent.run_sync(
-            prompt,
-            model_settings=build_model_settings(
-                self._settings,
-                max_tokens=self._settings.resolved_rag_analysis_max_tokens(),
-                temperature=0.2,
-            ),
-        )
+        with log_llm_call(
+            log,
+            task="rag_paper_analysis",
+            model=self._settings.llm_model,
+            detail=f"{len(papers)} paper(s)",
+            input_chars=len(prompt),
+        ) as metrics:
+            result = self._research_analysis_agent.run_sync(
+                prompt,
+                model_settings=build_model_settings(
+                    self._settings,
+                    max_tokens=self._settings.resolved_rag_analysis_max_tokens(),
+                    temperature=0.2,
+                ),
+            )
+            metrics.output_chars = output_char_len(result.output)
         return result.output.strip()
 
 

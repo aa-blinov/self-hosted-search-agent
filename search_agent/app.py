@@ -25,7 +25,10 @@ from rich.text import Text
 from rich.rule import Rule
 from rich.status import Status
 
+from search_agent.runtime_bootstrap import ensure_utf8_stdio
+
 load_dotenv()
+ensure_utf8_stdio()
 console = Console()
 
 
@@ -108,7 +111,7 @@ def run_research(client: OpenAI) -> None:
         console.print(f"       [dim]{paper['url']}[/dim]")
     console.print()
     with Status("[magenta]Analysing with LLM...[/]", console=console):
-        analysis = analyze_rag_papers(papers, client)
+        analysis = analyze_rag_papers(papers, client, log=console.print)
     console.print(Panel(
         Markdown(analysis),
         title="[bold magenta]Techniques worth implementing[/]",

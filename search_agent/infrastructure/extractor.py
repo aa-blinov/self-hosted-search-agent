@@ -13,9 +13,12 @@ import io
 import json
 import os
 import re
+import time
 from html import unescape
+from urllib.parse import urlparse
 
 import requests as _requests
+from rich.markup import escape as _rich_escape
 from trafilatura import extract as _trafilatura_extract
 from trafilatura.metadata import extract_metadata as _trafilatura_extract_metadata
 
@@ -24,6 +27,13 @@ from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 from search_agent import tuning
+from search_agent.infrastructure.log_preview import preview_snippet as _preview_snippet
+from search_agent.infrastructure.source_handlers import (
+    dispatch_article_plaintext,
+    dispatch_shallow_fetch,
+    extract_reddit_text,
+    is_reddit_post_url,
+)
 from search_agent.settings import get_settings
 
 
@@ -31,73 +41,147 @@ def _extract_cap() -> int:
     return get_settings().resolved_extract_max_chars()
 
 
-# --------------------------------------------------------------------------- #
-#  Reddit — официальный JSON API, без браузера                                #
-# --------------------------------------------------------------------------- #
+def _url_shallow_browser_first(url: str) -> bool:
+    """Hosts where plain HTTP GET often fails (TLS EOF); use Playwright for shallow fetch."""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        return False
+    host = host.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    for suf in tuning.SHALLOW_BROWSER_FIRST_HOST_SUFFIXES:
+        suf = suf.lower().strip()
+        if not suf:
+            continue
+        if host == suf.lstrip("."):
+            return True
+        if host.endswith(suf):
+            return True
+    return False
 
-_REDDIT_RE = re.compile(r"reddit\.com/r/\w+/comments/\w+")
-_REDDIT_UA = "Mozilla/5.0 (compatible; search-agent/1.0; +https://github.com)"
+
+def _title_from_markdown(text: str, fallback: str) -> str:
+    for line in (text or "").split("\n")[:8]:
+        s = line.strip()
+        if s.startswith("#"):
+            return s.lstrip("#").strip()[:400]
+    return fallback
 
 
-def _is_reddit(url: str) -> bool:
-    return bool(_REDDIT_RE.search(url))
+def fetch_browser_extract_only(url: str, log=None) -> str:
+    """Playwright/crawl4ai only (no ``requests``). For hosts that break TLS on scripted HTTP."""
+    log = log or (lambda msg: None)
+    loop = _extract_event_loop()
+    capture = io.StringIO()
+    timeout = float(tuning.CRAWL4AI_BROWSER_ONLY_TIMEOUT)
+    with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+        try:
+            coro = asyncio.wait_for(_extract_async(url), timeout=timeout)
+            return loop.run_until_complete(coro)
+        except asyncio.TimeoutError:
+            log(f"    [yellow]  x browser-only crawl timeout ({timeout:.0f}s)[/yellow]")
+            return ""
+        except Exception as exc:
+            log(f"    [yellow]  x browser-only crawl error: {exc}[/yellow]")
+            return ""
 
 
-def _extract_reddit(url: str, max_comments: int = 12) -> str:
-    """
-    Fetches Reddit post + top comments via the public JSON API.
-    Converts  https://www.reddit.com/r/sub/comments/id/slug/
-           →  https://www.reddit.com/r/sub/comments/id/slug.json?limit=N&sort=top
-    No browser, no auth, ~0.5s.
-    """
-    json_url = re.sub(r"/?(\?.*)?$", ".json?limit=25&sort=top", url)
-    resp = _requests.get(
-        json_url,
-        headers={"User-Agent": _REDDIT_UA},
-        timeout=15,
+def _shallow_payload_from_plain_text(text: str, *, final_url: str, title_hint: str, max_chars: int) -> dict:
+    text = (text or "").strip()
+    if not text:
+        return {}
+    title = _title_from_markdown(text, title_hint)
+    first_paragraphs: list[str] = []
+    for block in text.split("\n\n"):
+        b = block.strip()
+        if len(b) >= 40:
+            first_paragraphs.append(b)
+        if len(first_paragraphs) >= 3:
+            break
+    return {
+        "final_url": final_url,
+        "title": title,
+        "meta_description": None,
+        "headings": [],
+        "first_paragraphs": first_paragraphs,
+        "author": None,
+        "published_at": None,
+        "schema_org": {},
+        "content": text[:max_chars],
+    }
+
+
+def _shallow_browser_extract(url: str, log=None) -> dict:
+    """Shallow fetch via crawl4ai only (used for vc.ru and similar)."""
+    log = log or (lambda msg: None)
+    max_chars = _extract_cap()
+    short = url[:72] + "..." if len(url) > 72 else url
+    log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
+    log("    [dim]  [cyan]browser-only[/cyan] shallow · skip HTTP (TLS/bot issues)[/dim]")
+    text = fetch_browser_extract_only(url, log=log)
+    if not text:
+        return {}
+    payload = _shallow_payload_from_plain_text(
+        text,
+        final_url=url,
+        title_hint=url,
+        max_chars=max_chars,
     )
-    resp.raise_for_status()
-    data = resp.json()
+    main = (payload.get("content") or "").strip()
+    if main:
+        log(
+            f"    [dim]  [green]extract[/green] crawl4ai · browser session · "
+            f"[cyan]{len(main)}[/] chars · "
+            f"[italic]{_rich_escape(_preview_snippet(main))}[/][/dim]"
+        )
+    return payload
 
-    parts: list[str] = []
 
-    # ── пост ──────────────────────────────────────────────────────────────── #
-    try:
-        post = data[0]["data"]["children"][0]["data"]
-        title      = post.get("title", "")
-        selftext   = (post.get("selftext") or "").strip()
-        score      = post.get("score", 0)
-        subreddit  = post.get("subreddit", "")
-        parts.append(f"# {title}")
-        parts.append(f"*r/{subreddit} · {score} upvotes*\n")
-        if selftext and selftext not in ("[deleted]", "[removed]"):
-            parts.append(selftext[:1500])
-    except (IndexError, KeyError):
-        pass
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    "Upgrade-Insecure-Requests": "1",
+}
 
-    # ── комментарии ───────────────────────────────────────────────────────── #
-    try:
-        comments = data[1]["data"]["children"]
-        parts.append("\n## Top Comments\n")
-        count = 0
-        for child in comments:
-            if child.get("kind") != "t1":
+
+def _http_get_shallow(url: str, *, timeout: float) -> tuple[_requests.Response | None, Exception | None]:
+    """
+    GET with small retry budget for rate limits and flaky TLS/network.
+    Does not retry permanent client errors (403, 404, …).
+    """
+    attempts = max(1, tuning.SHALLOW_FETCH_HTTP_ATTEMPTS)
+    backoff = tuning.SHALLOW_FETCH_RETRY_BACKOFF_SEC
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = _requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(backoff * (attempt + 1))
                 continue
-            c     = child["data"]
-            body  = (c.get("body") or "").strip()
-            score = c.get("score", 0)
-            author = c.get("author", "")
-            if body and body not in ("[deleted]", "[removed]"):
-                parts.append(f"**{author}** ({score} pts): {body[:600]}\n")
-                count += 1
-                if count >= max_comments:
-                    break
-    except (IndexError, KeyError):
-        pass
-
-    return "\n".join(parts)
-
-_HTTP_UA = "Mozilla/5.0 (compatible; search-agent/1.0; +https://github.com)"
+            response.raise_for_status()
+            return response, None
+        except _requests.HTTPError as exc:
+            last_exc = exc
+            code = exc.response.status_code if exc.response is not None else 0
+            if code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(backoff * (attempt + 1))
+                continue
+            return None, exc
+        except _requests.RequestException as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(backoff * (attempt + 1))
+                continue
+            return None, exc
+    return None, last_exc
 
 
 def _clean_html_text(text: str) -> str:
@@ -257,36 +341,23 @@ def shallow_fetch(url: str, log=None) -> dict:
     short = url[:72] + "..." if len(url) > 72 else url
     log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
 
-    if _is_reddit(url):
-        try:
-            text = _extract_reddit(url)
-        except Exception as exc:
-            log(f"    [yellow]  x shallow reddit error: {exc}[/yellow]")
-            return {}
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        title = lines[0].lstrip("# ").strip() if lines else url
-        body_lines = [line for line in lines[1:] if not line.startswith("*r/")]
-        paragraphs = body_lines[:3]
-        summary = " ".join(paragraphs[:2])[:max_chars]
-        return {
-            "final_url": url,
-            "title": title,
-            "meta_description": None,
-            "headings": [],
-            "first_paragraphs": paragraphs,
-            "author": None,
-            "published_at": None,
-            "schema_org": {},
-            "content": summary,
-        }
+    routed = dispatch_shallow_fetch(
+        url,
+        max_chars=max_chars,
+        timeout=tuning.SHALLOW_FETCH_TIMEOUT,
+        log=log,
+    )
+    if routed is not None:
+        return routed
 
+    if _url_shallow_browser_first(url):
+        return _shallow_browser_extract(url, log=log)
+
+    response, err = _http_get_shallow(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
+    if response is None:
+        log(f"    [yellow]  x shallow fetch error: {err}[/yellow]")
+        return {}
     try:
-        response = _requests.get(
-            url,
-            headers={"User-Agent": _HTTP_UA},
-            timeout=tuning.SHALLOW_FETCH_TIMEOUT,
-        )
-        response.raise_for_status()
         html = response.text[:250000]
     except Exception as exc:
         log(f"    [yellow]  x shallow fetch error: {exc}[/yellow]")
@@ -294,7 +365,11 @@ def shallow_fetch(url: str, log=None) -> dict:
 
     main_text = _trafilatura_main_text(html, response.url)
     if main_text:
-        log("    [dim]  [green]trafilatura[/green][/dim]")
+        log(
+            f"    [dim]  [green]extract[/green] trafilatura · main article text · "
+            f"[cyan]{len(main_text)}[/] chars · "
+            f"[italic]{_rich_escape(_preview_snippet(main_text))}[/][/dim]"
+        )
         meta = _trafilatura_extract_metadata(html, default_url=response.url)
         title = ""
         meta_description = None
@@ -334,8 +409,14 @@ def shallow_fetch(url: str, log=None) -> dict:
             "content": main_text[:max_chars],
         }
 
-    log("    [dim]  [yellow]legacy HTML[/yellow][/dim]")
-    return _legacy_shallow_payload(html, response, max_chars)
+    payload = _legacy_shallow_payload(html, response, max_chars)
+    content = (payload.get("content") or "").strip()
+    log(
+        f"    [dim]  [yellow]extract[/yellow] legacy HTML · title/meta/h1/p summary · "
+        f"[cyan]{len(content)}[/] chars · "
+        f"[italic]{_rich_escape(_preview_snippet(content))}[/][/dim]"
+    )
+    return payload
 
 
 def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
@@ -354,13 +435,14 @@ def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
 
 def _http_article_text(url: str) -> str:
     """HTTP GET + trafilatura main text; fallback to legacy regex heuristics (no browser)."""
+    specialized = dispatch_article_plaintext(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
+    if specialized:
+        return specialized[: _extract_cap()]
+
+    response, _err = _http_get_shallow(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
+    if response is None:
+        return ""
     try:
-        response = _requests.get(
-            url,
-            headers={"User-Agent": _HTTP_UA},
-            timeout=tuning.SHALLOW_FETCH_TIMEOUT,
-        )
-        response.raise_for_status()
         html = response.text[:500000]
     except Exception:
         return ""
@@ -438,9 +520,9 @@ async def _extract_async(url: str) -> str:
 async def _fetch_url_content(url: str, log=None) -> str:
     log = log or (lambda msg: None)
     min_http = max(200, tuning.FETCH_HTTP_MIN_CHARS)
-    if _is_reddit(url):
+    if is_reddit_post_url(url):
         try:
-            text = await asyncio.wait_for(asyncio.to_thread(_extract_reddit, url), timeout=20.0)
+            text = await asyncio.wait_for(asyncio.to_thread(extract_reddit_text, url), timeout=20.0)
             return (text or "")[: _extract_cap()].strip()
         except Exception:
             return ""
@@ -473,7 +555,7 @@ async def _fetch_deep_batch(urls: list[str], log) -> list[str]:
         async with sem:
             short = u[:72] + "..." if len(u) > 72 else u
             log(f"    [dim]fetch[/dim]  [dim]{short}[/dim]")
-            if _is_reddit(u):
+            if is_reddit_post_url(u):
                 log("    [dim][reddit JSON API][/dim]")
             else:
                 log("    [dim][crawl4ai][/dim]")

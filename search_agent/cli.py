@@ -31,8 +31,10 @@ from search_agent.infrastructure.extractor import get_extractor_name, shutdown a
 from search_agent.infrastructure.llm import analyze_rag_papers
 from search_agent.infrastructure.arxiv_research import fetch_rag_research
 from search_agent import tuning
+from search_agent.runtime_bootstrap import ensure_utf8_stdio
 from search_agent.settings import get_settings
 
+ensure_utf8_stdio()
 console = Console()
 
 _HISTORY_FILE = Path.home() / ".search_agent_history"

@@ -31,6 +31,8 @@ class TuningModuleTests(unittest.TestCase):
 
     def test_fetch_limits_non_negative(self) -> None:
         self.assertGreater(tuning.SHALLOW_FETCH_TIMEOUT, 0)
+        self.assertGreaterEqual(tuning.SHALLOW_FETCH_HTTP_ATTEMPTS, 1)
+        self.assertGreaterEqual(tuning.SHALLOW_FETCH_RETRY_BACKOFF_SEC, 0.0)
         self.assertGreater(tuning.EXTRACT_MAX_CHARS, 0)
         self.assertGreater(tuning.CRAWL4AI_TIMEOUT, 0)
         self.assertGreater(tuning.FETCH_SHALLOW_CONCURRENCY, 0)

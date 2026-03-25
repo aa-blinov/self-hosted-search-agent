@@ -16,7 +16,7 @@ Grounded **web search agent**: iterative retrieval per **claim**, not one-shot g
 | Contracts | `search_agent/application/contracts.py` |
 | Domain types | `search_agent/domain/models.py` |
 | Search | `search_agent/infrastructure/gateway_factory.py`, `brave_search.py`, `ddgs_gateway.py` |
-| Fetch | `search_agent/infrastructure/extractor.py` |
+| Fetch | `extractor.py` (generic HTTP + trafilatura), `source_handlers.py` (URL→strategy registry), `wikipedia_api.py`, `scholarly_sources.py` (arXiv Atom, Crossref, Semantic Scholar, GitHub REST) |
 | LLM / verify | `search_agent/infrastructure/intelligence.py`, `text_heuristics.py` |
 | CLI / app | `search_agent/app.py`, `search_agent/cli.py` |
 | Eval metrics | `search_agent/evaluation.py` |

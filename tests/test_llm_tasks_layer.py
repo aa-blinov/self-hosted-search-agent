@@ -7,7 +7,11 @@ from search_agent.infrastructure import llm_tasks
 
 class LlmTasksLayerTests(unittest.TestCase):
     def test_answer_with_sources_uses_task_runner(self):
-        runner = type("Runner", (), {"answer_with_sources": lambda self, query, sources, today: "Grounded answer"})()
+        runner = type(
+            "Runner",
+            (),
+            {"answer_with_sources": lambda self, query, sources, today, **kwargs: "Grounded answer"},
+        )()
         with patch("search_agent.infrastructure.llm.build_task_runner", return_value=runner):
             answer = llm.answer_with_sources(
                 "Who is the CEO of Microsoft?",
@@ -16,7 +20,11 @@ class LlmTasksLayerTests(unittest.TestCase):
         self.assertEqual(answer, "Grounded answer")
 
     def test_analyze_rag_papers_uses_task_runner(self):
-        runner = type("Runner", (), {"analyze_rag_papers": lambda self, papers: "Research summary"})()
+        runner = type(
+            "Runner",
+            (),
+            {"analyze_rag_papers": lambda self, papers, **kwargs: "Research summary"},
+        )()
         with patch("search_agent.infrastructure.llm.build_task_runner", return_value=runner):
             answer = llm.analyze_rag_papers(
                 [{"title": "Paper", "url": "https://example.com", "abstract": "Abstract", "authors": ["A"]}]

@@ -40,6 +40,7 @@ class AppSettings(BaseSettings):
     agent_receipts_dir: str | None = None
 
     logfire_token: str | None = None
+    github_token: str | None = None
 
     extract_max_chars: int | None = None
     compose_answer_max_tokens: int | None = None

@@ -22,6 +22,7 @@ from search_agent.application.text_heuristics import (
     normalized_text,
     should_decompose,
 )
+from search_agent.infrastructure.llm_log import log_llm_call, output_char_len
 from search_agent.infrastructure.pydantic_ai_factory import build_model_settings, build_openai_model
 from search_agent.infrastructure.telemetry import configure_logfire
 from search_agent.settings import AppSettings
@@ -209,14 +210,22 @@ class PydanticAIQueryIntelligence:
             f"User request: {classification.normalized_query}"
         )
         try:
-            with logfire.span("query_intelligence.decompose_claims", query=classification.normalized_query):
-                result = self._claim_agent.run_sync(
-                    prompt,
-                    model_settings=self._model_settings(
-                        max_tokens=self._settings.resolved_claim_decompose_max_tokens(),
-                        temperature=0,
-                    ),
-                )
+            with log_llm_call(
+                log,
+                task="decompose_claims",
+                model=self._settings.llm_model,
+                detail=classification.normalized_query,
+                input_chars=len(prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.decompose_claims", query=classification.normalized_query):
+                    result = self._claim_agent.run_sync(
+                        prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_claim_decompose_max_tokens(),
+                            temperature=0,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
             claims = []
             for idx, item in enumerate(result.output.claims[:4], 1):
                 claims.append(
@@ -234,8 +243,8 @@ class PydanticAIQueryIntelligence:
                     )
                 )
             return claims or self._fallback_claims(classification)
-        except Exception as exc:
-            log(f"  [dim yellow]warn claim decomposition failed: {exc}[/dim yellow]")
+        except Exception:
+            log("  [dim yellow]→ fallback: single claim from query[/dim yellow]")
             return self._fallback_claims(classification)
 
     def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
@@ -267,14 +276,22 @@ class PydanticAIQueryIntelligence:
             f"Claim: {claim.claim_text}\n\n" + "\n\n".join(prompt_lines)
         )
         try:
-            with logfire.span("query_intelligence.verify_claim", claim_id=claim.claim_id):
-                result = self._verifier_agent.run_sync(
-                    prompt,
-                    model_settings=self._model_settings(
-                        max_tokens=self._settings.resolved_verify_claim_max_tokens(),
-                        temperature=0,
-                    ),
-                )
+            with log_llm_call(
+                log,
+                task="verify_claim",
+                model=self._settings.llm_model,
+                detail=f"{claim.claim_id}: {claim.claim_text}",
+                input_chars=len(prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.verify_claim", claim_id=claim.claim_id):
+                    result = self._verifier_agent.run_sync(
+                        prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_verify_claim_max_tokens(),
+                            temperature=0,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
             output = result.output
             passage_map = {passage.passage_id: passage for passage in passages}
 
@@ -310,8 +327,8 @@ class PydanticAIQueryIntelligence:
                     rationale=normalized_text(output.rationale),
                 )
             )
-        except Exception as exc:
-            log(f"  [dim yellow]warn verifier failed: {exc}[/dim yellow]")
+        except Exception:
+            log("  [dim yellow]→ fallback: heuristic verifier[/dim yellow]")
             return finalize(heuristic_verifier(claim, passages))
 
     def _normalize_time_references(self, query: str, log=None) -> str:
@@ -330,20 +347,28 @@ class PydanticAIQueryIntelligence:
             f"Query: {query}"
         )
         try:
-            with logfire.span("query_intelligence.normalize_time_references", query=query):
-                result = self._normalize_agent.run_sync(
-                    prompt,
-                    model_settings=self._model_settings(
-                        max_tokens=self._settings.resolved_time_normalize_max_tokens(),
-                        temperature=0,
-                    ),
-                )
+            with log_llm_call(
+                log,
+                task="normalize_time_references",
+                model=self._settings.llm_model,
+                detail=query,
+                input_chars=len(prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.normalize_time_references", query=query):
+                    result = self._normalize_agent.run_sync(
+                        prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_time_normalize_max_tokens(),
+                            temperature=0,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
             normalized = normalized_text(result.output.normalized_query)
             if normalized and normalized != query:
                 log(f"  [dim]-> normalized query: [italic]{normalized}[/italic][/dim]")
             return normalized or query
-        except Exception as exc:
-            log(f"  [dim yellow]warn time normalization failed: {exc}[/dim yellow]")
+        except Exception:
+            log("  [dim yellow]→ fallback: original query (time normalization failed)[/dim yellow]")
             return query
 
     @staticmethod

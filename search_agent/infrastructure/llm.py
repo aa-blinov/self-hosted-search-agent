@@ -28,10 +28,10 @@ def _extra() -> dict:
     return body
 
 
-def answer_with_sources(query: str, sources: list[dict], client=None) -> str:
+def answer_with_sources(query: str, sources: list[dict], client=None, log=None) -> str:
     del client
     today = datetime.now().strftime("%d %B %Y, %A")
-    return build_task_runner().answer_with_sources(query, sources, today=today)
+    return build_task_runner().answer_with_sources(query, sources, today=today, log=log)
 
 
 def answer_streaming(
@@ -42,7 +42,7 @@ def answer_streaming(
     panel_width: int = 100,
 ) -> str:
     del client
-    answer = answer_with_sources(query, sources)
+    answer = answer_with_sources(query, sources, log=console.print)
     if not answer:
         console.print("[yellow]No sources retrieved. Cannot answer without context.[/]")
         return ""
@@ -68,6 +68,6 @@ def answer_streaming(
     return answer
 
 
-def analyze_rag_papers(papers: list[dict], client=None) -> str:
+def analyze_rag_papers(papers: list[dict], client=None, log=None) -> str:
     del client
-    return build_task_runner().analyze_rag_papers(papers)
+    return build_task_runner().analyze_rag_papers(papers, log=log)

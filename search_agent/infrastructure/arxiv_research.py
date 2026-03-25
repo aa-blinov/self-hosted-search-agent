@@ -42,6 +42,27 @@ def _parse_arxiv(xml_text: str) -> list[dict]:
     return papers
 
 
+def fetch_arxiv_paper_by_id(arxiv_id: str, timeout: float = 15) -> dict | None:
+    """
+    Load a single paper by arXiv id (e.g. ``2312.12345`` or ``cs/9901001``) via the Atom API.
+    Returns the same shape as entries from :func:`search_arxiv`, or ``None``.
+    """
+    arxiv_id = arxiv_id.strip().rstrip(".pdf")
+    if not arxiv_id:
+        return None
+    try:
+        resp = requests.get(
+            ARXIV_API,
+            params={"id_list": arxiv_id},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        papers = _parse_arxiv(resp.text)
+        return papers[0] if papers else None
+    except Exception:
+        return None
+
+
 def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
     try:
         resp = requests.get(
