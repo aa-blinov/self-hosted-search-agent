@@ -12,8 +12,15 @@ class TuningModuleTests(unittest.TestCase):
 
     def test_claim_loop_and_variants(self) -> None:
         self.assertGreater(tuning.AGENT_MAX_CLAIM_ITERATIONS, 0)
+        self.assertGreater(tuning.AGENT_MAX_PARALLEL_CLAIMS, 0)
+        self.assertGreaterEqual(tuning.AGENT_MAX_SEARCH_CALLS_PER_RUN, 0)
         self.assertGreater(tuning.AGENT_MAX_QUERY_VARIANTS, 0)
         self.assertGreaterEqual(tuning.AGENT_MAX_REFINE_VARIANTS, tuning.AGENT_MAX_QUERY_VARIANTS)
+
+    def test_compose_answer_limits(self) -> None:
+        self.assertGreater(tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS, 500)
+        self.assertGreater(tuning.COMPOSE_ANSWER_DIGEST_LINE_CHARS, 0)
+        self.assertGreater(tuning.TRAIFILATURA_MIN_MAIN_CHARS, 0)
 
     def test_fetch_limits_non_negative(self) -> None:
         self.assertGreater(tuning.SHALLOW_FETCH_TIMEOUT, 0)

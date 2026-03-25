@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import logfire
 
 from search_agent import tuning
+from search_agent.infrastructure.caching_search_gateway import CachingBudgetSearchGateway
 from search_agent.settings import get_settings
 from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, RoutingDecision
 
@@ -54,6 +57,12 @@ class SearchAgentUseCase:
             claims = self._intelligence.decompose_claims(classification, log=log)
             log(f"\n[bold]Agent Search[/bold] [dim]{len(claims)} claim(s)[/dim]")
 
+            provider = get_settings().resolved_search_provider()
+            search_gateway = CachingBudgetSearchGateway(
+                self._search_gateway,
+                provider_label=provider,
+            )
+
             claim_runs: list[ClaimRun] = []
             audit = AuditTrail(
                 run_id=self._steps.build_run_id(query, started_at),
@@ -61,20 +70,54 @@ class SearchAgentUseCase:
                 started_at=started_at.isoformat(),
             )
 
-            for claim in claims:
-                with logfire.span(
-                    "search_agent.claim",
-                    claim_id=claim.claim_id,
-                    claim_text=claim.claim_text,
-                ):
-                    claim_run, iterations_used = self._run_claim(
-                        claim,
-                        classification,
-                        profile,
-                        log=log,
-                    )
-                claim_runs.append(claim_run)
-                self._extend_audit(audit, claim_run, iterations_used)
+            workers = max(1, min(tuning.AGENT_MAX_PARALLEL_CLAIMS, len(claims)))
+            log_lock = threading.Lock()
+
+            def safe_log(msg: str) -> None:
+                if workers > 1:
+                    with log_lock:
+                        log(msg)
+                else:
+                    log(msg)
+
+            if workers == 1 or len(claims) <= 1:
+                for claim in claims:
+                    with logfire.span(
+                        "search_agent.claim",
+                        claim_id=claim.claim_id,
+                        claim_text=claim.claim_text,
+                    ):
+                        claim_run, iterations_used = self._run_claim(
+                            claim,
+                            classification,
+                            profile,
+                            search_gateway=search_gateway,
+                            log=safe_log,
+                        )
+                    claim_runs.append(claim_run)
+                    self._extend_audit(audit, claim_run, iterations_used)
+            else:
+                future_to_idx: dict[Future, int] = {}
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    for idx, claim in enumerate(claims):
+                        fut = pool.submit(
+                            self._run_claim_with_span,
+                            claim,
+                            classification,
+                            profile,
+                            search_gateway,
+                            safe_log,
+                        )
+                        future_to_idx[fut] = idx
+                    tmp: list[tuple[ClaimRun, int] | None] = [None] * len(claims)
+                    for fut in as_completed(future_to_idx):
+                        idx = future_to_idx[fut]
+                        tmp[idx] = fut.result()
+                for row in tmp:
+                    assert row is not None
+                    claim_run, iterations_used = row
+                    claim_runs.append(claim_run)
+                    self._extend_audit(audit, claim_run, iterations_used)
 
             report = AgentRunResult(
                 user_query=query,
@@ -97,7 +140,36 @@ class SearchAgentUseCase:
                 )
             return report
 
-    def _run_claim(self, claim, classification, profile, *, log=None) -> tuple[ClaimRun, int]:
+    def _run_claim_with_span(
+        self,
+        claim,
+        classification,
+        profile,
+        search_gateway,
+        log,
+    ) -> tuple[ClaimRun, int]:
+        with logfire.span(
+            "search_agent.claim",
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+        ):
+            return self._run_claim(
+                claim,
+                classification,
+                profile,
+                search_gateway=search_gateway,
+                log=log,
+            )
+
+    def _run_claim(
+        self,
+        claim,
+        classification,
+        profile,
+        *,
+        search_gateway,
+        log=None,
+    ) -> tuple[ClaimRun, int]:
         log = log or (lambda msg: None)
         log(f"\n[bold]  Claim[/bold] [italic]{claim.claim_text}[/italic]")
 
@@ -136,7 +208,7 @@ class SearchAgentUseCase:
 
             new_snapshots = []
             for variant in next_variants:
-                variant_snapshots = self._search_gateway.search_variant(variant.query_text, profile, log=log)
+                variant_snapshots = search_gateway.search_variant(variant.query_text, profile, log=log)
                 new_snapshots.extend(self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots)
             snapshots.extend(new_snapshots)
 

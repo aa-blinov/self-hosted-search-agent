@@ -27,7 +27,7 @@ from rich.rule import Rule
 from rich.status import Status
 
 from search_agent.config.profiles import DEFAULT_PROFILE, PROFILES, SearchProfile, get_profile, list_profiles
-from search_agent.infrastructure.extractor import shutdown as shutdown_crawler
+from search_agent.infrastructure.extractor import get_extractor_name, shutdown as shutdown_crawler
 from search_agent.infrastructure.llm import analyze_rag_papers
 from search_agent.infrastructure.arxiv_research import fetch_rag_research
 from search_agent import tuning
@@ -241,7 +241,7 @@ class SearchCLI:
             f"Model         : [cyan]{settings.llm_model}[/]\n"
             f"Provider      : [cyan]{settings.llm_provider or 'any (no routing)'}[/]\n"
             f"Search        : [cyan]{search_backend}[/]\n"
-            f"Extractor     : [cyan]crawl4ai[/] (timeout: {tuning.CRAWL4AI_TIMEOUT}s)\n"
+            f"Extractor     : [cyan]{get_extractor_name()}[/] (crawl timeout: {tuning.CRAWL4AI_TIMEOUT}s)\n"
             f"Extract limit : [cyan]{tuning.EXTRACT_MAX_CHARS}[/] chars\n"
             f"Agent fetch   : [cyan]{tuning.AGENT_FETCH_TOP_N}[/] deep docs per claim (min budget)\n"
             f"SERP gate     : [cyan]{tuning.SERP_GATE_MIN_URLS}..{tuning.SERP_GATE_MAX_URLS}[/] URLs\n\n"

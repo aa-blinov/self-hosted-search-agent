@@ -218,7 +218,50 @@ class _FakeSteps:
         return 1.5
 
 
+class _FakeIntelligenceThreeSameQuery(_FakeIntelligence):
+    def decompose_claims(self, classification, log=None):
+        return [
+            Claim(
+                claim_id="c1",
+                claim_text="Same query text",
+                priority=1,
+                needs_freshness=False,
+                entity_set=[],
+            ),
+            Claim(
+                claim_id="c2",
+                claim_text="Same query text",
+                priority=1,
+                needs_freshness=False,
+                entity_set=[],
+            ),
+            Claim(
+                claim_id="c3",
+                claim_text="Same query text",
+                priority=1,
+                needs_freshness=False,
+                entity_set=[],
+            ),
+        ]
+
+
 class UseCaseLayerTests(unittest.TestCase):
+    def test_use_case_dedupes_search_across_parallel_claims(self):
+        search_gateway = _FakeSearchGateway()
+        intelligence = _FakeIntelligenceThreeSameQuery()
+        use_case = SearchAgentUseCase(
+            intelligence=intelligence,
+            search_gateway=search_gateway,
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=_FakeReceiptWriter(),
+            steps=_FakeSteps(),
+        )
+        report = use_case.run("Q", get_profile("web"), receipts_dir=None)
+        self.assertEqual(len(search_gateway.queries), 1)
+        self.assertEqual(intelligence.verify_calls, 3)
+        ids = [run.claim.claim_id for run in report.claims]
+        self.assertEqual(ids, ["c1", "c2", "c3"])
+
     def test_use_case_runs_single_claim_flow_and_writes_receipt(self):
         receipt_writer = _FakeReceiptWriter()
         search_gateway = _FakeSearchGateway()

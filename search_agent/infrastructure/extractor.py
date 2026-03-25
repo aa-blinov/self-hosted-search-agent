@@ -1,8 +1,7 @@
 """
-HTML → clean Markdown via crawl4ai (Playwright-based).
+HTTP fetch: main text via **trafilatura** (fast, no browser) when possible.
 
-Handles JS-rendered pages (gismeteo, yandex weather, etc.).
-No GPU needed.
+**Deep / JS-heavy pages**: crawl4ai (Playwright) when HTTP text is too thin.
 
 First run: uv run crawl4ai-setup   (installs Chromium)
 """
@@ -17,6 +16,8 @@ import re
 from html import unescape
 
 import requests as _requests
+from trafilatura import extract as _trafilatura_extract
+from trafilatura.metadata import extract_metadata as _trafilatura_extract_metadata
 
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import PruningContentFilter
@@ -181,6 +182,67 @@ def _extract_schema_org(html: str) -> dict:
     return collected
 
 
+def _trafilatura_main_text(html: str, final_url: str) -> str | None:
+    """Return main article/body text, or None if too thin or extraction failed."""
+    text = _trafilatura_extract(
+        html,
+        url=final_url,
+        fast=True,
+        include_comments=False,
+        include_tables=True,
+    )
+    if not text:
+        return None
+    text = text.strip()
+    if len(text) < tuning.TRAIFILATURA_MIN_MAIN_CHARS:
+        return None
+    return text
+
+
+def _legacy_shallow_payload(html: str, response, max_chars: int) -> dict:
+    title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or None
+    headings = _extract_all(r"<h[12][^>]*>(.*?)</h[12]>", html, limit=6, flags=re.IGNORECASE | re.DOTALL)
+    paragraphs = [
+        text
+        for text in _extract_all(r"<p[^>]*>(.*?)</p>", html, limit=8, flags=re.IGNORECASE | re.DOTALL)
+        if len(text) >= 40
+    ][:3]
+    schema_org = _extract_schema_org(html)
+    author = (
+        _extract_meta_content(html, ["author", "article:author", "parsely-author"])
+        or str(schema_org.get("author", ""))
+        or None
+    )
+    published_at = (
+        _extract_meta_content(
+            html,
+            ["article:published_time", "og:article:published_time", "datePublished", "pubdate", "dc.date"],
+        )
+        or str(schema_org.get("datePublished", ""))
+        or None
+    )
+
+    summary_parts = [title]
+    if meta_description:
+        summary_parts.append(meta_description)
+    summary_parts.extend(headings[:3])
+    summary_parts.extend(paragraphs[:2])
+    summary = re.sub(r"\s+", " ", " ".join(part for part in summary_parts if part)).strip()[:max_chars]
+
+    return {
+        "final_url": response.url,
+        "title": title or response.url,
+        "meta_description": meta_description,
+        "headings": headings,
+        "first_paragraphs": paragraphs,
+        "author": author,
+        "published_at": published_at,
+        "schema_org": schema_org,
+        "content": summary,
+    }
+
+
 def shallow_fetch(url: str, log=None) -> dict:
     """Fetch lightweight page signals without browser rendering."""
     log = log or (lambda msg: None)
@@ -224,47 +286,50 @@ def shallow_fetch(url: str, log=None) -> dict:
         log(f"    [yellow]  x shallow fetch error: {exc}[/yellow]")
         return {}
 
-    title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-    meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or None
-    headings = _extract_all(r"<h[12][^>]*>(.*?)</h[12]>", html, limit=6, flags=re.IGNORECASE | re.DOTALL)
-    paragraphs = [
-        text
-        for text in _extract_all(r"<p[^>]*>(.*?)</p>", html, limit=8, flags=re.IGNORECASE | re.DOTALL)
-        if len(text) >= 40
-    ][:3]
-    schema_org = _extract_schema_org(html)
-    author = (
-        _extract_meta_content(html, ["author", "article:author", "parsely-author"])
-        or str(schema_org.get("author", ""))
-        or None
-    )
-    published_at = (
-        _extract_meta_content(
-            html,
-            ["article:published_time", "og:article:published_time", "datePublished", "pubdate", "dc.date"],
-        )
-        or str(schema_org.get("datePublished", ""))
-        or None
-    )
+    main_text = _trafilatura_main_text(html, response.url)
+    if main_text:
+        log("    [dim]  [green]trafilatura[/green][/dim]")
+        meta = _trafilatura_extract_metadata(html, default_url=response.url)
+        title = ""
+        meta_description = None
+        author = None
+        published_at = None
+        if meta is not None:
+            title = (getattr(meta, "title", None) or "").strip()
+            meta_description = (getattr(meta, "description", None) or "").strip() or None
+            raw_author = getattr(meta, "author", None)
+            if isinstance(raw_author, list) and raw_author:
+                author = str(raw_author[0])
+            elif isinstance(raw_author, str) and raw_author.strip():
+                author = raw_author.strip()
+            raw_date = getattr(meta, "date", None)
+            if raw_date is not None:
+                published_at = str(raw_date)
+        if not title:
+            title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL) or response.url
 
-    summary_parts = [title]
-    if meta_description:
-        summary_parts.append(meta_description)
-    summary_parts.extend(headings[:3])
-    summary_parts.extend(paragraphs[:2])
-    summary = re.sub(r"\s+", " ", " ".join(part for part in summary_parts if part)).strip()[:max_chars]
+        first_paragraphs: list[str] = []
+        for block in main_text.split("\n\n"):
+            b = block.strip()
+            if len(b) >= 40:
+                first_paragraphs.append(b)
+            if len(first_paragraphs) >= 3:
+                break
 
-    return {
-        "final_url": response.url,
-        "title": title or url,
-        "meta_description": meta_description,
-        "headings": headings,
-        "first_paragraphs": paragraphs,
-        "author": author,
-        "published_at": published_at,
-        "schema_org": schema_org,
-        "content": summary,
-    }
+        return {
+            "final_url": response.url,
+            "title": title,
+            "meta_description": meta_description,
+            "headings": [],
+            "first_paragraphs": first_paragraphs,
+            "author": author,
+            "published_at": published_at,
+            "schema_org": {},
+            "content": main_text[:max_chars],
+        }
+
+    log("    [dim]  [yellow]legacy HTML[/yellow][/dim]")
+    return _legacy_shallow_payload(html, response, max_chars)
 
 
 def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
@@ -282,7 +347,7 @@ def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
 
 
 def _http_article_text(url: str) -> str:
-    """Plain HTTP + HTML heuristics (no browser). Returns empty string on failure or thin content."""
+    """HTTP GET + trafilatura main text; fallback to legacy regex heuristics (no browser)."""
     try:
         response = _requests.get(
             url,
@@ -293,6 +358,10 @@ def _http_article_text(url: str) -> str:
         html = response.text[:500000]
     except Exception:
         return ""
+
+    main = _trafilatura_main_text(html, response.url)
+    if main:
+        return main[: tuning.EXTRACT_MAX_CHARS]
 
     title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
     meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or ""
@@ -368,15 +437,14 @@ async def _fetch_url_content(url: str, log=None) -> str:
             return (text or "")[: tuning.EXTRACT_MAX_CHARS].strip()
         except Exception:
             return ""
-    if tuning.FETCH_TRY_HTTP_FIRST:
-        try:
-            text = await asyncio.to_thread(_http_article_text, url)
-            text = (text or "").strip()
-            if len(text) >= min_http:
-                log("    [dim][http-first][/dim]")
-                return text[: tuning.EXTRACT_MAX_CHARS].strip()
-        except Exception:
-            pass
+    try:
+        text = await asyncio.to_thread(_http_article_text, url)
+        text = (text or "").strip()
+        if len(text) >= min_http:
+            log("    [dim][http+trafilatura/legacy][/dim]")
+            return text[: tuning.EXTRACT_MAX_CHARS].strip()
+    except Exception:
+        pass
     return await _extract_async(url)
 
 
@@ -401,7 +469,7 @@ async def _fetch_deep_batch(urls: list[str], log) -> list[str]:
             if _is_reddit(u):
                 log("    [dim][reddit JSON API][/dim]")
             else:
-                log("    [dim][crawl4ai or http-first][/dim]")
+                log("    [dim][crawl4ai][/dim]")
             try:
                 capture = io.StringIO()
                 with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
@@ -436,7 +504,7 @@ def fetch_and_extract(url: str, log=None) -> str:
     """Fetch URL and return clean Markdown.
 
     Reddit  → public JSON API  (fast, no browser)
-    Others  → optional HTTP-first (FETCH_TRY_HTTP_FIRST env), else crawl4ai Playwright
+    Others  → HTTP (trafilatura + legacy) if enough text, else crawl4ai Playwright
     """
     return fetch_and_extract_many([url], log=log)[0]
 
@@ -511,4 +579,4 @@ def shutdown() -> None:
 
 
 def get_extractor_name() -> str:
-    return "crawl4ai"
+    return "trafilatura+crawl4ai"

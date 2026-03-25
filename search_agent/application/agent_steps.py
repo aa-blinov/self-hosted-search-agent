@@ -1813,7 +1813,10 @@ def refine_query_variants(
             claim.time_scope,
         ))
 
-    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < tuning.AGENT_MAX_CLAIM_ITERATIONS:
+    # Only search for explicit contradiction/correction when we already have
+    # contradicting evidence — not when evidence is merely missing (otherwise
+    # "… contradiction OR false OR debunked" poisons SERP for neutral factual claims).
+    if verification.verdict == "contradicted" and iteration < tuning.AGENT_MAX_CLAIM_ITERATIONS:
         candidates.append((
             _normalized_text(f"{claim.claim_text} contradiction OR false OR debunked"),
             "refined_contradiction",
@@ -1855,28 +1858,35 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
     return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
 
 
+def _truncate_compose_line(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:
-    sentences = re.split(r"(?<=[.!?])\s+", passage.text)
+    cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
+    head = passage.text[: max(cap, 4000)]
+    sentences = re.split(r"(?<=[.!?])\s+", head)
     if not sentences:
-        return passage.text[:220]
+        return _truncate_compose_line(passage.text, cap)
     scored = sorted(
         sentences,
         key=lambda sentence: _semantic_overlap(claim.claim_text, sentence),
         reverse=True,
     )
-    best = _normalized_text(scored[0]) if scored else passage.text[:220]
-    if len(best) > 240:
-        best = best[:237].rstrip() + "..."
-    return best
+    best = _normalized_text(scored[0]) if scored else _truncate_compose_line(passage.text, cap)
+    return _truncate_compose_line(best, cap)
 
 
 def _best_span_text(verification: VerificationResult, passages: list[Passage], claim: Claim, contradicted: bool = False) -> str | None:
+    cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
     spans = verification.contradicting_spans if contradicted else verification.supporting_spans
     if spans:
         text = _normalized_text(spans[0].text)
-        if len(text) > 240:
-            text = text[:237].rstrip() + "..."
-        return text
+        return _truncate_compose_line(text, cap)
     if passages:
         return _best_sentence_for_claim(claim, passages[0])
     return None
@@ -1906,9 +1916,7 @@ def _digest_sentence(passage: Passage) -> str:
         combined = f"{title}. {sentence}"
     else:
         combined = sentence
-    if len(combined) > 260:
-        combined = combined[:257].rstrip() + "..."
-    return combined
+    return _truncate_compose_line(combined, tuning.COMPOSE_ANSWER_DIGEST_LINE_CHARS)
 
 
 def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
