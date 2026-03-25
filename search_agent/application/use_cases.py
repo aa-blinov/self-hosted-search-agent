@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import logfire
 
+from search_agent import tuning
 from search_agent.settings import get_settings
 from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, RoutingDecision
 
@@ -121,7 +122,7 @@ class SearchAgentUseCase:
         next_variants = self._steps.build_query_variants(claim, classification)
 
         iterations_used = 0
-        claim_cap = get_settings().agent_max_claim_iterations
+        claim_cap = tuning.AGENT_MAX_CLAIM_ITERATIONS
         for iteration in range(1, claim_cap + 1):
             if not next_variants:
                 break
@@ -139,8 +140,7 @@ class SearchAgentUseCase:
                 new_snapshots.extend(self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots)
             snapshots.extend(new_snapshots)
 
-            s = get_settings()
-            gated_limit = min(s.serp_gate_max_urls, max(s.serp_gate_min_urls, profile.max_results))
+            gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
             if bundle and bundle.verification and bundle.verification.verdict != "supported":

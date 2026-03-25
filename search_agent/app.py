@@ -69,7 +69,11 @@ def run_single_query(
 
     name = (profile_name or get_settings().default_profile).strip()
     profile = get_profile(name)
-    console.print(f"[dim]Profile:[/] [cyan]{profile.name}[/] - {profile.description}")
+    settings = get_settings()
+    console.print(
+        f"[dim]Profile:[/] [cyan]{profile.name}[/] - {profile.description} "
+        f"[dim]· active search:[/] [cyan]{settings.resolved_search_provider()}[/]"
+    )
     with Status("[cyan]Searching (claim-level agent)...[/]", console=console):
         report = use_case.run(query, profile=profile, receipts_dir=receipts_dir, log=console.print)
 
@@ -123,6 +127,18 @@ def main() -> None:
     )
     parser.add_argument("--research", action="store_true", help="Run arXiv research analysis")
     parser.add_argument("--eval", help="Run evaluation dataset JSONL")
+    parser.add_argument(
+        "--eval-no-save",
+        action="store_true",
+        help="Do not write eval JSON artifact (by default each eval run is saved for progress tracking)",
+    )
+    parser.add_argument(
+        "--eval-out",
+        metavar="PATH",
+        default=None,
+        help="Eval JSON path or directory (default: eval_runs/)",
+    )
+    parser.add_argument("--eval-label", default=None, help="Label stored in eval JSON metadata (e.g. branch or experiment)")
     parser.add_argument("--receipts-dir", help="Persist audit receipts to this directory")
     parser.add_argument(
         "--search-provider",
@@ -149,7 +165,10 @@ def main() -> None:
     use_case = build_search_agent_use_case()
 
     if args.eval:
+        from pathlib import Path
+
         from search_agent.evaluation import evaluate_dataset
+        from search_agent.eval.tracking import DEFAULT_EVAL_RUNS_DIR, save_eval_run
 
         with Status("[cyan]Running evaluation...[/]", console=console):
             summary = evaluate_dataset(args.eval, client=client, receipts_dir=args.receipts_dir)
@@ -165,6 +184,10 @@ def main() -> None:
             title="[bold cyan]Evaluation[/]",
             border_style="cyan",
         ))
+        if not args.eval_no_save:
+            out: str | Path = args.eval_out if args.eval_out is not None else Path(DEFAULT_EVAL_RUNS_DIR)
+            path = save_eval_run(summary, out, label=args.eval_label)
+            console.print(f"[green]Eval saved:[/] {path}")
         return
 
     if args.research and not args.query:

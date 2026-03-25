@@ -26,7 +26,7 @@ from search_agent.domain.models import (
     VerificationResult,
 )
 from search_agent.domain.source_priors import lookup_source_prior
-from search_agent.settings import get_settings
+from search_agent import tuning
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
@@ -143,7 +143,7 @@ def _extract_entities(text: str) -> list[str]:
         if key not in seen:
             seen.add(key)
             deduped.append(entity)
-    return deduped[:get_settings().agent_max_query_variants]
+    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
 
 
 def _extract_time_scope(text: str) -> str | None:
@@ -355,7 +355,7 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
                 freshness_hint=freshness_hint,
             )
         )
-    return deduped[:get_settings().agent_max_query_variants]
+    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
 
 
 def _is_cyrillic_text(text: str) -> bool:
@@ -559,7 +559,7 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
                 freshness_hint=freshness_hint,
             )
         )
-    return deduped[:get_settings().agent_max_query_variants]
+    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
 
 
 def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSnapshot:
@@ -1002,19 +1002,19 @@ def _select_fetch_candidates(gated_results: list[GatedSerpResult], limit: int) -
 
 def _routing_limits(profile, decision: RoutingDecision) -> tuple[int, int]:
     shallow_limit = {
-        "short_path": get_settings().shallow_fetch_short_limit,
-        "targeted_retrieval": get_settings().shallow_fetch_targeted_limit,
-        "iterative_loop": get_settings().shallow_fetch_iterative_limit,
+        "short_path": tuning.SHALLOW_FETCH_SHORT_LIMIT,
+        "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_LIMIT,
+        "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_LIMIT,
     }[decision.mode]
     deep_limit = {
-        "short_path": get_settings().deep_fetch_short_limit,
-        "targeted_retrieval": get_settings().deep_fetch_targeted_limit,
-        "iterative_loop": get_settings().deep_fetch_iterative_limit,
+        "short_path": tuning.DEEP_FETCH_SHORT_LIMIT,
+        "targeted_retrieval": tuning.DEEP_FETCH_TARGETED_LIMIT,
+        "iterative_loop": tuning.DEEP_FETCH_ITERATIVE_LIMIT,
     }[decision.mode]
     if profile.fetch_top_n == 0:
         deep_limit = 0
     else:
-        deep_limit = min(deep_limit, max(profile.fetch_top_n, get_settings().agent_fetch_top_n))
+        deep_limit = min(deep_limit, max(profile.fetch_top_n, tuning.AGENT_FETCH_TOP_N))
     return shallow_limit, deep_limit
 
 
@@ -1237,7 +1237,7 @@ def fetch_claim_documents(
                 first_paragraphs=document.first_paragraphs,
                 schema_org=document.schema_org,
             )
-            for document in shallow_ranked[:get_settings().agent_snippet_fallback_docs]
+            for document in shallow_ranked[:tuning.AGENT_SNIPPET_FALLBACK_DOCS]
             if document.fetch_depth == "shallow"
         )
 
@@ -1417,7 +1417,7 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     )
 
 
-def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = get_settings().cheap_passage_limit) -> list[Passage]:
+def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = tuning.CHEAP_PASSAGE_LIMIT) -> list[Passage]:
     scored: list[tuple[float, Passage]] = []
     for passage in passages:
         score = cheap_passage_score(claim, passage)
@@ -1429,7 +1429,7 @@ def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = get
     return [passage for _, passage in scored[:limit]]
 
 
-def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = get_settings().agent_passage_top_k) -> list[Passage]:
+def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = tuning.AGENT_PASSAGE_TOP_K) -> list[Passage]:
     reranked = [
         replace(passage, utility_score=utility_score_for_claim(claim, passage))
         for passage in passages
@@ -1750,7 +1750,7 @@ def refine_query_variants(
                     freshness_hint=freshness_hint,
                 )
             )
-        return variants[:get_settings().agent_max_refine_variants]
+        return variants[:tuning.AGENT_MAX_REFINE_VARIANTS]
 
     candidates: list[tuple[str, str, str, str | None, str | None]] = []
     base_keywords = _variant_keywords(claim.claim_text, claim.entity_set)
@@ -1813,7 +1813,7 @@ def refine_query_variants(
             claim.time_scope,
         ))
 
-    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < get_settings().agent_max_claim_iterations:
+    if verification.verdict in {"contradicted", "insufficient_evidence"} and iteration < tuning.AGENT_MAX_CLAIM_ITERATIONS:
         candidates.append((
             _normalized_text(f"{claim.claim_text} contradiction OR false OR debunked"),
             "refined_contradiction",
@@ -1840,19 +1840,19 @@ def refine_query_variants(
                 freshness_hint=freshness_hint,
             )
         )
-    return variants[:get_settings().agent_max_refine_variants]
+    return variants[:tuning.AGENT_MAX_REFINE_VARIANTS]
 
 
 def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int) -> bool:
     verification = bundle.verification
     if verification is None:
-        return iteration >= get_settings().agent_max_claim_iterations
+        return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
     if verification.verdict == "supported":
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
         if not claim.entity_set and verification.confidence >= 0.95 and bundle.independent_source_count >= 2:
             return True
-    return iteration >= get_settings().agent_max_claim_iterations
+    return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
 
 
 def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:

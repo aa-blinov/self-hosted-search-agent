@@ -11,7 +11,7 @@ from openai import OpenAI
 from search_agent.application.agent_steps import run_search_agent
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import AgentRunResult, ClaimRun
-from search_agent.settings import get_settings
+from search_agent import tuning
 
 
 @dataclass(slots=True)
@@ -398,7 +398,7 @@ def evaluate_dataset(
     case_delay = (
         delay_between_cases
         if delay_between_cases is not None
-        else get_settings().eval_case_delay_sec
+        else tuning.EVAL_CASE_DELAY_SEC
     )
 
     for idx, case in enumerate(cases, 1):

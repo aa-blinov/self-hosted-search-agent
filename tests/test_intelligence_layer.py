@@ -16,12 +16,7 @@ from search_agent.settings import AppSettings
 
 class IntelligenceLayerTests(unittest.TestCase):
     def test_classify_query_uses_deterministic_relative_date_normalization(self):
-        service = PydanticAIQueryIntelligence(
-            AppSettings(
-                llm_api_key="test-key",
-                logfire_send_to_logfire="false",
-            )
-        )
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="OpenAI revenue 2026-03-25"):
             with patch.object(service._normalize_agent, "run_sync") as normalize_call:
@@ -32,12 +27,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         normalize_call.assert_not_called()
 
     def test_classify_query_marks_news_digest_intent(self):
-        service = PydanticAIQueryIntelligence(
-            AppSettings(
-                llm_api_key="test-key",
-                logfire_send_to_logfire="false",
-            )
-        )
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="что 2026-03-25 было в Астане"):
             classification = service.classify_query("что сегодня было в Астане")
@@ -54,12 +44,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(normalized, "что 2026-03-25 было в Астане")
 
     def test_decompose_claims_maps_structured_output_to_claims(self):
-        service = PydanticAIQueryIntelligence(
-            AppSettings(
-                llm_api_key="test-key",
-                logfire_send_to_logfire="false",
-            )
-        )
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         classification = QueryClassification(
             query="Compare OpenAI revenue and Microsoft revenue in 2025",
             normalized_query="Compare OpenAI revenue and Microsoft revenue in 2025",
@@ -101,12 +86,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(claims[1].entity_set, ["Microsoft"])
 
     def test_verify_claim_maps_structured_quotes_to_spans(self):
-        service = PydanticAIQueryIntelligence(
-            AppSettings(
-                llm_api_key="test-key",
-                logfire_send_to_logfire="false",
-            )
-        )
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(
             claim_id="claim-1",
             claim_text="Satya Nadella is the CEO of Microsoft.",

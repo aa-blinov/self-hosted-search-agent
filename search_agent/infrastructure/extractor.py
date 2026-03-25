@@ -22,7 +22,7 @@ from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-from search_agent.settings import get_settings
+from search_agent import tuning
 
 # --------------------------------------------------------------------------- #
 #  Reddit — официальный JSON API, без браузера                                #
@@ -184,8 +184,7 @@ def _extract_schema_org(html: str) -> dict:
 def shallow_fetch(url: str, log=None) -> dict:
     """Fetch lightweight page signals without browser rendering."""
     log = log or (lambda msg: None)
-    s = get_settings()
-    max_chars = s.extract_max_chars
+    max_chars = tuning.EXTRACT_MAX_CHARS
 
     short = url[:72] + "..." if len(url) > 72 else url
     log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
@@ -217,7 +216,7 @@ def shallow_fetch(url: str, log=None) -> dict:
         response = _requests.get(
             url,
             headers={"User-Agent": _HTTP_UA},
-            timeout=s.shallow_fetch_timeout,
+            timeout=tuning.SHALLOW_FETCH_TIMEOUT,
         )
         response.raise_for_status()
         html = response.text[:250000]
@@ -272,7 +271,7 @@ def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
     """Parallel HTTP shallow fetches; order matches ``urls``."""
     if not urls:
         return []
-    max_workers = min(get_settings().fetch_shallow_concurrency, len(urls))
+    max_workers = min(tuning.FETCH_SHALLOW_CONCURRENCY, len(urls))
     log = log or (lambda msg: None)
 
     def one(u: str) -> dict:
@@ -284,12 +283,11 @@ def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
 
 def _http_article_text(url: str) -> str:
     """Plain HTTP + HTML heuristics (no browser). Returns empty string on failure or thin content."""
-    s = get_settings()
     try:
         response = _requests.get(
             url,
             headers={"User-Agent": _HTTP_UA},
-            timeout=s.shallow_fetch_timeout,
+            timeout=tuning.SHALLOW_FETCH_TIMEOUT,
         )
         response.raise_for_status()
         html = response.text[:500000]
@@ -311,15 +309,14 @@ def _http_article_text(url: str) -> str:
     summary_parts.extend(headings[:4])
     summary_parts.extend(paragraphs[:14])
     text = re.sub(r"\s+", " ", " ".join(summary_parts)).strip()
-    return text[: s.extract_max_chars]
+    return text[: tuning.EXTRACT_MAX_CHARS]
 
 
 def _build_crawler_config() -> CrawlerRunConfig:
-    s = get_settings()
     return CrawlerRunConfig(
-        page_timeout=s.crawl4ai_timeout * 1000,
+        page_timeout=tuning.CRAWL4AI_TIMEOUT * 1000,
         wait_until="domcontentloaded",
-        delay_before_return_html=s.crawl4ai_delay_before_html,
+        delay_before_return_html=tuning.CRAWL4AI_DELAY_BEFORE_HTML,
         magic=True,
         markdown_generator=DefaultMarkdownGenerator(
             content_filter=PruningContentFilter(
@@ -345,41 +342,39 @@ async def _ensure_crawler() -> AsyncWebCrawler:
 
 
 async def _extract_async(url: str) -> str:
-    s = get_settings()
     crawler = await _ensure_crawler()
     result = await asyncio.wait_for(
         crawler.arun(url=url, config=_build_crawler_config()),
-        timeout=s.crawl4ai_timeout,
+        timeout=tuning.CRAWL4AI_TIMEOUT,
     )
     if not result.success:
         return ""
     md = result.markdown
     if not md:
         return ""
-    if s.crawl4ai_prefer_raw:
+    if tuning.CRAWL4AI_PREFER_RAW:
         text = md.raw_markdown or md.fit_markdown or ""
     else:
         text = md.fit_markdown or md.raw_markdown or ""
-    return text[: s.extract_max_chars].strip()
+    return text[: tuning.EXTRACT_MAX_CHARS].strip()
 
 
 async def _fetch_url_content(url: str, log=None) -> str:
     log = log or (lambda msg: None)
-    s = get_settings()
-    min_http = max(200, s.fetch_http_min_chars)
+    min_http = max(200, tuning.FETCH_HTTP_MIN_CHARS)
     if _is_reddit(url):
         try:
             text = await asyncio.wait_for(asyncio.to_thread(_extract_reddit, url), timeout=20.0)
-            return (text or "")[: s.extract_max_chars].strip()
+            return (text or "")[: tuning.EXTRACT_MAX_CHARS].strip()
         except Exception:
             return ""
-    if s.fetch_try_http_first:
+    if tuning.FETCH_TRY_HTTP_FIRST:
         try:
             text = await asyncio.to_thread(_http_article_text, url)
             text = (text or "").strip()
             if len(text) >= min_http:
                 log("    [dim][http-first][/dim]")
-                return text[: s.extract_max_chars].strip()
+                return text[: tuning.EXTRACT_MAX_CHARS].strip()
         except Exception:
             pass
     return await _extract_async(url)
@@ -397,7 +392,7 @@ def _extract_event_loop() -> asyncio.AbstractEventLoop:
 
 
 async def _fetch_deep_batch(urls: list[str], log) -> list[str]:
-    sem = asyncio.Semaphore(min(get_settings().fetch_deep_concurrency, len(urls)))
+    sem = asyncio.Semaphore(min(tuning.FETCH_DEEP_CONCURRENCY, len(urls)))
 
     async def one(u: str) -> str:
         async with sem:
@@ -417,7 +412,7 @@ async def _fetch_deep_batch(urls: list[str], log) -> list[str]:
                     log("    [yellow]  err empty response[/yellow]")
                 return text
             except asyncio.TimeoutError:
-                log(f"    [yellow]  err timeout ({get_settings().crawl4ai_timeout}s)[/yellow]")
+                log(f"    [yellow]  err timeout ({tuning.CRAWL4AI_TIMEOUT}s)[/yellow]")
                 return ""
             except Exception as e:
                 log(f"    [red]  err crawl4ai error: {e}[/red]")

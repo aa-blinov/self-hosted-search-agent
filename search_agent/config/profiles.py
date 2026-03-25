@@ -4,7 +4,7 @@ Search profiles for the local runtime.
 Profiles map to search behaviour (web vs news, language, freshness) and query hints
 (bangs → operator text, engines → site: filters) via `search_agent.infrastructure.serp_query.build_routed_query`.
 
-- Brave: categories, Goggles, country/safesearch from env; `goggles` is Brave-only.
+- Brave Search API: categories, Goggles, country/safesearch from env; `goggles` applies only with this provider.
 - DDGS: optional per-profile `ddgs_region`, `ddgs_safesearch`, `ddgs_timelimit` apply when the active provider is ddgs
   (`SEARCH_PROVIDER_OVERRIDE` or `SEARCH_PROVIDER`); timelimit otherwise follows `time_range` (day/week/month/year -> d/w/m/y).
 
@@ -52,7 +52,7 @@ _GOGGLE_BOOST_REPOS = "$boost=5,site=github.com\n$boost=4,site=gitlab.com\n$boos
 PROFILES: dict[str, SearchProfile] = {
     "web": SearchProfile(
         name="web",
-        description="General web search (Brave web index)",
+        description="General web search",
         categories=["general"],
         language="auto",
         time_range=None,
@@ -71,7 +71,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "news": SearchProfile(
         name="news",
-        description="News vertical (Brave news index), ~last week",
+        description="News vertical, ~last week",
         categories=["news"],
         language="auto",
         time_range="week",
@@ -107,7 +107,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "science": SearchProfile(
         name="science",
-        description="Scientific sources (Goggles + arxiv hints)",
+        description="Scientific sources (arxiv and related boosts)",
         categories=["science"],
         language="auto",
         time_range=None,
@@ -118,7 +118,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "tech": SearchProfile(
         name="tech",
-        description="IT / software (Tech Blogs Goggle + query hints)",
+        description="IT / software (tech-blogs bias + query hints)",
         categories=["it"],
         language="auto",
         time_range=None,
@@ -129,7 +129,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "it_qa": SearchProfile(
         name="it_qa",
-        description="Q&A sites (inline Goggles boost SE family)",
+        description="Q&A sites (Stack Overflow family boosts)",
         categories=["it"],
         language="auto",
         time_range=None,
@@ -140,7 +140,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "it_repos": SearchProfile(
         name="it_repos",
-        description="Repositories and packages (Goggles boost GitHub / GitLab / PyPI)",
+        description="Repositories and packages (GitHub / GitLab / PyPI boosts)",
         categories=["it"],
         language="auto",
         time_range=None,
@@ -160,7 +160,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "reference": SearchProfile(
         name="reference",
-        description="Reference fallback (site: + Goggles boost wiki/wikidata)",
+        description="Reference fallback (Wikipedia / Wikidata site + boosts)",
         categories=["general"],
         language="auto",
         time_range=None,
@@ -171,7 +171,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "reddit": SearchProfile(
         name="reddit",
-        description="Reddit (site:reddit.com + Goggles boost)",
+        description="Reddit (site:reddit.com + boost)",
         categories=["general"],
         language="auto",
         time_range=None,
@@ -193,7 +193,7 @@ PROFILES: dict[str, SearchProfile] = {
     ),
     "wikipedia": SearchProfile(
         name="wikipedia",
-        description="Wikipedia + Wikidata (site: filters + Goggles boost)",
+        description="Wikipedia + Wikidata (site filters + boosts)",
         categories=["general"],
         language="auto",
         time_range=None,
@@ -219,7 +219,7 @@ def list_profiles() -> str:
     for name, profile in PROFILES.items():
         categories = "+".join(profile.categories)
         bangs = f" {' '.join(profile.bang_prefixes)}" if profile.bang_prefixes else ""
-        gog = f" goggles={len(profile.goggles)}" if profile.goggles else ""
+        gog = f" ranking_rules={len(profile.goggles)}" if profile.goggles else ""
         lang = f" [{profile.language}]" if profile.language != "auto" else ""
         time_range = f" {profile.time_range}" if profile.time_range else ""
         lines.append(

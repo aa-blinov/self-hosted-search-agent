@@ -30,6 +30,7 @@ from search_agent.config.profiles import DEFAULT_PROFILE, PROFILES, SearchProfil
 from search_agent.infrastructure.extractor import shutdown as shutdown_crawler
 from search_agent.infrastructure.llm import analyze_rag_papers
 from search_agent.infrastructure.arxiv_research import fetch_rag_research
+from search_agent import tuning
 from search_agent.settings import get_settings
 
 console = Console()
@@ -45,7 +46,7 @@ _NEWS_KW = {
     "новости", "новость", "news", "latest", "today", "breaking",
     "вчера", "сегодня", "прямо сейчас", "last hour",
 }
-# «Сегодня / вчера / сейчас» → узкое окно свежести (Brave freshness=day)
+# «Сегодня / вчера / сейчас» → узкое окно свежести (профиль news_fresh / ru_news_fresh)
 _NEWS_FRESH_KW = {
     "сегодня", "вчера", "прямо сейчас", "сейчас", "за сутки", "за день",
     "today", "yesterday", "last 24", "past 24",
@@ -169,7 +170,8 @@ class SearchCLI:
             f"[dim]Profile: {profile.name} | "
             f"categories: {'+'.join(profile.categories)} | "
             f"lang: {profile.language} | "
-            f"fetch_top: {profile.fetch_top_n}[/dim]"
+            f"fetch_top: {profile.fetch_top_n} | "
+            f"search: {get_settings().resolved_search_provider()}[/dim]"
         )
 
         report = self.use_case.run(
@@ -239,10 +241,10 @@ class SearchCLI:
             f"Model         : [cyan]{settings.llm_model}[/]\n"
             f"Provider      : [cyan]{settings.llm_provider or 'any (no routing)'}[/]\n"
             f"Search        : [cyan]{search_backend}[/]\n"
-            f"Extractor     : [cyan]crawl4ai[/] (timeout: {settings.crawl4ai_timeout}s)\n"
-            f"Extract limit : [cyan]{settings.extract_max_chars}[/] chars\n"
-            f"Agent fetch   : [cyan]{settings.agent_fetch_top_n}[/] deep docs per claim (min budget)\n"
-            f"SERP gate     : [cyan]{settings.serp_gate_min_urls}..{settings.serp_gate_max_urls}[/] URLs\n\n"
+            f"Extractor     : [cyan]crawl4ai[/] (timeout: {tuning.CRAWL4AI_TIMEOUT}s)\n"
+            f"Extract limit : [cyan]{tuning.EXTRACT_MAX_CHARS}[/] chars\n"
+            f"Agent fetch   : [cyan]{tuning.AGENT_FETCH_TOP_N}[/] deep docs per claim (min budget)\n"
+            f"SERP gate     : [cyan]{tuning.SERP_GATE_MIN_URLS}..{tuning.SERP_GATE_MAX_URLS}[/] URLs\n\n"
             f"Receipts dir  : [cyan]{settings.agent_receipts_dir or 'disabled'}[/]\n\n"
             f"[dim]Last profile used: {self._last_profile_name}[/dim]",
             title="[bold]Config[/]",

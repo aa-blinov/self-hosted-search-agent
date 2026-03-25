@@ -1,0 +1,138 @@
+{
+  "description": "Проверенные ответы для eval_data/quality_20.jsonl. Используйте для ручной сверки или будущего автоматического scoring ответа (не подхватывается текущим score_reports по умолчанию).",
+  "sources_checked_utc": "2025-03-25",
+  "cases": [
+    {
+      "case_id": "q20-01-ceo-microsoft",
+      "short_answer": "Satya Nadella",
+      "key_facts": ["Chief Executive Officer of Microsoft Corporation: Satya Nadella."],
+      "sources": [
+        {"url": "https://www.microsoft.com/en-us/investor/corporate-governance/officers-and-directors", "note": "Corporate officers / IR"},
+        {"url": "https://news.microsoft.com/source/2014/02/04/microsoft-board-names-satya-nadella-as-ceo/", "note": "Historical appointment announcement"}
+      ]
+    },
+    {
+      "case_id": "q20-02-capital-france",
+      "short_answer": "Paris",
+      "key_facts": ["Capital of France is Paris."],
+      "sources": [{"url": "https://en.wikipedia.org/wiki/Paris", "note": "Paris as capital (encyclopedic)"}]
+    },
+    {
+      "case_id": "q20-03-python-313-release",
+      "short_answer": "2024-10-07 (7 October 2024)",
+      "key_facts": ["Python 3.13.0 final release date on python.org: October 7, 2024."],
+      "sources": [{"url": "https://www.python.org/downloads/release/python-3130/", "note": "Official release page"}]
+    },
+    {
+      "case_id": "q20-04-moon-landing-year",
+      "short_answer": "1969",
+      "key_facts": ["First crewed Moon landing: Apollo 11, July 20, 1969 (UTC)."],
+      "sources": [{"url": "https://www.nasa.gov/mission_pages/apollo/apollo11.html", "note": "NASA"}]
+    },
+    {
+      "case_id": "q20-05-speed-of-light",
+      "short_answer": "299792458",
+      "key_facts": ["Speed of light in vacuum c is exactly 299792458 m/s by SI definition."],
+      "sources": [{"url": "https://physics.nist.gov/cgi-bin/cuu/Value?c", "note": "CODATA / NIST"}]
+    },
+    {
+      "case_id": "q20-06-everest-height-2020",
+      "short_answer": "8848.86 m",
+      "key_facts": ["Joint 2020 Nepal–China announcement: 8848.86 meters."],
+      "sources": [{"url": "https://www.reuters.com/article/world/mount-everest-is-higher-than-we-thought-say-nepal-and-china-idUSKBN28I18U/", "note": "Reuters summary of announcement"}]
+    },
+    {
+      "case_id": "q20-07-linux-creator",
+      "short_answer": "Linus Torvalds",
+      "key_facts": ["Linux kernel originated by Linus Torvalds (1991)."],
+      "sources": [{"url": "https://en.wikipedia.org/wiki/Linux", "note": "Wikipedia overview (cross-check primary sources for citations)"}]
+    },
+    {
+      "case_id": "q20-08-planet-closest-sun",
+      "short_answer": "Mercury",
+      "key_facts": ["Mercury is the planet with the smallest mean orbital distance from the Sun in the classical planets."],
+      "sources": [{"url": "https://solarsystem.nasa.gov/planets/mercury/overview/", "note": "NASA Solar System Exploration"}]
+    },
+    {
+      "case_id": "q20-09-berlin-wall-year",
+      "short_answer": "1989",
+      "key_facts": ["Border opening widely associated with 9 November 1989."],
+      "sources": [{"url": "https://en.wikipedia.org/wiki/Berlin_Wall#Fall_of_the_wall", "note": "1989 opening (encyclopedic)"}]
+    },
+    {
+      "case_id": "q20-10-tesla-ceo",
+      "short_answer": "Elon Musk",
+      "key_facts": ["As of public SEC/IR materials in 2024–2025 timeframe, Elon Musk is described as CEO of Tesla."],
+      "sources": [{"url": "https://ir.tesla.com/", "note": "Tesla investor relations (verify latest DEF 14A)"}],
+      "caveat": "Корпоративные титулы меняются редко, но проверяйте свежие SEC-файлы при регрессии."
+    },
+    {
+      "case_id": "q20-11-multihop-msft-japan",
+      "short_answer": "Microsoft CEO: Satya Nadella; Japan capital: Tokyo",
+      "key_facts": ["Two independent facts in one query."],
+      "sources": [
+        {"url": "https://www.microsoft.com/ceo", "note": "Microsoft CEO page"},
+        {"url": "https://en.wikipedia.org/wiki/Tokyo", "note": "Tokyo as capital (encyclopedic)"}
+      ]
+    },
+    {
+      "case_id": "q20-12-conflict-python-date",
+      "short_answer": "Нет: официальная дата релиза Python 3.13.0 — 7 октября 2024, не 1 октября.",
+      "key_facts": ["python.org lists Python 3.13.0 as Oct 7, 2024."],
+      "expected_eval": "contradicted",
+      "sources": [{"url": "https://www.python.org/downloads/release/python-3130/", "note": "Official"}]
+    },
+    {
+      "case_id": "q20-13-conflict-nadella-year",
+      "short_answer": "Нет: объявление о назначении Nadella CEO — 4 февраля 2014, не 2015.",
+      "key_facts": ["Microsoft news 2014-02-04."],
+      "expected_eval": "contradicted",
+      "sources": [{"url": "https://news.microsoft.com/source/2014/02/04/microsoft-board-names-satya-nadella-as-ceo/", "note": "Microsoft Source"}]
+    },
+    {
+      "case_id": "q20-14-insufficient-apollo-serial",
+      "short_answer": "Публично стабильного «серийника CPU» для AGC в ответе агента ожидать не стоит — маркировка чипа/партии не является широко документированным полем в открытых обзорных источниках.",
+      "key_facts": [],
+      "expected_eval": "insufficient_evidence",
+      "sources": [{"url": "https://history.nasa.gov/afj/computer.html", "note": "NASA history pages describe AGC at high level; serial-level factory marking not typically listed"}],
+      "caveat": "Если агент выдумывает конкретный номер — это hallucination."
+    },
+    {
+      "case_id": "q20-15-water-common-name",
+      "short_answer": "Water",
+      "key_facts": ["H2O common name: water."],
+      "sources": [{"url": "https://pubchem.ncbi.nlm.nih.gov/compound/Water", "note": "PubChem"}]
+    },
+    {
+      "case_id": "q20-16-photosynthesis-oxygen",
+      "short_answer": "Yes (oxygenic photosynthesis releases O2).",
+      "key_facts": ["Oxygenic photosynthesis splits water and releases O2."],
+      "sources": [{"url": "https://www.nature.com/scitable/definition/photosynthesis-oxygenic/", "note": "Educational overview (Nature Scitable)"}]
+    },
+    {
+      "case_id": "q20-17-capital-japan",
+      "short_answer": "Tokyo",
+      "key_facts": ["Capital of Japan: Tokyo (de facto seat of government)."],
+      "sources": [{"url": "https://en.wikipedia.org/wiki/Japan", "note": "Capital Tokyo (encyclopedic)"}]
+    },
+    {
+      "case_id": "q20-18-freshness-nadella-ceo",
+      "short_answer": "Yes (as of recent public Microsoft materials).",
+      "key_facts": ["Cross-check microsoft.com CEO page for current title."],
+      "sources": [{"url": "https://www.microsoft.com/en-us/ceo", "note": "Microsoft CEO"}]
+    },
+    {
+      "case_id": "q20-19-largest-ocean",
+      "short_answer": "Pacific Ocean",
+      "key_facts": ["NOAA and standard references: Pacific is largest by area."],
+      "sources": [{"url": "https://oceanservice.noaa.gov/facts/pacific.html", "note": "NOAA"}]
+    },
+    {
+      "case_id": "q20-20-longest-river-guinness",
+      "short_answer": "Nile (per Guinness World Records listing for longest river).",
+      "key_facts": ["Guinness currently lists the Nile as longest river (length record subject to measurement methodology)."],
+      "sources": [{"url": "https://www.guinnessworldrecords.com/world-records/longest-river", "note": "Guinness — verify current page text"}],
+      "caveat": "В литературе спорят Amazon vs Nile по методике измерения; формулировка кейса привязана к Guinness."
+    }
+  ]
+}

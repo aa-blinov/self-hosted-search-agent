@@ -12,6 +12,9 @@ models/
 # Secrets
 .env
 
+# Eval runs (local quality tracking; commit only baselines you care about)
+eval_runs/
+
 # Editor
 .vscode/
 .idea/
