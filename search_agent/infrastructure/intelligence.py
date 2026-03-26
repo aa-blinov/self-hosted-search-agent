@@ -279,14 +279,10 @@ class PydanticAIQueryIntelligence:
 
     def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
         log = log or (lambda msg: None)
-        if classification.intent == "news_digest":
-            return self._fallback_claims(classification)
-        # For synthesis queries skip sub-claim decomposition: searching the original
-        # query as a single claim already surfaces the right pages, and independent
-        # sub-claim verification (always insufficient_evidence for open-ended questions)
-        # just wastes N×M SERP calls.
-        if classification.intent == "synthesis" and tuning.SYNTHESIS_SKIP_DECOMPOSE:
-            log("  [dim]-> synthesis intent: single-claim search (no decomposition)[/dim]")
+        # Both synthesis and news_digest are open-ended: skip sub-claim decomposition.
+        # news_digest additionally gets synthesize_answer in use_cases.py (same as synthesis).
+        if classification.intent in ("synthesis", "news_digest") and tuning.SYNTHESIS_SKIP_DECOMPOSE:
+            log(f"  [dim]-> {classification.intent} intent: single-claim search (no decomposition)[/dim]")
             return self._fallback_claims(classification)
         if not self._enabled or not should_decompose(classification.normalized_query):
             return self._fallback_claims(classification)
