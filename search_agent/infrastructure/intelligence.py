@@ -10,7 +10,6 @@ from pydantic_ai import Agent
 from search_agent.domain.models import Claim, EvidenceSpan, Passage, QueryClassification, VerificationResult
 
 from search_agent.application.text_heuristics import (
-    COMPARISON_MARKERS,
     clamp,
     extract_entities,
     extract_region_hint,
@@ -107,6 +106,10 @@ class _NormalizedQueryOutput(BaseModel):
     normalized_query: str = Field(min_length=1)
 
 
+class _IntentOutput(BaseModel):
+    intent: Literal["factual", "synthesis", "news_digest"]
+
+
 class _ClaimDraft(BaseModel):
     claim_text: str = Field(min_length=1)
     priority: int = 1
@@ -192,18 +195,29 @@ class PydanticAIQueryIntelligence:
                 "Do not add Markdown headings (##) inside bullet lists."
             ),
         )
+
+        # Intent classification: factual | synthesis | news_digest.
+        # Prompt validated at 100% accuracy on 35-example dataset (intent_eval.py).
+        self._intent_agent: Agent[None, _IntentOutput] = Agent(
+            self._model,
+            output_type=_IntentOutput,
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "Classify query intent. Reply with exactly one token: factual, synthesis, or news_digest.\n"
+                "factual: specific verifiable fact (who/when/what/where).\n"
+                "synthesis: explanation, comparison, how-to, overview, what's new.\n"
+                "news_digest: recent news or events."
+            ),
+        )
+        # Cache for intent classification: keyed on normalized query string.
+        self._intent_cache: dict[str, str] = {}
     def classify_query(self, query: str, log=None) -> QueryClassification:
         normalized_query = self._normalize_time_references(query, log=log)
-        lowered = normalized_query.lower()
         region_hint = extract_region_hint(normalized_query)
         time_scope = extract_time_scope(normalized_query)
         freshness = needs_freshness(query)
-        if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness):
-            intent = "news_digest"
-        elif any(marker in lowered for marker in COMPARISON_MARKERS):
-            intent = "comparison"
-        else:
-            intent = "factual"
+        intent = self._classify_intent_llm(normalized_query, log=log)
         complexity = "multi_hop" if should_decompose(normalized_query) else "single_hop"
         entities = extract_entities(normalized_query)
         entity_disambiguation = any(len(entity) <= 4 for entity in entities)
@@ -218,15 +232,60 @@ class PydanticAIQueryIntelligence:
             entity_disambiguation=entity_disambiguation,
         )
 
+    def _classify_intent_llm(self, normalized_query: str, log=None) -> str:
+        """Classify intent via LLM: factual | synthesis | news_digest.
+
+        Falls back to heuristic (is_news_digest_query → 'news_digest', else 'factual')
+        when LLM is disabled or on error.
+        """
+        log = log or (lambda msg: None)
+
+        # Fast-path: return cached result for identical normalized queries.
+        cached = self._intent_cache.get(normalized_query)
+        if cached is not None:
+            log(f"  [dim green]-> intent cache hit: [italic]{cached}[/italic][/dim green]")
+            return cached
+
+        if not self._enabled:
+            # No LLM available — fall back to heuristic.
+            return "news_digest" if is_news_digest_query(normalized_query) else "factual"
+
+        model_settings = build_model_settings(
+            self._settings,
+            max_tokens=tuning.INTENT_CLASSIFY_MAX_TOKENS,
+            temperature=0,
+        )
+        try:
+            with log_llm_call(
+                log,
+                task="classify_intent",
+                model=self._settings.llm_model,
+                label=normalized_query[:60],
+                input_text=normalized_query,
+            ) as tracker:
+                with logfire.span("query_intelligence.classify_intent", query=normalized_query):
+                    result = self._intent_agent.run_sync(
+                        normalized_query,
+                        model_settings=model_settings,
+                    )
+                tracker.set_output(result.output)
+            intent = result.output.intent
+        except Exception as exc:
+            log(f"  [dim yellow]-> intent classification failed: {exc}[/dim yellow]")
+            intent = "news_digest" if is_news_digest_query(normalized_query) else "factual"
+
+        self._intent_cache[normalized_query] = intent
+        return intent
+
     def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
         log = log or (lambda msg: None)
         if classification.intent == "news_digest":
             return self._fallback_claims(classification)
-        # For comparison/synthesis queries skip sub-claim decomposition: searching
-        # the original query as a single claim already surfaces the right pages, and
-        # independent sub-claim verification (which always returns insufficient_evidence
-        # for open-ended comparison questions) just wastes N×M SERP calls.
-        if classification.intent == "comparison" and tuning.COMPARISON_SKIP_DECOMPOSE:
+        # For synthesis queries skip sub-claim decomposition: searching the original
+        # query as a single claim already surfaces the right pages, and independent
+        # sub-claim verification (always insufficient_evidence for open-ended questions)
+        # just wastes N×M SERP calls.
+        if classification.intent == "synthesis" and tuning.SYNTHESIS_SKIP_DECOMPOSE:
             log("  [dim]-> comparison intent: single-claim search (no decomposition)[/dim]")
             return self._fallback_claims(classification)
         if not self._enabled or not should_decompose(classification.normalized_query):
@@ -369,7 +428,7 @@ class PydanticAIQueryIntelligence:
     def synthesize_answer(self, query: str, passages: list[Passage], log=None) -> str:
         """Generate a direct answer for comparison/synthesis queries from collected passages.
 
-        Called after all claim runs complete when ``classification.intent == 'comparison'``.
+        Called after all claim runs complete when ``classification.intent == 'synthesis'``.
         Unlike ``compose_answer``, this produces a prose/bullet answer instead of a
         verification-verdict table.
         """

@@ -139,11 +139,11 @@ class SearchAgentUseCase:
             )
             report.answer = self._steps.compose_answer(report)
 
-            # For comparison/synthesis queries, synthesize a direct answer from all
-            # collected passages — verify_claim reliably returns insufficient_evidence
-            # for open-ended comparison questions even with rich evidence, so compose_answer
+            # For synthesis queries, synthesize a direct answer from all collected
+            # passages — verify_claim reliably returns insufficient_evidence for
+            # open-ended questions even with rich evidence, so compose_answer
             # would produce a nearly empty response.
-            if classification.intent == "comparison":
+            if classification.intent == "synthesis":
                 synth_passages: list = []
                 for cr in claim_runs:
                     # Re-extract all split passages from fetched documents for richer context.

@@ -1,0 +1,35 @@
+{"query": "Who is the CEO of Microsoft?", "expected_intent": "factual", "notes": "specific person role lookup"}
+{"query": "What is the boiling point of water?", "expected_intent": "factual", "notes": "atomic physical constant"}
+{"query": "When was Python 3.12 released?", "expected_intent": "factual", "notes": "specific release date"}
+{"query": "Когда вышел Python 3.12?", "expected_intent": "factual", "notes": "Russian: specific release date"}
+{"query": "What is the capital of France?", "expected_intent": "factual", "notes": "atomic geography fact"}
+{"query": "Who founded Apple?", "expected_intent": "factual", "notes": "specific person fact"}
+{"query": "Кто основал Apple?", "expected_intent": "factual", "notes": "Russian: specific person fact"}
+{"query": "What year was the Eiffel Tower built?", "expected_intent": "factual", "notes": "specific year lookup"}
+{"query": "What is the atomic number of carbon?", "expected_intent": "factual", "notes": "atomic numeric fact"}
+{"query": "Where is OpenAI headquartered?", "expected_intent": "factual", "notes": "specific location"}
+{"query": "Где находится штаб-квартира OpenAI?", "expected_intent": "factual", "notes": "Russian: specific location"}
+{"query": "What is the speed of light?", "expected_intent": "factual", "notes": "physical constant"}
+{"query": "Who wrote Crime and Punishment?", "expected_intent": "factual", "notes": "specific author fact"}
+{"query": "Кто написал Преступление и наказание?", "expected_intent": "factual", "notes": "Russian: specific author fact"}
+{"query": "What is the default port for HTTPS?", "expected_intent": "factual", "notes": "specific technical fact"}
+{"query": "How does asyncio work in Python?", "expected_intent": "synthesis", "notes": "explanation of mechanism"}
+{"query": "Как работает asyncio в Python?", "expected_intent": "synthesis", "notes": "Russian: explanation of mechanism"}
+{"query": "Explain the GIL in Python", "expected_intent": "synthesis", "notes": "how-to/explanation"}
+{"query": "What's new in Python 3.12?", "expected_intent": "synthesis", "notes": "overview of changes"}
+{"query": "Что нового в Python 3.12?", "expected_intent": "synthesis", "notes": "Russian: overview of changes"}
+{"query": "Difference between Python 3.11 and 3.12", "expected_intent": "synthesis", "notes": "comparison/overview"}
+{"query": "Разница между Python 3.11 и 3.12", "expected_intent": "synthesis", "notes": "Russian: comparison of versions"}
+{"query": "Tell me about transformer architecture", "expected_intent": "synthesis", "notes": "open-ended overview request"}
+{"query": "How does garbage collection work in CPython?", "expected_intent": "synthesis", "notes": "mechanism explanation"}
+{"query": "Как работает сборка мусора в CPython?", "expected_intent": "synthesis", "notes": "Russian: mechanism explanation"}
+{"query": "Overview of Kubernetes networking", "expected_intent": "synthesis", "notes": "open-ended overview"}
+{"query": "How to set up a FastAPI project from scratch?", "expected_intent": "synthesis", "notes": "how-to guide"}
+{"query": "Как настроить FastAPI проект с нуля?", "expected_intent": "synthesis", "notes": "Russian: how-to guide"}
+{"query": "Compare Redis vs Memcached for caching", "expected_intent": "synthesis", "notes": "explicit comparison"}
+{"query": "Explain the difference between REST and GraphQL", "expected_intent": "synthesis", "notes": "comparison/explanation"}
+{"query": "Latest news about AI today", "expected_intent": "news_digest", "notes": "explicit news + freshness marker"}
+{"query": "Что произошло в мире сегодня?", "expected_intent": "news_digest", "notes": "Russian: what happened today"}
+{"query": "What happened in tech this week?", "expected_intent": "news_digest", "notes": "recent events digest"}
+{"query": "Какие новости в России сегодня?", "expected_intent": "news_digest", "notes": "Russian: today's news in Russia"}
+{"query": "What is happening in Ukraine today?", "expected_intent": "news_digest", "notes": "current events with location"}

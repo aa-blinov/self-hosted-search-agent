@@ -63,10 +63,13 @@ SNIPPET_VERIFY_CONFIDENCE_THRESHOLD = 0.85
 CLAIM_DECOMPOSE_MAX_TOKENS = 500
 VERIFY_CLAIM_MAX_TOKENS = 700
 TIME_NORMALIZE_MAX_TOKENS = 120
-# For comparison/synthesis intent: skip sub-claim decomposition, search with the
-# original query as a single claim. Avoids N-claims × M-variants SERP fan-out.
-COMPARISON_SKIP_DECOMPOSE = True
-# Max tokens for the synthesize_answer LLM call (comparison queries only).
+# For synthesis intent: skip sub-claim decomposition, search with the original query as a
+# single claim. Avoids N-claims × M-variants SERP fan-out for open-ended questions.
+SYNTHESIS_SKIP_DECOMPOSE = True
+# Tokens for LLM intent classification (factual / synthesis / news_digest).
+# qwen3.5-35b-a3b generates <think>...</think> before the JSON answer — 300 is enough.
+INTENT_CLASSIFY_MAX_TOKENS = 300
+# Max tokens for the synthesize_answer LLM call (synthesis queries only).
 # Higher than verify_claim because thinking models (qwen) consume budget on <think>...</think>
 # before the actual answer, and synthesis needs to produce a complete bullet list.
 SYNTHESIZE_ANSWER_MAX_TOKENS = 2000
