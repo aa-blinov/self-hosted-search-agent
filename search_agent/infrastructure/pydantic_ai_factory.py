@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+from openai import AsyncOpenAI
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from search_agent import tuning
 from search_agent.settings import AppSettings
 
 
 def build_openai_provider(settings: AppSettings) -> OpenAIProvider:
-    return OpenAIProvider(
+    # Use explicit AsyncOpenAI client so we can set a hard timeout.
+    # Without this, a stalled provider response hangs forever (observed: 603 s).
+    # max_retries=0 because the agent loop handles retries at the iteration level.
+    client = AsyncOpenAI(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
+        timeout=float(tuning.LLM_REQUEST_TIMEOUT),
+        max_retries=0,
     )
+    return OpenAIProvider(openai_client=client)
 
 
 def build_openai_model(settings: AppSettings) -> OpenAIChatModel:

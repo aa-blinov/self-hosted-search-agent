@@ -110,6 +110,13 @@ COMPOSE_ANSWER_MAX_SPAN_CHARS = 2000
 # News-digest single line cap (slightly tighter for list readability).
 COMPOSE_ANSWER_DIGEST_LINE_CHARS = 520
 
+# --- LLM request timeout ---
+# Hard cap on a single LLM API call (seconds).  Without this, a stalled
+# provider response can block a claim for 600 + seconds (observed in eval).
+# On timeout the call raises an exception → verify_claim returns
+# insufficient_evidence and the agent continues or finishes the iteration.
+LLM_REQUEST_TIMEOUT = 30
+
 # --- Evaluation harness ---
 EVAL_CASE_DELAY_SEC = 2.0
 

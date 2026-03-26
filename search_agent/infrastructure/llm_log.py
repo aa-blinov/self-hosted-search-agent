@@ -58,9 +58,10 @@ def log_llm_call(
     esc_model = _rich_escape(model)
     esc_detail = _rich_escape(preview_snippet(detail, max_len=96)) if detail.strip() else ""
     suffix = f" · {esc_detail}" if esc_detail else ""
+    in_tok = metrics.input_chars // 4
     log(
         f"  [dim cyan]LLM[/] [cyan]→[/] [bold]{_rich_escape(task)}[/] "
-        f"[dim]· {esc_model}{suffix} · in={metrics.input_chars} chars[/dim]"
+        f"[dim]· {esc_model}{suffix} · in={metrics.input_chars} (~{in_tok}tok)[/dim]"
     )
     t0 = time.perf_counter()
     try:
@@ -70,13 +71,14 @@ def log_llm_call(
         msg = _rich_escape(preview_snippet(str(exc), max_len=140))
         log(
             f"  [dim cyan]LLM[/] [red]ERR[/] [bold]{_rich_escape(task)}[/] "
-            f"[dim]({dt:.1f}s) · in={metrics.input_chars} chars · {msg}[/dim]"
+            f"[dim]({dt:.1f}s) · in={metrics.input_chars} (~{in_tok}tok) · {msg}[/dim]"
         )
         raise
     dt = time.perf_counter() - t0
     out_n = metrics.output_chars
     out_disp = str(out_n) if out_n >= 0 else "?"
+    out_tok = f"~{out_n // 4}tok" if out_n >= 0 else "?"
     log(
         f"  [dim cyan]LLM[/] [green]OK[/] [bold]{_rich_escape(task)}[/] "
-        f"[dim]({dt:.1f}s) · in={metrics.input_chars} · out={out_disp} chars[/dim]"
+        f"[dim]({dt:.1f}s) · in={metrics.input_chars} (~{in_tok}tok) · out={out_disp} ({out_tok})[/dim]"
     )
