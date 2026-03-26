@@ -28,21 +28,48 @@ def build_openai_model(settings: AppSettings) -> OpenAIChatModel:
     )
 
 
+def _is_reasoning_model(model_name: str) -> bool:
+    """Return True for models that use mandatory reasoning (o1/o3/o4/gpt-oss family).
+
+    These models:
+    - Do NOT accept a temperature parameter (raises 400)
+    - Require PromptedOutput for structured responses (JSON schema / tool calls
+      are silently ignored or malformed on some providers)
+    """
+    name = model_name.lower()
+    return any(x in name for x in ("gpt-oss", "/o1", "/o3", "/o4", "-o1", "-o3", "-o4"))
+
+
 def build_model_settings(
     settings: AppSettings,
     *,
     max_tokens: int,
     temperature: float,
 ) -> OpenAIChatModelSettings:
-    extra_body: dict[str, object] = {"reasoning": {"effort": "none"}}
+    extra_body: dict[str, object] = {}
+    model_lower = settings.llm_model.lower()
+
+    # qwen models generate <think> tokens before the answer which consume part
+    # of max_tokens; disabling reasoning keeps outputs compact and fast.
+    # Other models (gpt-oss, llama, etc.) either don't support this field or
+    # require reasoning — skip it for non-qwen models.
+    if "qwen" in model_lower:
+        extra_body["reasoning"] = {"effort": "none"}
+
     if settings.llm_provider:
         extra_body["provider"] = {
             "order": [settings.llm_provider.lower()],
             "allow_fallbacks": False,
         }
-    return OpenAIChatModelSettings(
-        max_tokens=min(max_tokens, settings.llm_max_tokens),
-        temperature=temperature,
-        extra_headers={"HTTP-Referer": settings.llm_http_referer},
-        extra_body=extra_body,
-    )
+
+    kwargs: dict[str, object] = {
+        "max_tokens": min(max_tokens, settings.llm_max_tokens),
+        "extra_headers": {"HTTP-Referer": settings.llm_http_referer},
+        "extra_body": extra_body,
+    }
+    # Reasoning models (gpt-oss, o1, o3, o4) reject the temperature parameter —
+    # omit it entirely so the API doesn't return a 400 error.
+    if not _is_reasoning_model(settings.llm_model):
+        kwargs["temperature"] = temperature
+
+    return OpenAIChatModelSettings(**kwargs)  # type: ignore[arg-type]

@@ -28,6 +28,8 @@ class EvaluationCase:
     query: str
     profile: str = "web"
     expected_claims: list[ExpectedClaim] = field(default_factory=list)
+    min_answer_chars: int | None = None   # synthesis/news_digest answer depth check
+    min_unique_sources: int | None = None  # news_digest source diversity check
 
 
 def load_evaluation_cases(path: str) -> list[EvaluationCase]:
@@ -43,6 +45,8 @@ def load_evaluation_cases(path: str) -> list[EvaluationCase]:
                 split=item["split"],
                 query=item["query"],
                 profile=item.get("profile", "web"),
+                min_answer_chars=item.get("min_answer_chars"),
+                min_unique_sources=item.get("min_unique_sources"),
                 expected_claims=[
                     ExpectedClaim(
                         match=claim["match"],
@@ -69,6 +73,22 @@ def _match_claim(run_list: list[ClaimRun], expected: ExpectedClaim) -> ClaimRun 
         if needle in haystack or haystack in needle:
             return run
     return None
+
+
+def _answer_unique_source_count(answer: str) -> int:
+    """Count unique domains cited in the answer sources section."""
+    from urllib.parse import urlparse
+    domains: set[str] = set()
+    for url in _answer_source_urls(answer):
+        try:
+            netloc = urlparse(url if url.startswith("http") else "https://" + url).netloc.lower()
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            if netloc:
+                domains.add(netloc)
+        except Exception:
+            pass
+    return len(domains)
 
 
 def _answer_source_urls(answer: str) -> list[str]:
@@ -185,6 +205,11 @@ def score_reports(
     total_citations = 0
     unsupported_bullets = 0
     total_answer_bullets = 0
+    answer_depth_requirements = 0
+    answer_depth_hits = 0
+    source_diversity_requirements = 0
+    source_diversity_hits = 0
+    answer_chars_all: list[int] = []
     costs: list[float] = []
     latency_values: list[int] = []
     case_details: list[dict] = []
@@ -234,24 +259,44 @@ def score_reports(
         if backend_issue:
             split_bucket["backend_issue_cases"] += 1
 
+        # citation_validity and unsupported_statement are meaningful only for factual
+        # queries where the answer is grounded in claim-level passages.  Synthesis and
+        # news_digest answers use a separate passage path (synthesize_answer), so their
+        # cited URLs won't appear in run.passages and all bullets look "unsupported".
+        is_factual_split = not case.split.startswith("synthesis") and case.split != "news_digest"
+
         supported_claim_count = 0
         for run in report.claims:
             bundle = run.evidence_bundle
             if bundle and bundle.verification and bundle.verification.verdict == "supported":
                 supported_claim_count += 1
 
-        answer_bullets = [bullet for bullet in _answer_bullets(report.answer) if not _is_guardrail_bullet(bullet)]
-        total_answer_bullets += len(answer_bullets)
-        unsupported_bullets += max(0, len(answer_bullets) - supported_claim_count)
+        if is_factual_split:
+            answer_bullets = [bullet for bullet in _answer_bullets(report.answer) if not _is_guardrail_bullet(bullet)]
+            total_answer_bullets += len(answer_bullets)
+            unsupported_bullets += max(0, len(answer_bullets) - supported_claim_count)
 
-        cited_urls = _answer_source_urls(report.answer)
-        valid_urls = {
-            passage.url
-            for run in report.claims
-            for passage in run.passages
-        }
-        total_citations += len(cited_urls)
-        valid_citations += sum(1 for url in cited_urls if url in valid_urls)
+            cited_urls = _answer_source_urls(report.answer)
+            valid_urls = {
+                passage.url
+                for run in report.claims
+                for passage in run.passages
+            }
+            total_citations += len(cited_urls)
+            valid_citations += sum(1 for url in cited_urls if url in valid_urls)
+
+        # Answer depth and source diversity checks (synthesis / news_digest)
+        answer_chars = len(report.answer)
+        answer_chars_all.append(answer_chars)
+        unique_sources = _answer_unique_source_count(report.answer)
+        if case.min_answer_chars is not None:
+            answer_depth_requirements += 1
+            if answer_chars >= case.min_answer_chars:
+                answer_depth_hits += 1
+        if case.min_unique_sources is not None:
+            source_diversity_requirements += 1
+            if unique_sources >= case.min_unique_sources:
+                source_diversity_hits += 1
 
         detail = {
             "case_id": case.case_id,
@@ -261,6 +306,8 @@ def score_reports(
             "latency_ms": case_latency,
             "search_cost": case_cost,
             "answer": report.answer,
+            "answer_chars": answer_chars,
+            "unique_sources_in_answer": unique_sources,
             "backend_issue": backend_issue,
             "claims": [],
         }
@@ -354,6 +401,9 @@ def score_reports(
         "route_match_rate": _rate(route_hits, route_expectations),
         "primary_requirement_rate": _rate(primary_requirement_hits, primary_requirements),
         "source_requirement_rate": _rate(source_requirement_hits, source_requirements),
+        "answer_depth_rate": _rate(answer_depth_hits, answer_depth_requirements),
+        "source_diversity_rate": _rate(source_diversity_hits, source_diversity_requirements),
+        "median_answer_chars": round(statistics.median(answer_chars_all), 0) if answer_chars_all else 0.0,
         "backend_issue_rate": round(backend_issue_cases / len(cases), 4) if cases else 0.0,
         "median_search_cost": round(statistics.median(costs), 3) if costs else 0.0,
         "median_answer_latency": round(statistics.median(latency_values), 1) if latency_values else 0.0,

@@ -6,6 +6,7 @@ from typing import Literal
 import logfire
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from pydantic_ai.output import PromptedOutput
 
 from search_agent.domain.models import Claim, EvidenceSpan, Passage, QueryClassification, VerificationResult
 
@@ -23,7 +24,7 @@ from search_agent.application.text_heuristics import (
 )
 from search_agent import tuning
 from search_agent.infrastructure.llm_log import log_llm_call, output_char_len
-from search_agent.infrastructure.pydantic_ai_factory import build_model_settings, build_openai_model
+from search_agent.infrastructure.pydantic_ai_factory import _is_reasoning_model, build_model_settings, build_openai_model
 from search_agent.infrastructure.telemetry import configure_logfire
 from search_agent.settings import AppSettings
 
@@ -150,9 +151,18 @@ class PydanticAIQueryIntelligence:
         # Cache for normalize_time_references: keyed on raw query string (deterministic LLM call).
         self._normalize_cache: dict[str, str] = {}
 
+        # Reasoning models (gpt-oss, o1, o3, o4) don't support JSON schema / tool calls
+        # reliably — use PromptedOutput so the schema is injected in the system prompt
+        # instead of being sent as a structured-output spec.
+        _reasoning = _is_reasoning_model(settings.llm_model)
+
+        def _out(model_cls):
+            """Wrap output type in PromptedOutput for reasoning models."""
+            return PromptedOutput(model_cls) if _reasoning else model_cls
+
         self._normalize_agent = Agent(
             self._model,
-            output_type=_NormalizedQueryOutput,
+            output_type=_out(_NormalizedQueryOutput),
             retries=1,
             instrument=True,
             system_prompt=(
@@ -163,7 +173,7 @@ class PydanticAIQueryIntelligence:
         )
         self._claim_agent = Agent(
             self._model,
-            output_type=_ClaimDecompositionOutput,
+            output_type=_out(_ClaimDecompositionOutput),
             retries=1,
             instrument=True,
             system_prompt=(
@@ -173,7 +183,7 @@ class PydanticAIQueryIntelligence:
         )
         self._verifier_agent = Agent(
             self._model,
-            output_type=_VerificationOutput,
+            output_type=_out(_VerificationOutput),
             retries=1,
             instrument=True,
             system_prompt=(
@@ -202,7 +212,7 @@ class PydanticAIQueryIntelligence:
         # Prompt validated at 100% accuracy on 35-example dataset (intent_eval.py).
         self._intent_agent: Agent[None, _IntentOutput] = Agent(
             self._model,
-            output_type=_IntentOutput,
+            output_type=_out(_IntentOutput),
             retries=1,
             instrument=True,
             system_prompt=(
@@ -435,12 +445,15 @@ class PydanticAIQueryIntelligence:
             return ""
 
         # Build numbered passage list, keeping URL for the sources footer.
-        # For news_digest queries each URL is a distinct article — 1 passage per URL
-        # gives maximum source diversity.  For synthesis (e.g. docs comparison) we
-        # allow 2 passages per URL so that different sections of the same authority
-        # page (docs.python.org, Wikipedia) can both contribute.
+        # For news_digest: limit to 1 passage per *domain* so that sites returning
+        # multiple article URLs (e.g. kommersant.ru/news1, /news2, /theme/…) don't
+        # crowd out other sources.  12 slots → up to 12 unique news domains.
+        # For synthesis (docs comparison etc.) we allow 2 passages per URL so that
+        # different sections of the same authority page can both contribute.
         MAX_PER_URL = 1 if intent == "news_digest" else 2
+        MAX_PER_DOMAIN = 1 if intent == "news_digest" else 999
         url_counts: dict[str, int] = {}
+        domain_counts: dict[str, int] = {}
         prompt_parts: list[str] = []
         passage_refs: list[tuple[str, str]] = []  # (title, url) per passage index
         for p in passages:
@@ -449,9 +462,18 @@ class PydanticAIQueryIntelligence:
             text = (p.text or "").strip()
             if not text:
                 continue
+            try:
+                from urllib.parse import urlparse as _up
+                _netloc = _up(url).netloc.lower()
+                domain = _netloc[4:] if _netloc.startswith("www.") else _netloc
+            except Exception:
+                domain = url
             if url_counts.get(url, 0) >= MAX_PER_URL:
                 continue
+            if domain_counts.get(domain, 0) >= MAX_PER_DOMAIN:
+                continue
             url_counts[url] = url_counts.get(url, 0) + 1
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
             n = len(prompt_parts) + 1
             prompt_parts.append(f"[{n}] {title}\n{text[:1200]}")
             passage_refs.append((title, url))

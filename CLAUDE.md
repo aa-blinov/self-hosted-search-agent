@@ -7,10 +7,10 @@
 uv run python -m search_agent -S ddgs -q "your query"
 
 # Eval on control dataset
-uv run python -m search_agent.eval --dataset eval_data/control_dataset.jsonl --label my-label
+uv run python -m search_agent --eval eval_data/control_dataset.jsonl --eval-label my-label
 
 # Compare two eval runs
-uv run python -m search_agent.eval compare eval_runs/eval_A.json eval_runs/eval_B.json
+uv run python -m search_agent.eval eval_runs/eval_A.json eval_runs/eval_B.json
 ```
 
 ---
@@ -219,30 +219,39 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 
 | Metric | What it measures |
 |--------|-----------------|
-| `claim_support_rate` | supported verdicts / expected supported |
-| `contradiction_detection_rate` | contradicted hits / expected contradicted |
-| `insufficient_detection_rate` | insufficient hits / expected insufficient |
+| `claim_support_rate` | supported verdicts / expected supported (factual split only) |
+| `contradiction_detection_rate` | contradicted hits / expected contradicted (factual) |
+| `insufficient_detection_rate` | insufficient hits / expected insufficient (factual) |
 | `route_match_rate` | actual route in expected_routes set |
 | `source_requirement_rate` | independent_sources ≥ min_required |
 | `primary_requirement_rate` | primary source present when required |
-| `citation_validity_rate` | cited URLs found in actual passages |
-| `unsupported_statement_rate` | answer bullets without claim support |
-| `median_answer_latency` | ms (p50 across 11 cases) |
+| `citation_validity_rate` | cited URLs found in actual passages (factual split only) |
+| `unsupported_statement_rate` | answer bullets without claim support (factual split only) |
+| `answer_depth_rate` | % cases where answer ≥ min_answer_chars (synthesis/news) |
+| `source_diversity_rate` | % news_digest cases with ≥ min_unique_sources domains |
+| `median_answer_chars` | p50 answer length in characters |
+| `median_answer_latency` | ms (p50 across all cases) |
 | `median_search_cost` | variants + 0.25×shallow + 1.0×deep + 0.5×claims |
 | `avg_iterations_per_claim` | mean iterations |
 
-### Baseline (pre-optimization)
+### Eval dataset (control_dataset.jsonl — 12 cases)
+- **7 factual cases**: ceo-microsoft, python-313-release-date, water-boiling-celsius, irs-government-agency, python-wrong-release-date, nadella-wrong-year, nadella-room-temperature
+- **3 synthesis cases**: synthesis-python-311-vs-312, synthesis-python-313-features, synthesis-asyncio-python (min_answer_chars=800)
+- **2 news_digest cases**: news-digest-iran, news-digest-ai (min_answer_chars=600, min_unique_sources=4)
+
+### Baseline (pre-optimization, 7-case factual-only dataset)
 `median_answer_latency: 20,743ms`
 
-### Current best (opt8: intent-aware authority extract)
+### Current best (opt8: intent-aware authority extract, qwen3.5-35b-a3b)
 `median_answer_latency: ~12,345ms` (-40% vs baseline), `claim_support_rate: 1.0`, `source_requirement_rate: 1.0`
 
-| opt | label | latency | claim_support |
-|-----|-------|---------|---------------|
-| baseline | — | 20,743ms | — |
-| opt6 | parallel SERP + adaptive fetch + caches | ~12,359ms | 1.0 |
-| opt7 | authority extract 15K (all intents) | 16,865ms ❌ | 0.89 |
-| **opt8** | authority extract 15K (synthesis only) | **12,345ms** ✅ | **1.0** |
+| opt | label | latency | claim_support | notes |
+|-----|-------|---------|---------------|-------|
+| baseline | — | 20,743ms | — | 7-case factual dataset |
+| opt6 | parallel SERP + adaptive fetch + caches | ~12,359ms | 1.0 | |
+| opt7 | authority extract 15K (all intents) | 16,865ms ❌ | 0.89 | regression |
+| **opt8** | authority extract 15K (synthesis only) | **12,345ms** ✅ | **1.0** | qwen |
+| opt9 | gpt-oss-120b/groq + PromptedOutput | TBD | TBD | 12-case dataset |
 
 ---
 
@@ -259,6 +268,12 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 9. **Authority domain extract (synthesis only)** — `EXTRACT_MAX_CHARS_AUTHORITY=15000` for wikipedia.org, docs.python.org, MDN etc., applied **only when intent==synthesis**; factual queries keep 4K to avoid slow verify_claim LLM calls
 10. **Source-score ranked synthesis passages** — synthesis path sorts all raw passages by `source_score` desc (authoritative pages first) instead of TF-IDF `cheap_passage_filter`; fixes cross-language mismatch where Russian query scores English docs.python.org sections near zero, dropping feature-specific sections (f-strings, TypeVar, etc.)
 11. **UTF-8 bytes-first encoding** — `extractor.py` tries `response.content.decode("utf-8")` before falling back to requests charset detection; fixes mojibake on Russian sites that declare `windows-1251`/`iso-8859-1` but serve UTF-8 (chardet sometimes returns MacRoman as `apparent_encoding`, making blind override worse)
+12. **news_digest source diversity** — `synthesize_answer` applies `MAX_PER_URL=1` + `MAX_PER_DOMAIN=1` for news_digest intent; prevents aggregator pages (e.g. kommersant.ru/theme/…) from flooding all 12 prompt slots; ensures answers cite ≥ 12 unique news domains
+13. **gpt-oss-120b / reasoning-model compatibility** (`pydantic_ai_factory.py`, `intelligence.py`):
+    - `_is_reasoning_model()` detects `gpt-oss`, `o1`, `o3`, `o4` family
+    - Temperature omitted for reasoning models (400 error if sent)
+    - All structured-output agents use `PromptedOutput(Model)` for reasoning models — JSON schema injected in system prompt instead of broken tool-call / response_format spec on Groq
+    - qwen-only: `{"reasoning": {"effort": "none"}}` in extra_body (unchanged)
 
 ## Known regressions / behaviour notes
 
@@ -270,6 +285,7 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 - WikipediaSourceHandler **removed** — was using REST API returning 500-900 chars lead section only; now trafilatura extracts full article (up to 15K for synthesis)
 - `cheap_passage_filter` TF-IDF threshold (0.18) kills cross-language passages — Russian query vs English docs.python.org: feature-specific sections ("f-string improvements", "PEP 695") don't repeat version numbers → score < 0.18 → dropped; synthesis path bypasses this by sorting on `source_score`
 - `SYNTHESIS_PASSAGE_LIMIT=25` controls how many passages go to `synthesize_answer` (was using `CHEAP_PASSAGE_LIMIT=12`)
+- `gpt-oss-120b` on Groq: `verify_claim` still occasionally fails with `Exceeded maximum retries (1) for output validation` on complex passages (4000+ input chars); falls back to heuristic verifier; root cause is model generating extra reasoning commentary around JSON — `PromptedOutput` greatly reduces but does not fully eliminate this
 
 ---
 
