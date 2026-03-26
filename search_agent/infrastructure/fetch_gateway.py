@@ -18,6 +18,7 @@ class LegacyFetchGateway:
         iteration: int = 1,
         page_cache=None,
         page_cache_lock=None,
+        intent: str = "factual",
     ):
         with logfire.span(
             "fetch_gateway.fetch_claim_documents",
@@ -35,4 +36,5 @@ class LegacyFetchGateway:
                 iteration=iteration,
                 page_cache=page_cache,
                 page_cache_lock=page_cache_lock,
+                intent=intent,
             )

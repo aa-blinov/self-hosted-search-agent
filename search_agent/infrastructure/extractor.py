@@ -40,8 +40,24 @@ from search_agent.infrastructure.source_handlers import (
 from search_agent.settings import get_settings
 
 
-def _extract_cap() -> int:
-    return get_settings().resolved_extract_max_chars()
+def _extract_cap(url: str = "", intent: str = "factual") -> int:
+    """Return char limit for this URL.
+
+    Authority domains get a higher limit *only* for synthesis queries — factual
+    queries keep the default cap so verify_claim receives compact passage sets and
+    stays fast.
+    """
+    base = get_settings().resolved_extract_max_chars()
+    if url and intent == "synthesis":
+        try:
+            host = (urlparse(url).netloc or "").lower().split("@")[-1].split(":")[0]
+            if host.startswith("www."):
+                host = host[4:]
+        except Exception:
+            host = ""
+        if any(domain in host for domain in tuning.AUTHORITY_DOMAINS):
+            return max(base, tuning.EXTRACT_MAX_CHARS_AUTHORITY)
+    return base
 
 
 def _url_shallow_browser_first(url: str) -> bool:
@@ -118,7 +134,7 @@ def _shallow_payload_from_plain_text(text: str, *, final_url: str, title_hint: s
 def _shallow_browser_extract(url: str, log=None) -> dict:
     """Shallow fetch via crawl4ai only (used for vc.ru and similar)."""
     log = log or (lambda msg: None)
-    max_chars = _extract_cap()
+    max_chars = _extract_cap(url)
     short = url[:72] + "..." if len(url) > 72 else url
     log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
     log("    [dim]  [cyan]browser-only[/cyan] shallow · skip HTTP (TLS/bot issues)[/dim]")
@@ -336,10 +352,10 @@ def _legacy_shallow_payload(html: str, response, max_chars: int) -> dict:
     }
 
 
-def shallow_fetch(url: str, log=None) -> dict:
+def shallow_fetch(url: str, log=None, intent: str = "factual") -> dict:
     """Fetch lightweight page signals without browser rendering."""
     log = log or (lambda msg: None)
-    max_chars = _extract_cap()
+    max_chars = _extract_cap(url, intent)
 
     short = url[:72] + "..." if len(url) > 72 else url
     log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim]")
@@ -361,7 +377,21 @@ def shallow_fetch(url: str, log=None) -> dict:
         log(f"    [yellow]  x shallow fetch error: {err}[/yellow]")
         return {}
     try:
-        html = response.text[:250000]
+        # Try strict UTF-8 decode on the raw bytes first.  Most modern sites
+        # (including Russian ones that mis-declare windows-1251 or send no charset)
+        # actually serve UTF-8.  If the bytes are valid UTF-8 we use that; otherwise
+        # we fall back to requests' charset detection (which handles genuine 1-byte
+        # encodings like windows-1251, iso-8859-1, etc.).
+        raw_bytes = response.content[:250000]
+        try:
+            html = raw_bytes.decode("utf-8")
+        except (UnicodeDecodeError, LookupError):
+            if response.encoding:
+                declared = response.encoding.lower().replace("-", "").replace("_", "")
+                apparent = (response.apparent_encoding or "").lower().replace("-", "").replace("_", "")
+                if declared not in ("utf8", "utf16", "utf32") and apparent in ("utf8",):
+                    response.encoding = "utf-8"
+            html = response.text[:250000]
     except Exception as exc:
         log(f"    [yellow]  x shallow fetch error: {exc}[/yellow]")
         return {}
@@ -427,6 +457,7 @@ def shallow_fetch_many(
     log=None,
     page_cache: dict[str, dict] | None = None,
     page_cache_lock: threading.Lock | None = None,
+    intent: str = "factual",
 ) -> list[dict]:
     """Parallel HTTP shallow fetches; order matches ``urls``.
 
@@ -460,7 +491,7 @@ def shallow_fetch_many(
         workers = min(tuning.FETCH_SHALLOW_CONCURRENCY, len(to_fetch_urls))
 
         def one(u: str) -> dict:
-            return shallow_fetch(u, log=log)
+            return shallow_fetch(u, log=log, intent=intent)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             fetched = list(ex.map(one, to_fetch_urls))
@@ -481,17 +512,26 @@ def _http_article_text(url: str) -> str:
     """HTTP GET + trafilatura main text; fallback to legacy regex heuristics (no browser)."""
     specialized = dispatch_article_plaintext(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
     if specialized:
-        return specialized[: _extract_cap()]
+        return specialized[: _extract_cap(url)]
 
     response, _err = _http_get_shallow(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
     if response is None:
         return ""
     try:
-        html = response.text[:500000]
+        raw_bytes = response.content[:500000]
+        try:
+            html = raw_bytes.decode("utf-8")
+        except (UnicodeDecodeError, LookupError):
+            if response.encoding:
+                declared = response.encoding.lower().replace("-", "").replace("_", "")
+                apparent = (response.apparent_encoding or "").lower().replace("-", "").replace("_", "")
+                if declared not in ("utf8", "utf16", "utf32") and apparent in ("utf8",):
+                    response.encoding = "utf-8"
+            html = response.text[:500000]
     except Exception:
         return ""
 
-    cap = _extract_cap()
+    cap = _extract_cap(url)
     main = _trafilatura_main_text(html, response.url)
     if main:
         return main[:cap]
@@ -558,7 +598,7 @@ async def _extract_async(url: str) -> str:
         text = md.raw_markdown or md.fit_markdown or ""
     else:
         text = md.fit_markdown or md.raw_markdown or ""
-    return text[: _extract_cap()].strip()
+    return text[: _extract_cap(url)].strip()
 
 
 async def _fetch_url_content(url: str, log=None) -> str:
@@ -567,7 +607,7 @@ async def _fetch_url_content(url: str, log=None) -> str:
     if is_reddit_post_url(url):
         try:
             text = await asyncio.wait_for(asyncio.to_thread(extract_reddit_text, url), timeout=20.0)
-            return (text or "")[: _extract_cap()].strip()
+            return (text or "")[: _extract_cap(url)].strip()
         except Exception:
             return ""
     try:
@@ -575,7 +615,7 @@ async def _fetch_url_content(url: str, log=None) -> str:
         text = (text or "").strip()
         if len(text) >= min_http:
             log("    [dim][http+trafilatura/legacy][/dim]")
-            return text[: _extract_cap()].strip()
+            return text[: _extract_cap(url)].strip()
     except Exception:
         pass
     return await _extract_async(url)

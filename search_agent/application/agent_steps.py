@@ -1142,6 +1142,7 @@ def fetch_claim_documents(
     iteration: int = 1,
     page_cache: dict[str, dict] | None = None,
     page_cache_lock=None,
+    intent: str = "factual",
 ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
     log = log or (lambda msg: None)
     from search_agent.infrastructure.extractor import fetch_and_extract_many, shallow_fetch_many
@@ -1172,6 +1173,7 @@ def fetch_claim_documents(
                 log=log,
                 page_cache=page_cache,
                 page_cache_lock=page_cache_lock,
+                intent=intent,
             ),
         ):
             if payload:

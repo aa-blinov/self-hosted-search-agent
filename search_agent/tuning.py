@@ -10,6 +10,27 @@ SHALLOW_FETCH_TIMEOUT = 8
 SHALLOW_FETCH_HTTP_ATTEMPTS = 3
 SHALLOW_FETCH_RETRY_BACKOFF_SEC = 0.35
 EXTRACT_MAX_CHARS = 4000
+# Higher limit for authoritative reference pages where the key content is deep
+# in the document (e.g. whatsnew pages, API docs, Wikipedia articles).
+# Applied only for synthesis intent; synthesis path selects passages by
+# source_score (not TF-IDF) so all sections of the page are reachable.
+EXTRACT_MAX_CHARS_AUTHORITY = 15000
+# Domain suffixes / substrings that qualify for the higher limit.
+AUTHORITY_DOMAINS: tuple[str, ...] = (
+    "docs.python.org",
+    "peps.python.org",
+    "realpython.com",
+    "wikipedia.org",
+    "developer.mozilla.org",
+    "docs.djangoproject.com",
+    "docs.pytest.org",
+    "docs.rust-lang.org",
+    "docs.github.com",
+    "docs.aws.amazon.com",
+    "cloud.google.com",
+    "learn.microsoft.com",
+    "docs.microsoft.com",
+)
 # Minimum extracted main text (trafilatura) before accepting vs legacy HTML heuristics.
 TRAIFILATURA_MIN_MAIN_CHARS = 200
 CRAWL4AI_TIMEOUT = 25
@@ -56,6 +77,11 @@ DEEP_FETCH_SHORT_LIMIT = 1
 DEEP_FETCH_TARGETED_LIMIT = 2
 DEEP_FETCH_ITERATIVE_LIMIT = 2
 CHEAP_PASSAGE_LIMIT = 12
+# For synthesis queries, max passages passed to synthesize_answer.
+# Synthesis path bypasses TF-IDF cheap_passage_filter (cross-language queries
+# score English content near zero) and instead sorts by source_score; this
+# limit caps the final selection sent to the LLM.
+SYNTHESIS_PASSAGE_LIMIT = 25
 # Snippet-first: minimum confidence from SERP snippets to skip full-page fetch.
 SNIPPET_VERIFY_CONFIDENCE_THRESHOLD = 0.85
 

@@ -208,6 +208,8 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 |----------|-------|-------|
 | `SHALLOW_FETCH_TIMEOUT` | 8 | HTTP timeout (sec) |
 | `EXTRACT_MAX_CHARS` | 4000 | max chars per document |
+| `EXTRACT_MAX_CHARS_AUTHORITY` | 15000 | for authority domains **when intent==synthesis** |
+| `AUTHORITY_DOMAINS` | tuple | docs.python.org, wikipedia.org, MDN, etc. |
 | `CRAWL4AI_TIMEOUT` | 25 | Playwright timeout |
 | `FETCH_HTTP_MIN_CHARS` | 1200 | below this → escalate to crawl4ai |
 
@@ -232,8 +234,15 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 ### Baseline (pre-optimization)
 `median_answer_latency: 20,743ms`
 
-### Current best (parallel SERP + adaptive fetch + normalize cache + page cache + claim cap)
-`median_answer_latency: ~11,400–13,400ms` (-35–45%), quality metrics at baseline or better.
+### Current best (opt8: intent-aware authority extract)
+`median_answer_latency: ~12,345ms` (-40% vs baseline), `claim_support_rate: 1.0`, `source_requirement_rate: 1.0`
+
+| opt | label | latency | claim_support |
+|-----|-------|---------|---------------|
+| baseline | — | 20,743ms | — |
+| opt6 | parallel SERP + adaptive fetch + caches | ~12,359ms | 1.0 |
+| opt7 | authority extract 15K (all intents) | 16,865ms ❌ | 0.89 |
+| **opt8** | authority extract 15K (synthesis only) | **12,345ms** ✅ | **1.0** |
 
 ---
 
@@ -245,14 +254,22 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 4. **normalize_time cache** — `intelligence.py._normalize_cache` keyed on raw query string
 5. **verify_claim cache** — keyed on full prompt (claim + passage texts)
 6. **Cross-claim page cache** — `FetchGatewayPort` shared `dict[url, str]`; prevents re-downloading same URL across claims
-7. **Comparison intent bypass** — `COMPARISON_SKIP_DECOMPOSE=True`; single-claim search + `synthesize_answer` instead of 3–4 sub-claims + `verify_claim×N`
+7. **Synthesis intent bypass** — `SYNTHESIS_SKIP_DECOMPOSE=True`; single-claim search + `synthesize_answer` instead of 3–4 sub-claims + `verify_claim×N`; triggered for explanation/comparison/how-to queries
+8. **LLM intent classification** — 3-way classifier (factual | synthesis | news_digest); 100% accuracy on 35-example eval; replaces keyword heuristics; cached per query; `INTENT_CLASSIFY_MAX_TOKENS=300` (accounts for qwen `<think>` tokens)
+9. **Authority domain extract (synthesis only)** — `EXTRACT_MAX_CHARS_AUTHORITY=15000` for wikipedia.org, docs.python.org, MDN etc., applied **only when intent==synthesis**; factual queries keep 4K to avoid slow verify_claim LLM calls
+10. **Source-score ranked synthesis passages** — synthesis path sorts all raw passages by `source_score` desc (authoritative pages first) instead of TF-IDF `cheap_passage_filter`; fixes cross-language mismatch where Russian query scores English docs.python.org sections near zero, dropping feature-specific sections (f-strings, TypeVar, etc.)
+11. **UTF-8 bytes-first encoding** — `extractor.py` tries `response.content.decode("utf-8")` before falling back to requests charset detection; fixes mojibake on Russian sites that declare `windows-1251`/`iso-8859-1` but serve UTF-8 (chardet sometimes returns MacRoman as `apparent_encoding`, making blind override worse)
 
 ## Known regressions / behaviour notes
 
 - `source_requirement_rate` varies 0.67–0.89 across runs due to DDGS non-determinism (different pages returned each call)
-- DDGS Wikipedia connector errors (`wt.wikipedia.org ConnectError`) are expected and harmless — Wikipedia API is unreachable, DDGS falls back to web results
-- qwen3.5-35b-a3b uses `<think>` tokens before output — this consumes part of `max_tokens`; `SYNTHESIZE_ANSWER_MAX_TOKENS=2000` accounts for ~800 thinking tokens
+- DDGS Wikipedia connector errors (`wt.wikipedia.org ConnectError`) are expected and harmless — Wikipedia API is unreachable, DDGS falls back to web results; suppressed to dim log level
+- qwen3.5-35b-a3b uses `<think>` tokens before output — this consumes part of `max_tokens`; `SYNTHESIZE_ANSWER_MAX_TOKENS=2000` accounts for ~800 thinking tokens; `INTENT_CLASSIFY_MAX_TOKENS=300` same reason
 - Snippet-first optimization was tried and **reverted** — model confidence on short snippets always ~0.38, never reached 0.85 threshold
+- Authority extract 15K applied globally (opt7) caused latency regression: 30 chunks → top-8 utility_rerank → ~5000 chars to verify_claim (was ~1200) → 14s LLM calls; fixed in opt8 by scoping to synthesis intent only
+- WikipediaSourceHandler **removed** — was using REST API returning 500-900 chars lead section only; now trafilatura extracts full article (up to 15K for synthesis)
+- `cheap_passage_filter` TF-IDF threshold (0.18) kills cross-language passages — Russian query vs English docs.python.org: feature-specific sections ("f-string improvements", "PEP 695") don't repeat version numbers → score < 0.18 → dropped; synthesis path bypasses this by sorting on `source_score`
+- `SYNTHESIS_PASSAGE_LIMIT=25` controls how many passages go to `synthesize_answer` (was using `CHEAP_PASSAGE_LIMIT=12`)
 
 ---
 

@@ -146,15 +146,20 @@ class SearchAgentUseCase:
             if classification.intent == "synthesis":
                 synth_passages: list = []
                 for cr in claim_runs:
-                    # Re-extract all split passages from fetched documents for richer context.
-                    # Pass ALL cheap-filtered passages (not deduplicated by URL) so that
-                    # the synthesis LLM receives multiple informative chunks from the same
-                    # document (e.g. different sections of docs.python.org/whatsnew).
+                    # Re-extract all split passages from fetched documents.
+                    # For synthesis we skip TF-IDF threshold filtering: the query may be
+                    # in a different language from the content (e.g. Russian query vs
+                    # English docs.python.org), so keyword overlap scores are unreliable.
+                    # Instead rank by source_score (authoritative pages first) and take
+                    # the top SYNTHESIS_PASSAGE_LIMIT passages in document order within
+                    # each source.  This ensures diverse section coverage (f-strings,
+                    # TypeVar, per-interpreter GIL, etc.) rather than only intro paragraphs
+                    # that happen to repeat both version numbers.
                     raw: list = []
                     for doc in (cr.fetched_documents or []):
                         raw.extend(self._steps.split_into_passages(doc))
-                    cheap = self._steps.cheap_passage_filter(cr.claim, raw)
-                    synth_passages.extend(cheap)
+                    raw.sort(key=lambda p: p.source_score, reverse=True)
+                    synth_passages.extend(raw[: tuning.SYNTHESIS_PASSAGE_LIMIT])
                 if synth_passages:
                     synthesis = self._intelligence.synthesize_answer(query, synth_passages, log=log)
                     if synthesis:
@@ -293,6 +298,7 @@ class SearchAgentUseCase:
                 iteration=iteration,
                 page_cache=page_cache,
                 page_cache_lock=page_cache_lock,
+                intent=classification.intent,
             )
             fetch_plans.extend(new_fetch_plans)
             for document in new_documents:

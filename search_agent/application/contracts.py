@@ -50,6 +50,7 @@ class FetchGatewayPort(Protocol):
         iteration: int = 1,
         page_cache=None,
         page_cache_lock=None,
+        intent: str = "factual",
     ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
         ...
 

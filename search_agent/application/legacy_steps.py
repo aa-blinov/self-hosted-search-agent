@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from search_agent import tuning
 from search_agent.application.agent_steps import (
     _build_run_id,
     _documents_for_passage_extraction,
@@ -41,8 +42,8 @@ class LegacyAgentStepLibrary:
     def split_into_passages(self, document):
         return _split_into_passages(document)
 
-    def cheap_passage_filter(self, claim, passages):
-        return cheap_passage_filter(claim, passages)
+    def cheap_passage_filter(self, claim, passages, limit=tuning.CHEAP_PASSAGE_LIMIT):
+        return cheap_passage_filter(claim, passages, limit=limit)
 
     def utility_rerank_passages(self, claim, passages):
         return utility_rerank_passages(claim, passages)
