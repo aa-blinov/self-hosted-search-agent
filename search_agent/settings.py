@@ -48,6 +48,7 @@ class AppSettings(BaseSettings):
     claim_decompose_max_tokens: int | None = None
     verify_claim_max_tokens: int | None = None
     time_normalize_max_tokens: int | None = None
+    synthesize_answer_max_tokens: int | None = None
 
     def resolved_brave_goggles(self) -> list[str]:
         """Parse ``brave_goggles``: JSON array, or semicolon/newline-separated URLs / inline rules."""
@@ -123,6 +124,15 @@ class AppSettings(BaseSettings):
         from search_agent import tuning
 
         return tuning.TIME_NORMALIZE_MAX_TOKENS
+
+    def resolved_synthesize_answer_max_tokens(self) -> int:
+        """Env ``SYNTHESIZE_ANSWER_MAX_TOKENS`` overrides :data:`search_agent.tuning.SYNTHESIZE_ANSWER_MAX_TOKENS` when set and positive."""
+        v = self.synthesize_answer_max_tokens
+        if v is not None and v > 0:
+            return int(v)
+        from search_agent import tuning
+
+        return tuning.SYNTHESIZE_ANSWER_MAX_TOKENS
 
 
 @lru_cache(maxsize=1)

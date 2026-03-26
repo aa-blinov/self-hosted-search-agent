@@ -8,6 +8,7 @@ from search_agent.application.agent_steps import (
     _split_into_passages,
     build_evidence_bundle,
     build_query_variants,
+    build_snippet_passages,
     cheap_passage_filter,
     compose_answer,
     gate_serp_results,
@@ -48,6 +49,9 @@ class LegacyAgentStepLibrary:
 
     def build_evidence_bundle(self, claim, passages, verification, gated_results):
         return build_evidence_bundle(claim, passages, verification, gated_results)
+
+    def build_snippet_passages(self, gated_results):
+        return build_snippet_passages(gated_results)
 
     def refine_query_variants(
         self,

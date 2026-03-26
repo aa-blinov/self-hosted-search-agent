@@ -35,6 +35,7 @@ class CachingBudgetSearchGateway:
         pname = getattr(profile, "name", "") or ""
         key = (self._provider_label, pname, routed)
 
+        # Fast path: cache hit — return without network I/O.
         with self._lock:
             if key in self._cache:
                 logfire.info(
@@ -55,8 +56,16 @@ class CachingBudgetSearchGateway:
                 log("  [yellow]Search budget exhausted; skipping backend search.[/yellow]")
                 return []
 
-            out = self._inner.search_variant(query, profile, log=log)
+            # Reserve a slot before releasing the lock for the network call.
             self._search_calls += 1
-            stored = copy.deepcopy(out)
+
+        # Network I/O without holding the lock so parallel variants run concurrently.
+        out = self._inner.search_variant(query, profile, log=log)
+        stored = copy.deepcopy(out)
+
+        with self._lock:
+            # Another thread may have fetched the same key concurrently; last write wins
+            # (both results are equivalent so this is safe).
             self._cache[key] = stored
-            return copy.deepcopy(stored)
+
+        return copy.deepcopy(stored)

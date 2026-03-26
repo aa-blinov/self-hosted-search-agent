@@ -28,11 +28,17 @@ FETCH_DEEP_CONCURRENCY = 2
 
 # --- Agent loop ---
 AGENT_MAX_CLAIM_ITERATIONS = 2
+# Max claims to process per query (0 = unlimited). Caps LLM verify_claim calls for
+# broad comparison/survey queries that decompose into many sub-claims.
+DECOMPOSE_MAX_CLAIMS = 3
 # Max claim-level workers per user query (1 = sequential). Fetch/LLM remain per-claim.
 AGENT_MAX_PARALLEL_CLAIMS = 4
 # Max backend search invocations per user query (0 = unlimited). Cache hits do not count.
 AGENT_MAX_SEARCH_CALLS_PER_RUN = 0
 AGENT_MAX_QUERY_VARIANTS = 6
+# Variant cap for iteration 1 only (broad + entity_locked + exact_match at most).
+# Freshness/source_restricted variants are added by refine_query_variants on iteration 2 if needed.
+AGENT_MAX_QUERY_VARIANTS_ITER1 = 3
 AGENT_MAX_REFINE_VARIANTS = 12
 AGENT_FETCH_TOP_N = 4
 AGENT_PASSAGE_TOP_K = 8
@@ -42,15 +48,28 @@ AGENT_SNIPPET_FALLBACK_DOCS = 2
 SHALLOW_FETCH_SHORT_LIMIT = 5
 SHALLOW_FETCH_TARGETED_LIMIT = 8
 SHALLOW_FETCH_ITERATIVE_LIMIT = 10
+# Fast limits for iteration 1 — scale up only if a second iteration is needed.
+SHALLOW_FETCH_SHORT_FAST_LIMIT = 3
+SHALLOW_FETCH_TARGETED_FAST_LIMIT = 4
+SHALLOW_FETCH_ITERATIVE_FAST_LIMIT = 5
 DEEP_FETCH_SHORT_LIMIT = 1
 DEEP_FETCH_TARGETED_LIMIT = 2
 DEEP_FETCH_ITERATIVE_LIMIT = 2
 CHEAP_PASSAGE_LIMIT = 12
+# Snippet-first: minimum confidence from SERP snippets to skip full-page fetch.
+SNIPPET_VERIFY_CONFIDENCE_THRESHOLD = 0.85
 
 # --- Query intelligence (PydanticAIQueryIntelligence) ---
 CLAIM_DECOMPOSE_MAX_TOKENS = 500
 VERIFY_CLAIM_MAX_TOKENS = 700
 TIME_NORMALIZE_MAX_TOKENS = 120
+# For comparison/synthesis intent: skip sub-claim decomposition, search with the
+# original query as a single claim. Avoids N-claims × M-variants SERP fan-out.
+COMPARISON_SKIP_DECOMPOSE = True
+# Max tokens for the synthesize_answer LLM call (comparison queries only).
+# Higher than verify_claim because thinking models (qwen) consume budget on <think>...</think>
+# before the actual answer, and synthesis needs to produce a complete bullet list.
+SYNTHESIZE_ANSWER_MAX_TOKENS = 2000
 
 # --- Composed answer (CLI / Panel) ---
 # Grounded LLM answer (``llm_tasks.answer_with_sources``): capped by ``min(..., AppSettings.llm_max_tokens)``.

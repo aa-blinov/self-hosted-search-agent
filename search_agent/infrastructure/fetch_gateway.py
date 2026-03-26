@@ -15,6 +15,9 @@ class LegacyFetchGateway:
         *,
         seen_urls,
         log=None,
+        iteration: int = 1,
+        page_cache=None,
+        page_cache_lock=None,
     ):
         with logfire.span(
             "fetch_gateway.fetch_claim_documents",
@@ -29,4 +32,7 @@ class LegacyFetchGateway:
                 routing_decision,
                 seen_urls=seen_urls,
                 log=log,
+                iteration=iteration,
+                page_cache=page_cache,
+                page_cache_lock=page_cache_lock,
             )

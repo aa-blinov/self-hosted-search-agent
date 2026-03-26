@@ -55,6 +55,8 @@ class SearchAgentUseCase:
         ):
             classification = self._intelligence.classify_query(query, log=log)
             claims = self._intelligence.decompose_claims(classification, log=log)
+            if tuning.DECOMPOSE_MAX_CLAIMS > 0:
+                claims = claims[:tuning.DECOMPOSE_MAX_CLAIMS]
             log(f"\n[bold]Agent Search[/bold] [dim]{len(claims)} claim(s)[/dim]")
 
             provider = get_settings().resolved_search_provider()
@@ -69,6 +71,11 @@ class SearchAgentUseCase:
                 profile_name=getattr(profile, "name", None),
                 started_at=started_at.isoformat(),
             )
+
+            # Shared page-content cache: prevents the same URL being HTTP-fetched
+            # multiple times across claims within the same run.
+            page_cache: dict[str, dict] = {}
+            page_cache_lock = threading.Lock()
 
             workers = max(1, min(tuning.AGENT_MAX_PARALLEL_CLAIMS, len(claims)))
             log_lock = threading.Lock()
@@ -93,6 +100,8 @@ class SearchAgentUseCase:
                             profile,
                             search_gateway=search_gateway,
                             log=safe_log,
+                            page_cache=page_cache,
+                            page_cache_lock=page_cache_lock,
                         )
                     claim_runs.append(claim_run)
                     self._extend_audit(audit, claim_run, iterations_used)
@@ -107,6 +116,8 @@ class SearchAgentUseCase:
                             profile,
                             search_gateway,
                             safe_log,
+                            page_cache,
+                            page_cache_lock,
                         )
                         future_to_idx[fut] = idx
                     tmp: list[tuple[ClaimRun, int] | None] = [None] * len(claims)
@@ -127,6 +138,27 @@ class SearchAgentUseCase:
                 audit_trail=audit,
             )
             report.answer = self._steps.compose_answer(report)
+
+            # For comparison/synthesis queries, synthesize a direct answer from all
+            # collected passages — verify_claim reliably returns insufficient_evidence
+            # for open-ended comparison questions even with rich evidence, so compose_answer
+            # would produce a nearly empty response.
+            if classification.intent == "comparison":
+                synth_passages: list = []
+                for cr in claim_runs:
+                    # Re-extract all split passages from fetched documents for richer context.
+                    # Pass ALL cheap-filtered passages (not deduplicated by URL) so that
+                    # the synthesis LLM receives multiple informative chunks from the same
+                    # document (e.g. different sections of docs.python.org/whatsnew).
+                    raw: list = []
+                    for doc in (cr.fetched_documents or []):
+                        raw.extend(self._steps.split_into_passages(doc))
+                    cheap = self._steps.cheap_passage_filter(cr.claim, raw)
+                    synth_passages.extend(cheap)
+                if synth_passages:
+                    synthesis = self._intelligence.synthesize_answer(query, synth_passages, log=log)
+                    if synthesis:
+                        report = replace(report, answer=synthesis)
             completed_at = datetime.now(UTC)
             report.audit_trail.completed_at = completed_at.isoformat()
             report.audit_trail.latency_ms = int((completed_at - started_at).total_seconds() * 1000)
@@ -147,6 +179,8 @@ class SearchAgentUseCase:
         profile,
         search_gateway,
         log,
+        page_cache=None,
+        page_cache_lock=None,
     ) -> tuple[ClaimRun, int]:
         with logfire.span(
             "search_agent.claim",
@@ -159,6 +193,8 @@ class SearchAgentUseCase:
                 profile,
                 search_gateway=search_gateway,
                 log=log,
+                page_cache=page_cache,
+                page_cache_lock=page_cache_lock,
             )
 
     def _run_claim(
@@ -169,6 +205,8 @@ class SearchAgentUseCase:
         *,
         search_gateway,
         log=None,
+        page_cache=None,
+        page_cache_lock=None,
     ) -> tuple[ClaimRun, int]:
         log = log or (lambda msg: None)
         log(f"\n[bold]  Claim[/bold] [italic]{claim.claim_text}[/italic]")
@@ -191,7 +229,7 @@ class SearchAgentUseCase:
         existing_queries: set[str] = set()
         seen_urls: set[str] = set()
         seen_documents: set[tuple[str, str, str]] = set()
-        next_variants = self._steps.build_query_variants(claim, classification)
+        next_variants = self._steps.build_query_variants(claim, classification)[:tuning.AGENT_MAX_QUERY_VARIANTS_ITER1]
 
         iterations_used = 0
         claim_cap = tuning.AGENT_MAX_CLAIM_ITERATIONS
@@ -207,9 +245,17 @@ class SearchAgentUseCase:
             all_variants.extend(next_variants)
 
             new_snapshots = []
-            for variant in next_variants:
-                variant_snapshots = search_gateway.search_variant(variant.query_text, profile, log=log)
-                new_snapshots.extend(self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots)
+            with ThreadPoolExecutor(max_workers=min(len(next_variants), 6)) as serp_pool:
+                future_to_variant = {
+                    serp_pool.submit(search_gateway.search_variant, v.query_text, profile, log): v
+                    for v in next_variants
+                }
+                for future in as_completed(future_to_variant):
+                    variant = future_to_variant[future]
+                    variant_snapshots = future.result()
+                    new_snapshots.extend(
+                        self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots
+                    )
             snapshots.extend(new_snapshots)
 
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
@@ -244,6 +290,9 @@ class SearchAgentUseCase:
                 routing_decision,
                 seen_urls=seen_urls,
                 log=log,
+                iteration=iteration,
+                page_cache=page_cache,
+                page_cache_lock=page_cache_lock,
             )
             fetch_plans.extend(new_fetch_plans)
             for document in new_documents:

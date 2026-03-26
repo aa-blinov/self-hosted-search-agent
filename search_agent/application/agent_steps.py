@@ -27,6 +27,7 @@ from search_agent.domain.models import (
 )
 from search_agent.domain.source_priors import lookup_source_prior
 from search_agent import tuning
+from search_agent.application.text_heuristics import COMPARISON_MARKERS
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
@@ -1000,12 +1001,19 @@ def _select_fetch_candidates(gated_results: list[GatedSerpResult], limit: int) -
     return selected
 
 
-def _routing_limits(profile, decision: RoutingDecision) -> tuple[int, int]:
-    shallow_limit = {
-        "short_path": tuning.SHALLOW_FETCH_SHORT_LIMIT,
-        "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_LIMIT,
-        "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_LIMIT,
-    }[decision.mode]
+def _routing_limits(profile, decision: RoutingDecision, iteration: int = 1) -> tuple[int, int]:
+    if iteration == 1:
+        shallow_limit = {
+            "short_path": tuning.SHALLOW_FETCH_SHORT_FAST_LIMIT,
+            "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_FAST_LIMIT,
+            "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_FAST_LIMIT,
+        }[decision.mode]
+    else:
+        shallow_limit = {
+            "short_path": tuning.SHALLOW_FETCH_SHORT_LIMIT,
+            "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_LIMIT,
+            "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_LIMIT,
+        }[decision.mode]
     deep_limit = {
         "short_path": tuning.DEEP_FETCH_SHORT_LIMIT,
         "targeted_retrieval": tuning.DEEP_FETCH_TARGETED_LIMIT,
@@ -1096,6 +1104,34 @@ def _make_shallow_document(candidate: GatedSerpResult, payload: dict) -> Fetched
     )
 
 
+def build_snippet_passages(gated_results: list[GatedSerpResult]) -> list[Passage]:
+    """Build lightweight Passage objects directly from SERP snippets (no HTTP fetch)."""
+    now = datetime.now(UTC).isoformat()
+    passages = []
+    for i, gated in enumerate(gated_results):
+        snippet = (gated.serp.snippet or "").strip()
+        if len(snippet) < 20:
+            continue
+        passages.append(
+            Passage(
+                passage_id=f"snip-{i}",
+                url=gated.serp.url,
+                canonical_url=gated.serp.canonical_url,
+                host=gated.serp.host,
+                title=gated.serp.title or "",
+                section="snippet",
+                published_at=gated.serp.published_at,
+                author=None,
+                extracted_at=now,
+                chunk_id=f"snip-{i}-0",
+                text=snippet,
+                source_score=gated.assessment.source_score,
+                utility_score=0.0,
+            )
+        )
+    return passages
+
+
 def fetch_claim_documents(
     claim: Claim,
     gated_results: list[GatedSerpResult],
@@ -1103,12 +1139,15 @@ def fetch_claim_documents(
     routing_decision: RoutingDecision,
     seen_urls: set[str] | None = None,
     log=None,
+    iteration: int = 1,
+    page_cache: dict[str, dict] | None = None,
+    page_cache_lock=None,
 ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
     log = log or (lambda msg: None)
     from search_agent.infrastructure.extractor import fetch_and_extract_many, shallow_fetch_many
 
     seen_urls = seen_urls or set()
-    shallow_limit, deep_limit = _routing_limits(profile, routing_decision)
+    shallow_limit, deep_limit = _routing_limits(profile, routing_decision, iteration)
     selected = _select_fetch_candidates(
         [candidate for candidate in gated_results if candidate.serp.url not in seen_urls],
         min(len(gated_results), shallow_limit),
@@ -1128,7 +1167,12 @@ def fetch_claim_documents(
     if selected:
         for candidate, payload in zip(
             selected,
-            shallow_fetch_many([c.serp.url for c in selected], log=log),
+            shallow_fetch_many(
+                [c.serp.url for c in selected],
+                log=log,
+                page_cache=page_cache,
+                page_cache_lock=page_cache_lock,
+            ),
         ):
             if payload:
                 shallow_documents.append(_make_shallow_document(candidate, payload))
@@ -1446,6 +1490,15 @@ def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = 
         seen_hosts.add(root)
         if len(selected) >= limit:
             break
+
+    # Diversity floor: if all selected passages share the same host root,
+    # include the highest-scoring passage from a different host (if one exists).
+    if len(seen_hosts) < 2:
+        for passage in reranked:
+            if _host_root(passage.host) not in seen_hosts:
+                selected.append(passage)
+                break
+
     return selected
 
 
@@ -1854,6 +1907,13 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
         if verification.confidence >= 0.75 and bundle.independent_source_count >= 2:
+            return True
+    # For comparison/synthesis claims, verify_claim reliably returns insufficient_evidence
+    # even when rich passages are found (the verifier looks for a binary provable fact).
+    # Stop after the first iteration if any passages were collected — the synthesize_answer
+    # step in use_cases will compose a proper answer from them.
+    if any(marker in (claim.claim_text or "").lower() for marker in COMPARISON_MARKERS):
+        if bundle.considered_passages:
             return True
     return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
 

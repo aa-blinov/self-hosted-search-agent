@@ -28,6 +28,9 @@ class QueryIntelligencePort(Protocol):
     def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
         ...
 
+    def synthesize_answer(self, query: str, passages: list[Passage], log=None) -> str:
+        ...
+
 
 class SearchGatewayPort(Protocol):
     def search_variant(self, query: str, profile, log=None) -> list[SearchSnapshot]:
@@ -44,6 +47,9 @@ class FetchGatewayPort(Protocol):
         *,
         seen_urls: set[str],
         log=None,
+        iteration: int = 1,
+        page_cache=None,
+        page_cache_lock=None,
     ) -> tuple[list[FetchPlan], list[FetchedDocument]]:
         ...
 
@@ -80,6 +86,12 @@ class StepLibraryPort(Protocol):
         claim: Claim,
         gated_results: list[GatedSerpResult],
     ) -> RoutingDecision:
+        ...
+
+    def build_snippet_passages(
+        self,
+        gated_results: list[GatedSerpResult],
+    ) -> list[Passage]:
         ...
 
     def documents_for_passage_extraction(

@@ -22,6 +22,7 @@ from search_agent.application.text_heuristics import (
     normalized_text,
     should_decompose,
 )
+from search_agent import tuning
 from search_agent.infrastructure.llm_log import log_llm_call, output_char_len
 from search_agent.infrastructure.pydantic_ai_factory import build_model_settings, build_openai_model
 from search_agent.infrastructure.telemetry import configure_logfire
@@ -132,6 +133,8 @@ class _VerificationOutput(BaseModel):
     rationale: str = ""
 
 
+
+
 class PydanticAIQueryIntelligence:
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
@@ -141,6 +144,8 @@ class PydanticAIQueryIntelligence:
         # In-process cache: avoids duplicate LLM calls for identical (claim, passages) pairs.
         # Key: full prompt string (encodes claim_text + all passage texts).
         self._verify_cache: dict[str, VerificationResult] = {}
+        # Cache for normalize_time_references: keyed on raw query string (deterministic LLM call).
+        self._normalize_cache: dict[str, str] = {}
 
         self._normalize_agent = Agent(
             self._model,
@@ -173,6 +178,20 @@ class PydanticAIQueryIntelligence:
                 "Use only explicit evidence from provided passages."
             ),
         )
+        self._synth_agent = Agent(
+            self._model,
+            output_type=str,
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "You are a helpful assistant. "
+                "Given retrieved web passages, answer the user's question directly and informatively. "
+                "Write in the same language as the user's question. "
+                "Use bullet points for comparisons. "
+                "Be specific: include version numbers, names, and figures where available. "
+                "Do not add Markdown headings (##) inside bullet lists."
+            ),
+        )
     def classify_query(self, query: str, log=None) -> QueryClassification:
         normalized_query = self._normalize_time_references(query, log=log)
         lowered = normalized_query.lower()
@@ -202,6 +221,13 @@ class PydanticAIQueryIntelligence:
     def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
         log = log or (lambda msg: None)
         if classification.intent == "news_digest":
+            return self._fallback_claims(classification)
+        # For comparison/synthesis queries skip sub-claim decomposition: searching
+        # the original query as a single claim already surfaces the right pages, and
+        # independent sub-claim verification (which always returns insufficient_evidence
+        # for open-ended comparison questions) just wastes N×M SERP calls.
+        if classification.intent == "comparison" and tuning.COMPARISON_SKIP_DECOMPOSE:
+            log("  [dim]-> comparison intent: single-claim search (no decomposition)[/dim]")
             return self._fallback_claims(classification)
         if not self._enabled or not should_decompose(classification.normalized_query):
             return self._fallback_claims(classification)
@@ -340,6 +366,57 @@ class PydanticAIQueryIntelligence:
             log("  [dim yellow]→ fallback: heuristic verifier[/dim yellow]")
             return finalize(heuristic_verifier(claim, passages))
 
+    def synthesize_answer(self, query: str, passages: list[Passage], log=None) -> str:
+        """Generate a direct answer for comparison/synthesis queries from collected passages.
+
+        Called after all claim runs complete when ``classification.intent == 'comparison'``.
+        Unlike ``compose_answer``, this produces a prose/bullet answer instead of a
+        verification-verdict table.
+        """
+        log = log or (lambda msg: None)
+        if not self._enabled or not passages:
+            return ""
+
+        prompt_parts: list[str] = []
+        for p in passages:
+            title = (p.title or "").strip()
+            text = (p.text or "").strip()
+            if not text:
+                continue
+            prompt_parts.append(f"[{len(prompt_parts) + 1}] {title}\n{text[:1200]}")
+            if len(prompt_parts) >= 10:
+                break
+
+        if not prompt_parts:
+            return ""
+
+        prompt = (
+            f"Question: {query}\n\n"
+            "Passages:\n\n" + "\n\n".join(prompt_parts)
+        )
+
+        try:
+            with log_llm_call(
+                log,
+                task="synthesize_answer",
+                model=self._settings.llm_model,
+                detail=query,
+                input_chars=len(prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.synthesize_answer", query=query):
+                    result = self._synth_agent.run_sync(
+                        prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_synthesize_answer_max_tokens(),
+                            temperature=0.3,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
+            return (result.output or "").strip()
+        except Exception as exc:
+            log(f"  [dim yellow]→ synthesize_answer failed: {exc}[/dim yellow]")
+            return ""
+
     def _normalize_time_references(self, query: str, log=None) -> str:
         log = log or (lambda msg: None)
         deterministic = normalize_relative_time_references(query)
@@ -349,6 +426,11 @@ class PydanticAIQueryIntelligence:
 
         if not self._enabled or not needs_freshness(query):
             return query
+
+        cached = self._normalize_cache.get(query)
+        if cached is not None:
+            log(f"  [dim green]-> normalize cache hit: [italic]{cached}[/italic][/dim green]")
+            return cached
 
         prompt = (
             "Replace only relative time references with explicit dates.\n"
@@ -375,7 +457,9 @@ class PydanticAIQueryIntelligence:
             normalized = normalized_text(result.output.normalized_query)
             if normalized and normalized != query:
                 log(f"  [dim]-> normalized query: [italic]{normalized}[/italic][/dim]")
-            return normalized or query
+            result_text = normalized or query
+            self._normalize_cache[query] = result_text
+            return result_text
         except Exception:
             log("  [dim yellow]→ fallback: original query (time normalization failed)[/dim yellow]")
             return query

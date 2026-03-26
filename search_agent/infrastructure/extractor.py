@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 HTTP fetch: main text via **trafilatura** (fast, no browser) when possible.
 
@@ -13,6 +15,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 from html import unescape
 from urllib.parse import urlparse
@@ -419,18 +422,59 @@ def shallow_fetch(url: str, log=None) -> dict:
     return payload
 
 
-def shallow_fetch_many(urls: list[str], log=None) -> list[dict]:
-    """Parallel HTTP shallow fetches; order matches ``urls``."""
+def shallow_fetch_many(
+    urls: list[str],
+    log=None,
+    page_cache: dict[str, dict] | None = None,
+    page_cache_lock: threading.Lock | None = None,
+) -> list[dict]:
+    """Parallel HTTP shallow fetches; order matches ``urls``.
+
+    If *page_cache* (+ *page_cache_lock*) are supplied, already-fetched URLs are
+    returned from the cache without an HTTP round-trip.  Cache is populated with
+    successful (non-empty) results after each fetch.
+    """
     if not urls:
         return []
-    max_workers = min(tuning.FETCH_SHALLOW_CONCURRENCY, len(urls))
     log = log or (lambda msg: None)
 
-    def one(u: str) -> dict:
-        return shallow_fetch(u, log=log)
+    results: list[dict | None] = [None] * len(urls)
+    to_fetch_indices: list[int] = []
+    to_fetch_urls: list[str] = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        return list(ex.map(one, urls))
+    if page_cache is not None and page_cache_lock is not None:
+        with page_cache_lock:
+            for i, url in enumerate(urls):
+                if url in page_cache:
+                    short = url[:72] + "..." if len(url) > 72 else url
+                    log(f"    [dim]~ shallow[/dim] [dim]{short}[/dim] [dim green](page cache hit)[/dim green]")
+                    results[i] = page_cache[url]
+                else:
+                    to_fetch_indices.append(i)
+                    to_fetch_urls.append(url)
+    else:
+        to_fetch_indices = list(range(len(urls)))
+        to_fetch_urls = list(urls)
+
+    if to_fetch_urls:
+        workers = min(tuning.FETCH_SHALLOW_CONCURRENCY, len(to_fetch_urls))
+
+        def one(u: str) -> dict:
+            return shallow_fetch(u, log=log)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            fetched = list(ex.map(one, to_fetch_urls))
+
+        for idx, payload in zip(to_fetch_indices, fetched):
+            results[idx] = payload
+
+        if page_cache is not None and page_cache_lock is not None:
+            with page_cache_lock:
+                for url, payload in zip(to_fetch_urls, fetched):
+                    if payload:  # don't cache failed fetches
+                        page_cache[url] = payload
+
+    return [r if r is not None else {} for r in results]
 
 
 def _http_article_text(url: str) -> str:
