@@ -69,9 +69,18 @@ class DDGSSearchGateway:
                     timeout=self._settings.ddgs_timeout,
                 )
             except Exception as exc:
-                ddgs_failed = True
-                logfire.warning("search_gateway.ddgs.text_failed", error=str(exc), query=routed[:200])
-                log(f"  [yellow]DDGS error (empty results):[/yellow] {exc}")
+                exc_str = str(exc)
+                # DDGS internally queries Wikipedia OpenSearch using the region prefix
+                # (e.g. "wt" from "wt-wt") which produces invalid subdomains like
+                # wt.wikipedia.org. This is a library-level limitation — suppress the
+                # noise and treat as empty rather than a real backend failure.
+                is_wiki_dns = "wikipedia.org" in exc_str and "ConnectError" in exc_str
+                if not is_wiki_dns:
+                    ddgs_failed = True
+                    logfire.warning("search_gateway.ddgs.text_failed", error=exc_str, query=routed[:200])
+                    log(f"  [yellow]DDGS error (empty results):[/yellow] {exc}")
+                else:
+                    log("  [dim]DDGS Wikipedia instant-answer skipped (DNS not reachable)[/dim]")
                 results = []
 
             serp_results: list[SerpResult] = []

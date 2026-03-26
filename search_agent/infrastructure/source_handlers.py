@@ -312,11 +312,11 @@ class ScholarlyApiPlaintextHandler:
         return scholarly_plaintext(url, timeout=timeout, github_token=token)
 
 
-_WIKIPEDIA = WikipediaSourceHandler()
-
 SHALLOW_SOURCE_HANDLERS: tuple[ShallowSourceHandler, ...] = (
     RedditSourceHandler(),
-    _WIKIPEDIA,
+    # Wikipedia URLs go through the normal trafilatura path — the REST summary API
+    # returned only the short lead section (~500–900 chars) which is less content
+    # than trafilatura extracts from the full page (up to EXTRACT_MAX_CHARS=4000).
     ArxivSourceHandler(),
     CrossrefSourceHandler(),
     SemanticScholarSourceHandler(),
@@ -324,7 +324,6 @@ SHALLOW_SOURCE_HANDLERS: tuple[ShallowSourceHandler, ...] = (
 )
 
 ARTICLE_PLAINTEXT_HANDLERS: tuple[ArticlePlaintextHandler, ...] = (
-    _WIKIPEDIA,
     ScholarlyApiPlaintextHandler(),
 )
 

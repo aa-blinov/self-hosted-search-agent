@@ -260,15 +260,15 @@ class PydanticAIQueryIntelligence:
                 log,
                 task="classify_intent",
                 model=self._settings.llm_model,
-                label=normalized_query[:60],
-                input_text=normalized_query,
-            ) as tracker:
+                detail=normalized_query[:60],
+                input_chars=len(normalized_query),
+            ) as metrics:
                 with logfire.span("query_intelligence.classify_intent", query=normalized_query):
                     result = self._intent_agent.run_sync(
                         normalized_query,
                         model_settings=model_settings,
                     )
-                tracker.set_output(result.output)
+                metrics.output_chars = output_char_len(result.output)
             intent = result.output.intent
         except Exception as exc:
             log(f"  [dim yellow]-> intent classification failed: {exc}[/dim yellow]")
@@ -286,7 +286,7 @@ class PydanticAIQueryIntelligence:
         # sub-claim verification (always insufficient_evidence for open-ended questions)
         # just wastes N×M SERP calls.
         if classification.intent == "synthesis" and tuning.SYNTHESIS_SKIP_DECOMPOSE:
-            log("  [dim]-> comparison intent: single-claim search (no decomposition)[/dim]")
+            log("  [dim]-> synthesis intent: single-claim search (no decomposition)[/dim]")
             return self._fallback_claims(classification)
         if not self._enabled or not should_decompose(classification.normalized_query):
             return self._fallback_claims(classification)
