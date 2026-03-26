@@ -161,7 +161,7 @@ class SearchAgentUseCase:
                     raw.sort(key=lambda p: p.source_score, reverse=True)
                     synth_passages.extend(raw[: tuning.SYNTHESIS_PASSAGE_LIMIT])
                 if synth_passages:
-                    synthesis = self._intelligence.synthesize_answer(query, synth_passages, log=log)
+                    synthesis = self._intelligence.synthesize_answer(query, synth_passages, log=log, intent=classification.intent)
                     if synthesis:
                         report = replace(report, answer=synthesis)
             completed_at = datetime.now(UTC)

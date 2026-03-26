@@ -188,11 +188,13 @@ class PydanticAIQueryIntelligence:
             instrument=True,
             system_prompt=(
                 "You are a helpful assistant. "
-                "Given retrieved web passages, answer the user's question directly and informatively. "
+                "Given retrieved web passages (each labeled [N]), answer the user's question directly and informatively. "
                 "Write in the same language as the user's question. "
                 "Use bullet points for comparisons. "
                 "Be specific: include version numbers, names, and figures where available. "
-                "Do not add Markdown headings (##) inside bullet lists."
+                "Do not add Markdown headings (##) inside bullet lists. "
+                "Cite sources inline using [N] after each claim, e.g. «Трамп заявил X [2].» "
+                "Do NOT add a sources/references section — it will be appended automatically."
             ),
         )
 
@@ -421,7 +423,7 @@ class PydanticAIQueryIntelligence:
             log("  [dim yellow]→ fallback: heuristic verifier[/dim yellow]")
             return finalize(heuristic_verifier(claim, passages))
 
-    def synthesize_answer(self, query: str, passages: list[Passage], log=None) -> str:
+    def synthesize_answer(self, query: str, passages: list[Passage], log=None, intent: str = "synthesis") -> str:
         """Generate a direct answer for comparison/synthesis queries from collected passages.
 
         Called after all claim runs complete when ``classification.intent == 'synthesis'``.
@@ -432,14 +434,28 @@ class PydanticAIQueryIntelligence:
         if not self._enabled or not passages:
             return ""
 
+        # Build numbered passage list, keeping URL for the sources footer.
+        # For news_digest queries each URL is a distinct article — 1 passage per URL
+        # gives maximum source diversity.  For synthesis (e.g. docs comparison) we
+        # allow 2 passages per URL so that different sections of the same authority
+        # page (docs.python.org, Wikipedia) can both contribute.
+        MAX_PER_URL = 1 if intent == "news_digest" else 2
+        url_counts: dict[str, int] = {}
         prompt_parts: list[str] = []
+        passage_refs: list[tuple[str, str]] = []  # (title, url) per passage index
         for p in passages:
             title = (p.title or "").strip()
+            url = (p.url or "").strip()
             text = (p.text or "").strip()
             if not text:
                 continue
-            prompt_parts.append(f"[{len(prompt_parts) + 1}] {title}\n{text[:1200]}")
-            if len(prompt_parts) >= 10:
+            if url_counts.get(url, 0) >= MAX_PER_URL:
+                continue
+            url_counts[url] = url_counts.get(url, 0) + 1
+            n = len(prompt_parts) + 1
+            prompt_parts.append(f"[{n}] {title}\n{text[:1200]}")
+            passage_refs.append((title, url))
+            if len(prompt_parts) >= 12:
                 break
 
         if not prompt_parts:
@@ -467,7 +483,21 @@ class PydanticAIQueryIntelligence:
                         ),
                     )
                 metrics.output_chars = output_char_len(result.output)
-            return (result.output or "").strip()
+            answer = (result.output or "").strip()
+            if not answer:
+                return ""
+            # Append sources section for any [N] references cited in the answer.
+            import re as _re
+            cited = sorted({int(m) for m in _re.findall(r"\[(\d+)\]", answer)})
+            if cited:
+                lines = ["\n\nИсточники:"]
+                for n in cited:
+                    if 1 <= n <= len(passage_refs):
+                        title, url = passage_refs[n - 1]
+                        label = title[:80] if title else url
+                        lines.append(f"[{n}] {label} — {url}" if url else f"[{n}] {label}")
+                answer += "\n".join(lines)
+            return answer
         except Exception as exc:
             log(f"  [dim yellow]→ synthesize_answer failed: {exc}[/dim yellow]")
             return ""

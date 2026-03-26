@@ -28,7 +28,7 @@ class QueryIntelligencePort(Protocol):
     def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
         ...
 
-    def synthesize_answer(self, query: str, passages: list[Passage], log=None) -> str:
+    def synthesize_answer(self, query: str, passages: list[Passage], log=None, intent: str = "synthesis") -> str:
         ...
 
 
