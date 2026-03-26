@@ -6,8 +6,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openai import OpenAI
-
 from search_agent.application.agent_steps import run_search_agent
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import AgentRunResult, ClaimRun
@@ -190,6 +188,8 @@ def score_reports(
     costs: list[float] = []
     latency_values: list[int] = []
     case_details: list[dict] = []
+    all_iterations: list[int] = []
+    route_counts: dict[str, int] = {"short_path": 0, "targeted_retrieval": 0, "iterative_loop": 0}
 
     by_split: dict[str, dict[str, list[float] | int]] = {}
 
@@ -202,6 +202,12 @@ def score_reports(
             backend_issue_cases += 1
         costs.append(case_cost)
         latency_values.append(case_latency)
+
+        for claim_id, iters in report.audit_trail.claim_iterations.items():
+            all_iterations.append(iters)
+        for run in report.claims:
+            if run.routing_decision:
+                route_counts[run.routing_decision.mode] = route_counts.get(run.routing_decision.mode, 0) + 1
 
         split_bucket = by_split.setdefault(
             case.split,
@@ -351,6 +357,10 @@ def score_reports(
         "backend_issue_rate": round(backend_issue_cases / len(cases), 4) if cases else 0.0,
         "median_search_cost": round(statistics.median(costs), 3) if costs else 0.0,
         "median_answer_latency": round(statistics.median(latency_values), 1) if latency_values else 0.0,
+        "avg_iterations_per_claim": round(statistics.mean(all_iterations), 2) if all_iterations else 0.0,
+        "route_short_path_rate": round(route_counts["short_path"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
+        "route_targeted_rate": round(route_counts["targeted_retrieval"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
+        "route_iterative_rate": round(route_counts["iterative_loop"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
     }
 
     split_metrics: dict[str, dict] = {}
@@ -389,10 +399,11 @@ def score_reports(
 
 def evaluate_dataset(
     dataset_path: str,
-    client: OpenAI | None = None,
     receipts_dir: str | None = None,
     delay_between_cases: float | None = None,
     log=None,
+    # Deprecated: kept for call-site compatibility, ignored.
+    client=None,
 ) -> dict:
     log = log or (lambda msg: None)
     cases = load_evaluation_cases(dataset_path)
@@ -412,7 +423,6 @@ def evaluate_dataset(
         report = run_search_agent(
             case.query,
             profile=get_profile(case.profile),
-            client=client,
             log=log,
             receipts_dir=receipts_dir,
         )

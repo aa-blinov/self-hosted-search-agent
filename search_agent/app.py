@@ -173,8 +173,11 @@ def main() -> None:
         from search_agent.evaluation import evaluate_dataset
         from search_agent.eval.tracking import DEFAULT_EVAL_RUNS_DIR, save_eval_run
 
-        with Status("[cyan]Running evaluation...[/]", console=console):
-            summary = evaluate_dataset(args.eval, client=client, receipts_dir=args.receipts_dir)
+        summary = evaluate_dataset(
+            args.eval,
+            receipts_dir=args.receipts_dir,
+            log=console.print,
+        )
         console.print(Panel(
             Markdown(
                 "\n".join(

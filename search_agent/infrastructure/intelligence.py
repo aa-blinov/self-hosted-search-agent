@@ -138,6 +138,9 @@ class PydanticAIQueryIntelligence:
         configure_logfire(settings)
         self._enabled = bool(settings.llm_api_key)
         self._model = build_openai_model(settings)
+        # In-process cache: avoids duplicate LLM calls for identical (claim, passages) pairs.
+        # Key: full prompt string (encodes claim_text + all passage texts).
+        self._verify_cache: dict[str, VerificationResult] = {}
 
         self._normalize_agent = Agent(
             self._model,
@@ -275,6 +278,10 @@ class PydanticAIQueryIntelligence:
             "Use missing_dimensions from time, entity, number, location, source, coverage.\n\n"
             f"Claim: {claim.claim_text}\n\n" + "\n\n".join(prompt_lines)
         )
+        cached = self._verify_cache.get(prompt)
+        if cached is not None:
+            log(f"  [dim green]-> verify_claim cache hit ({len(prompt)} chars)[/dim green]")
+            return cached
         try:
             with log_llm_call(
                 log,
@@ -313,7 +320,7 @@ class PydanticAIQueryIntelligence:
                     )
                 return spans
 
-            return finalize(
+            verification = finalize(
                 VerificationResult(
                     verdict=output.verdict,
                     confidence=clamp(output.confidence),
@@ -327,6 +334,8 @@ class PydanticAIQueryIntelligence:
                     rationale=normalized_text(output.rationale),
                 )
             )
+            self._verify_cache[prompt] = verification
+            return verification
         except Exception:
             log("  [dim yellow]→ fallback: heuristic verifier[/dim yellow]")
             return finalize(heuristic_verifier(claim, passages))

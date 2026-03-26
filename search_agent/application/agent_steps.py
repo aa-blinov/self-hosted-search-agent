@@ -901,7 +901,7 @@ def route_claim_retrieval(
     evidence_sufficiency += 0.15 if any(result.assessment.semantic_match_score >= 0.7 for result in top_results) else 0.0
     evidence_sufficiency = _clamp(evidence_sufficiency)
 
-    if certainty >= 0.8 and consistency >= 0.65 and evidence_sufficiency >= 0.6:
+    if certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
         mode = "short_path"
     elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
         mode = "targeted_retrieval"
@@ -1853,7 +1853,7 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
     if verification.verdict == "supported":
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
-        if not claim.entity_set and verification.confidence >= 0.95 and bundle.independent_source_count >= 2:
+        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2:
             return True
     return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
 
