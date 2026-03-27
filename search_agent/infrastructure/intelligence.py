@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from typing import Literal
 
 import logfire
@@ -323,8 +324,9 @@ class PydanticAIQueryIntelligence:
                 input_chars=len(normalized_query),
             ) as metrics:
                 with logfire.span("query_intelligence.classify_intent", query=normalized_query):
+                    today = date.today().isoformat()
                     result = self._intent_agent.run_sync(
-                        normalized_query,
+                        f"[Today: {today}]\n{normalized_query}",
                         model_settings=model_settings,
                     )
                 metrics.output_chars = output_char_len(result.output)
