@@ -217,6 +217,40 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertGreaterEqual(verification.confidence, 0.46)
         self.assertTrue(verification.supporting_spans)
 
+    def test_synthesize_answer_news_digest_keeps_four_source_footer_entries(self) -> None:
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        passages = [
+            Passage(
+                passage_id=f"p{i}",
+                url=f"https://source{i}.example/story",
+                canonical_url=f"https://source{i}.example/story",
+                host=f"source{i}.example",
+                title=f"Story {i}",
+                section="News",
+                published_at="2026-03-24T00:00:00+00:00",
+                author=None,
+                extracted_at="2026-03-24T00:00:00+00:00",
+                chunk_id=f"p{i}",
+                text=f"Important development {i}.",
+                source_score=0.8,
+                utility_score=0.8,
+            )
+            for i in range(1, 5)
+        ]
+        result = type("Result", (), {"output": "Summary line [1]"})()
+
+        with patch.object(service._synth_agent, "run_sync", return_value=result):
+            answer = service.synthesize_answer(
+                "What are the latest news on the Iran conflict?",
+                passages,
+                intent="news_digest",
+            )
+
+        self.assertIn("[1] Story 1", answer)
+        self.assertIn("[2] Story 2", answer)
+        self.assertIn("[3] Story 3", answer)
+        self.assertIn("[4] Story 4", answer)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -258,6 +258,65 @@ class _FakeIntelligenceThreeSameQuery(_FakeIntelligence):
         ]
 
 
+class _FakeContradictionIntelligence(_FakeIntelligence):
+    def decompose_claims(self, classification, log=None):
+        return [
+            Claim(
+                claim_id="claim-1",
+                claim_text=classification.normalized_query,
+                priority=1,
+                needs_freshness=False,
+                entity_set=["Python"],
+            )
+        ]
+
+    def verify_claim(self, claim, passages, log=None):
+        self.verify_calls += 1
+        return VerificationResult(
+            verdict="contradicted",
+            confidence=0.99,
+            contradicting_spans=[],
+            rationale="Contradiction is already clear.",
+        )
+
+
+class _FakeContradictionSteps(_FakeSteps):
+    def route_claim_retrieval(self, claim, gated_results):
+        return RoutingDecision(
+            mode="targeted_retrieval",
+            certainty=0.9,
+            consistency=0.8,
+            evidence_sufficiency=0.9,
+            rationale="strong initial contradiction evidence",
+        )
+
+    def build_evidence_bundle(self, claim, passages, verification, gated_results):
+        return EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            contradicting_passages=passages,
+            considered_passages=passages,
+            independent_source_count=2,
+            has_primary_source=True,
+            freshness_ok=True,
+            verification=verification,
+        )
+
+    def refine_query_variants(self, claim, classification, verification, gated_results, bundle, next_iteration, existing_queries):
+        return [
+            QueryVariant(
+                variant_id="v2",
+                claim_id=claim.claim_id,
+                query_text=f'"{claim.claim_text}"',
+                strategy="refined_exact",
+                rationale="second iteration",
+            )
+        ]
+
+    def should_stop_claim_loop(self, claim, bundle, iteration):
+        return False
+
+
 class UseCaseLayerTests(unittest.TestCase):
     def test_use_case_dedupes_search_across_parallel_claims(self):
         search_gateway = _FakeSearchGateway()
@@ -300,6 +359,28 @@ class UseCaseLayerTests(unittest.TestCase):
         self.assertEqual(search_gateway.queries[0], ("Who is the CEO of Microsoft?", "web"))
         self.assertEqual(intelligence.verify_calls, 1)
         self.assertEqual(receipt_writer.calls[0][1], "receipts")
+
+    def test_use_case_stops_after_strong_contradiction_without_second_iteration(self):
+        receipt_writer = _FakeReceiptWriter()
+        search_gateway = _FakeSearchGateway()
+        intelligence = _FakeContradictionIntelligence()
+        use_case = SearchAgentUseCase(
+            intelligence=intelligence,
+            search_gateway=search_gateway,
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=receipt_writer,
+            steps=_FakeContradictionSteps(),
+        )
+
+        report = use_case.run(
+            "Was Python 3.13.0 released on October 1, 2024?",
+            get_profile("web"),
+            receipts_dir=None,
+        )
+
+        self.assertEqual(len(search_gateway.queries), 1)
+        self.assertEqual(intelligence.verify_calls, 1)
+        self.assertEqual(report.claims[0].routing_decision.mode, "iterative_loop")
 
 
 if __name__ == "__main__":

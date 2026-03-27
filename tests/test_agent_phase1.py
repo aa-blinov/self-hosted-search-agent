@@ -1,11 +1,13 @@
 import unittest
 
 from search_agent.application.agent_steps import (
+    _answer_type,
     build_evidence_bundle,
     build_query_variants,
     compose_answer,
     gate_serp_results,
     refine_query_variants,
+    route_claim_retrieval,
     should_stop_claim_loop,
 )
 from search_agent.domain.models import (
@@ -348,6 +350,69 @@ class AgentPhase1Tests(unittest.TestCase):
 
         self.assertFalse(should_stop_claim_loop(claim, bundle, iteration=1))
 
+    def test_supported_unit_only_entity_can_stop_without_primary_source(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Celsius"],
+        )
+        passage = Passage(
+            passage_id="p1",
+            url="https://example.com/boiling-point",
+            canonical_url="https://example.com/boiling-point",
+            host="example.com",
+            title="Boiling point of water",
+            section="Answer",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p1",
+            text="Water boils at 100 degrees Celsius at standard atmospheric pressure.",
+            source_score=0.8,
+            utility_score=0.8,
+        )
+        verification = VerificationResult(verdict="supported", confidence=0.98)
+        bundle = EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            supporting_passages=[passage],
+            considered_passages=[passage],
+            independent_source_count=2,
+            has_primary_source=False,
+            freshness_ok=True,
+            verification=verification,
+        )
+
+        self.assertTrue(should_stop_claim_loop(claim, bundle, iteration=1))
+
+    def test_insufficient_exact_numeric_detail_stops_after_strong_guardrail_signal(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Satya Nadella", "Microsoft"],
+        )
+        verification = VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=1.0,
+            missing_dimensions=["time", "location"],
+        )
+        bundle = EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            supporting_passages=[],
+            considered_passages=[],
+            independent_source_count=2,
+            has_primary_source=True,
+            freshness_ok=True,
+            verification=verification,
+        )
+
+        self.assertTrue(should_stop_claim_loop(claim, bundle, iteration=1))
+
     def test_news_digest_query_variants_bias_local_news_and_date(self):
         classification = QueryClassification(
             query="что сегодня было в Астане",
@@ -530,6 +595,168 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertIn("The Moon is made of cheese.: insufficient evidence", answer)
         self.assertIn("OpenAI announcement", answer)
         self.assertIn("https://example.com/openai", answer)
+
+    def test_route_exact_numeric_detail_without_dimension_match_uses_iterative_loop(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Satya Nadella", "Microsoft"],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title="Microsoft CEO: Satya Nadella",
+                    url="https://news.microsoft.com/source/exec/satya-nadella/",
+                    snippet="Satya Nadella is Chairman and Chief Executive Officer of Microsoft. Before being named CEO in February 2014, Nadella held leadership roles across the company.",
+                    canonical_url="https://news.microsoft.com/source/exec/satya-nadella/",
+                    host="news.microsoft.com",
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.5,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=0.6,
+                    source_score=1.0,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title="Introducing Microsoft's new CEO: Satya Nadella",
+                    url="https://blogs.microsoft.com/blog/2014/02/04/introducing-microsofts-new-ceo-satya-nadella/",
+                    snippet="Microsoft today named Satya Nadella its next Chief Executive Officer.",
+                    canonical_url="https://blogs.microsoft.com/blog/2014/02/04/introducing-microsofts-new-ceo-satya-nadella/",
+                    host="blogs.microsoft.com",
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.5,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=0.65,
+                    source_score=1.0,
+                ),
+            ),
+        ]
+
+        self.assertEqual(_answer_type(claim), "number")
+        decision = route_claim_retrieval(claim, gated)
+
+        self.assertEqual(decision.mode, "iterative_loop")
+
+    def test_route_numeric_dimension_match_can_stay_targeted(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            priority=1,
+            needs_freshness=False,
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title="What is the boiling point of water in Celsius?",
+                    url="https://example.com/boiling-point",
+                    snippet="At standard atmospheric pressure, water boils at 100 degrees Celsius (100°C).",
+                    canonical_url="https://example.com/boiling-point",
+                    host="example.com",
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="unknown",
+                    source_prior=0.2,
+                    primary_source_likelihood=0.3,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.8,
+                    semantic_match_score=0.9,
+                    source_score=0.8,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title="Boiling point of water",
+                    url="https://example.org/boiling-water",
+                    snippet="The boiling point of water is 100°C at 1 atm pressure.",
+                    canonical_url="https://example.org/boiling-water",
+                    host="example.org",
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="unknown",
+                    source_prior=0.2,
+                    primary_source_likelihood=0.2,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.75,
+                    semantic_match_score=0.85,
+                    source_score=0.75,
+                ),
+            ),
+        ]
+
+        self.assertEqual(_answer_type(claim), "number")
+        decision = route_claim_retrieval(claim, gated)
+
+        self.assertIn(decision.mode, {"short_path", "targeted_retrieval"})
+
+    def test_compose_answer_no_supported_lines_uses_heading_not_bullet(self):
+        insufficient_bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+            considered_passages=[],
+            independent_source_count=0,
+            has_primary_source=False,
+            freshness_ok=False,
+            verification=VerificationResult(
+                verdict="insufficient_evidence",
+                confidence=0.1,
+                missing_dimensions=["time", "location", "source"],
+            ),
+        )
+        report = AgentRunResult(
+            user_query="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+            classification=QueryClassification(
+                query="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+                normalized_query="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+                intent="factual",
+                complexity="single_hop",
+                needs_freshness=False,
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+                        priority=1,
+                        needs_freshness=False,
+                    ),
+                    evidence_bundle=insufficient_bundle,
+                )
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("Answer", answer)
+        self.assertIn("Not enough claim-level evidence for a direct answer.", answer)
+        self.assertNotIn("- Not enough claim-level evidence for a direct answer.", answer)
 
 
 if __name__ == "__main__":

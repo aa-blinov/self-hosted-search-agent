@@ -39,6 +39,65 @@ _STOPWORDS = {
     "than", "about", "between", "latest", "current",
 }
 
+_UNIT_LIKE_ENTITY_TOKENS = {
+    "celsius",
+    "fahrenheit",
+    "kelvin",
+    "degree",
+    "degrees",
+    "atm",
+    "bar",
+    "psi",
+    "pascal",
+    "pascals",
+    "pa",
+    "kpa",
+    "mpa",
+    "meter",
+    "meters",
+    "metre",
+    "metres",
+    "cm",
+    "mm",
+    "km",
+    "mile",
+    "miles",
+    "kg",
+    "kilogram",
+    "kilograms",
+    "gram",
+    "grams",
+    "g",
+    "lb",
+    "lbs",
+    "pound",
+    "pounds",
+    "oz",
+    "ounce",
+    "ounces",
+    "liter",
+    "liters",
+    "litre",
+    "litres",
+    "percent",
+    "percentage",
+    "usd",
+    "eur",
+    "gbp",
+    "temperature",
+    "temperatures",
+    "temp",
+    "градус",
+    "градуса",
+    "градусов",
+    "цельсий",
+    "фаренгейт",
+    "кельвин",
+    "процент",
+    "процента",
+    "процентов",
+}
+
 
 _OFFICIAL_HOST_MARKERS = (
     ".gov", ".mil", ".gouv", "europa.eu", "who.int", "sec.gov", "irs.gov",
@@ -647,14 +706,42 @@ def gate_serp_results(
 
 def _answer_type(claim: Claim) -> str:
     lowered = claim.claim_text.lower()
+    numeric_dimension_cues = (
+        "how many",
+        "how much",
+        "temperature",
+        "temp",
+        "boiling point",
+        "melting point",
+        "price",
+        "salary",
+        "rate",
+        "percent",
+        "percentage",
+        "amount",
+        "size",
+        "height",
+        "weight",
+        "exact",
+        "room temperature",
+        "температур",
+        "цена",
+        "стоимость",
+        "курс",
+        "процент",
+        "размер",
+        "вес",
+        "рост",
+        "точн",
+    )
     if lowered.startswith("who ") or " who " in lowered:
         return "person"
-    if lowered.startswith("when ") or " when " in lowered or "release" in lowered or "released" in lowered:
-        return "time"
     if lowered.startswith("where ") or " where " in lowered:
         return "location"
-    if "how many" in lowered or "how much" in lowered or re.search(r"\b\d+(?:\.\d+)?\b", lowered):
+    if any(cue in lowered for cue in numeric_dimension_cues):
         return "number"
+    if lowered.startswith("when ") or " when " in lowered or "release" in lowered or "released" in lowered:
+        return "time"
     return "fact"
 
 
@@ -692,6 +779,12 @@ def route_claim_retrieval(
         )
 
     certainty = sum(result.assessment.source_score for result in top_results[:3]) / min(len(top_results[:3]), 3)
+    detail_coverages = [
+        _dimension_coverage_score(claim, f"{result.serp.title} {result.serp.snippet}")
+        for result in top_results
+    ]
+    dimension_alignment = sum(detail_coverages) / len(detail_coverages)
+    max_detail_coverage = max(detail_coverages) if detail_coverages else 0.0
 
     candidates: list[str] = []
     for result in top_results:
@@ -711,10 +804,28 @@ def route_claim_retrieval(
     evidence_sufficiency += 0.2 if any(result.assessment.primary_source_likelihood >= 0.7 for result in top_results) else 0.0
     evidence_sufficiency += 0.15 if any(result.assessment.entity_match_score >= 0.7 for result in top_results) else 0.0
     evidence_sufficiency += 0.15 if any(result.assessment.semantic_match_score >= 0.7 for result in top_results) else 0.0
+    evidence_sufficiency += 0.15 if max_detail_coverage >= 0.3 else 0.0
+    answer_type = _answer_type(claim)
+    detail_sensitive_numeric = answer_type == "number" and bool(_numeric_dimension_terms(claim))
+    exact_detail_request = detail_sensitive_numeric and "exact" in (claim.claim_text or "").casefold()
+    if answer_type in {"number", "time", "location", "person"} and max_detail_coverage < 0.2:
+        evidence_sufficiency -= 0.25
+        certainty -= 0.08
+    if "exact" in (claim.claim_text or "").casefold() and max_detail_coverage < 0.3:
+        evidence_sufficiency -= 0.12
+    if detail_sensitive_numeric and max_detail_coverage < 0.2:
+        evidence_sufficiency -= 0.18
+        certainty -= 0.10
     evidence_sufficiency = _clamp(evidence_sufficiency)
+    certainty = _clamp(certainty)
+    consistency = _clamp(max(consistency, dimension_alignment * 0.6))
 
-    if certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
+    if exact_detail_request and max_detail_coverage < 0.2:
+        mode = "iterative_loop"
+    elif certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
         mode = "short_path"
+    elif answer_type in {"number", "time"} and certainty >= 0.45 and max_detail_coverage >= 0.3 and evidence_sufficiency >= 0.35:
+        mode = "targeted_retrieval"
     elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
         mode = "targeted_retrieval"
     else:
@@ -727,7 +838,8 @@ def route_claim_retrieval(
         evidence_sufficiency=evidence_sufficiency,
         rationale=(
             f"certainty={certainty:.2f}, consistency={consistency:.2f}, "
-            f"evidence_sufficiency={evidence_sufficiency:.2f}"
+            f"evidence_sufficiency={evidence_sufficiency:.2f}, "
+            f"dimension_alignment={dimension_alignment:.2f}"
         ),
     )
 
@@ -845,7 +957,13 @@ def _dimension_coverage_score(claim: Claim, text: str) -> float:
     if answer_type == "time" and _contains_date_like(text):
         score += 0.45
     if answer_type == "number" and re.search(r"\b\d+(?:\.\d+)?\b", text):
-        score += 0.45
+        numeric_terms = _numeric_dimension_terms(claim)
+        if not numeric_terms:
+            score += 0.45
+        elif any(term in lowered for term in numeric_terms):
+            score += 0.45
+        else:
+            score += 0.05
     if answer_type == "person" and re.search(r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})", text):
         score += 0.35
     if answer_type == "location" and re.search(r"\b(?:in|at|from)\s+[A-ZА-ЯЁ]", text):
@@ -853,6 +971,47 @@ def _dimension_coverage_score(claim: Claim, text: str) -> float:
     if claim.time_scope and claim.time_scope.casefold() in lowered:
         score += 0.2
     return _clamp(score)
+
+
+def _numeric_dimension_terms(claim: Claim) -> tuple[str, ...]:
+    lowered = (claim.claim_text or "").casefold()
+    cues: list[str] = []
+    groups = (
+        ("temperature", "temp", "room temperature", "celsius", "fahrenheit", "degree", "degrees", "°c", "°f"),
+        ("boiling point", "boil", "celsius", "fahrenheit", "°c", "°f", "degree", "degrees"),
+        ("melting point", "melt", "celsius", "fahrenheit", "°c", "°f", "degree", "degrees"),
+        ("price", "cost", "usd", "eur", "$"),
+        ("salary", "annual", "per year", "usd", "$"),
+        ("rate", "percent", "percentage", "%"),
+        ("amount", "size", "height", "weight"),
+        ("температур", "градус", "цена", "стоимость", "курс", "процент", "размер", "вес", "рост"),
+    )
+    for group in groups:
+        if any(term in lowered for term in group):
+            cues.extend(group)
+    return tuple(dict.fromkeys(cues))
+
+
+def _entity_requires_primary_source(entity: str) -> bool:
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁё]+", (entity or "").casefold())
+    if not tokens:
+        return True
+    return not all(token in _UNIT_LIKE_ENTITY_TOKENS for token in tokens)
+
+
+def _claim_requires_primary_source(claim: Claim) -> bool:
+    if not claim.entity_set:
+        return False
+    return any(_entity_requires_primary_source(entity) for entity in claim.entity_set)
+
+
+def _exact_detail_guardrail_claim(claim: Claim) -> bool:
+    lowered = (claim.claim_text or "").casefold()
+    return (
+        _answer_type(claim) == "number"
+        and ("exact" in lowered or "точн" in lowered)
+        and bool(_numeric_dimension_terms(claim))
+    )
 
 
 def _verification_source_bonus(claim: Claim, *, host: str, title: str, url: str) -> float:
@@ -1205,7 +1364,21 @@ def _split_into_passages(document: FetchedDocument) -> list[Passage]:
 def _documents_for_passage_extraction(documents: list[FetchedDocument]) -> list[FetchedDocument]:
     deep_documents = [document for document in documents if document.fetch_depth == "deep"]
     if deep_documents:
-        return deep_documents
+        selected = list(deep_documents)
+        deep_hosts = {_host_root(document.host) for document in deep_documents}
+        for document in sorted(
+            [document for document in documents if document.fetch_depth in {"shallow", "snippet_only"}],
+            key=lambda item: item.source_score,
+            reverse=True,
+        ):
+            root = _host_root(document.host)
+            if root in deep_hosts:
+                continue
+            selected.append(document)
+            deep_hosts.add(root)
+            if len(selected) >= len(deep_documents) + 2:
+                break
+        return selected
     snippet_documents = [document for document in documents if document.fetch_depth == "snippet_only"]
     if snippet_documents:
         return snippet_documents
@@ -1629,7 +1802,7 @@ def refine_query_variants(
     missing_primary_support = bool(
         bundle
         and verification.verdict == "supported"
-        and claim.entity_set
+        and _claim_requires_primary_source(claim)
         and not bundle.has_primary_source
     )
 
@@ -1722,13 +1895,21 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
     verification = bundle.verification
     if verification is None:
         return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
+    primary_sensitive = _claim_requires_primary_source(claim)
     if verification.verdict == "supported":
-        if claim.entity_set and not bundle.has_primary_source:
+        if primary_sensitive and not bundle.has_primary_source:
             return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2 and not claim.entity_set:
+        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2 and not primary_sensitive:
             return True
+    if (
+        verification.verdict == "insufficient_evidence"
+        and _exact_detail_guardrail_claim(claim)
+        and verification.confidence >= 0.9
+        and bundle.independent_source_count >= 2
+    ):
+        return True
     # For comparison/synthesis claims, verify_claim reliably returns insufficient_evidence
     # even when rich passages are found (the verifier looks for a binary provable fact).
     # Stop after the first iteration if any passages were collected — the synthesize_answer
@@ -1761,6 +1942,7 @@ def _compose_ui_labels(user_query: str) -> dict[str, str]:
     ru = bool(re.search(r"[а-яёА-ЯЁ]", rq))
     if ru:
         return {
+            "answer": "Ответ",
             "sources": "Источники",
             "insufficient": "Недостаточно данных",
             "caveats": "Оговорки",
@@ -1768,6 +1950,7 @@ def _compose_ui_labels(user_query: str) -> dict[str, str]:
             "digest_header": "События из источников:",
         }
     return {
+        "answer": "Answer",
         "sources": "Sources",
         "insufficient": "Insufficient data",
         "caveats": "Caveats",
@@ -1961,7 +2144,8 @@ def compose_answer(report: AgentRunResult) -> str:
     if supported_lines:
         lines.extend(supported_lines)
     else:
-        lines.append(f"- {lb['no_evidence']}")
+        lines.append(lb["answer"])
+        lines.append(lb["no_evidence"])
 
     if caveat_lines:
         lines.append("")

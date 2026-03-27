@@ -678,6 +678,9 @@ class PydanticAIQueryIntelligence:
             # Append sources section for any [N] references cited in the answer.
             import re as _re
             cited = sorted({int(m) for m in _re.findall(r"\[(\d+)\]", answer)})
+            if intent == "news_digest":
+                floor = min(4, len(passage_refs))
+                cited = sorted(set(cited) | set(range(1, floor + 1)))
             if cited:
                 lines = ["\n\nИсточники:"]
                 for n in cited:

@@ -337,6 +337,19 @@ class SearchAgentUseCase:
                 f"independent_sources={bundle.independent_source_count}[/dim]"
             )
 
+            if (
+                verification.verdict == "contradicted"
+                and verification.confidence >= 0.9
+                and bundle.independent_source_count >= 2
+            ):
+                if routing_decision.mode != "iterative_loop":
+                    routing_decision = replace(
+                        routing_decision,
+                        mode="iterative_loop",
+                        rationale=routing_decision.rationale + " | contradiction settled without extra iteration",
+                    )
+                break
+
             if self._steps.should_stop_claim_loop(claim, bundle, iteration):
                 break
 
