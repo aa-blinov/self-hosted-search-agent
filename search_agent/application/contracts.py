@@ -31,6 +31,9 @@ class QueryIntelligencePort(Protocol):
     def synthesize_answer(self, query: str, passages: list[Passage], log=None, intent: str = "synthesis") -> str:
         ...
 
+    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
+        ...
+
 
 class SearchGatewayPort(Protocol):
     def search_variant(self, query: str, profile, log=None) -> list[SearchSnapshot]:

@@ -6,11 +6,24 @@
 # Single query
 uv run python -m search_agent -S ddgs -q "your query"
 
-# Eval on control dataset
+# E2E eval on control dataset (12 cases: 7 factual + 3 synthesis + 2 news_digest)
 uv run python -m search_agent --eval eval_data/control_dataset.jsonl --eval-label my-label
 
-# Compare two eval runs
+# Compare two e2e eval runs
 uv run python -m search_agent.eval eval_runs/eval_A.json eval_runs/eval_B.json
+
+# Component eval — pure Python only, no API key needed (<1s)
+uv run python -m search_agent.eval.components --all --no-llm
+
+# Component eval — single component (LLM)
+uv run python -m search_agent.eval.components verify_claim
+uv run python -m search_agent.eval.components classify_intent
+
+# Component eval — all components (pure-Python first, then LLM, ~50s total)
+uv run python -m search_agent.eval.components --all
+
+# Compare two component runs (reuses existing compare_cli)
+uv run python -m search_agent.eval eval_runs/components/A.json eval_runs/components/B.json
 ```
 
 ---
@@ -76,8 +89,31 @@ uv run python -m search_agent.eval eval_runs/eval_A.json eval_runs/eval_B.json
 | `__main__.py` | Eval CLI |
 | `tracking.py` | Save/load eval JSON artifacts; compute metric deltas |
 | `compare_cli.py` | Diff two eval runs |
+| `intent_eval.py` | Standalone intent classifier eval |
+| `components/__main__.py` | **Component eval CLI** — `python -m search_agent.eval.components` |
+| `components/runner.py` | Dataset loading, deserializers (JSON→dataclasses), artifact saving |
+| `components/metrics.py` | Shared metric helpers: accuracy, precision/recall/F1, percentile |
+| `components/gate_serp.py` | Pure-Python: gate_serp_results correctness (include/exclude URLs, min count) |
+| `components/route_claim.py` | Pure-Python: route_claim_retrieval accuracy per mode |
+| `components/cheap_passage.py` | Pure-Python: cheap_passage_filter include/exclude recall |
+| `components/classify_intent.py` | LLM: intent accuracy (factual/synthesis/news_digest) + heuristic baseline |
+| `components/verify_claim.py` | LLM: verdict accuracy (supported/contradicted/insufficient_evidence) |
+| `components/synthesize_answer.py` | LLM: keyword hit rate + min_chars pass rate |
 
-Eval results saved to: `eval_runs/eval_YYYYMMDDTHHMMSSZ_<git8>_<dataset>.json`
+E2E eval results: `eval_runs/eval_YYYYMMDDTHHMMSSZ_<git8>_<dataset>.json`
+Component eval results: `eval_runs/components/eval_comp_YYYYMMDDTHHMMSSZ_<git8>_<component>.json`
+
+### Component eval datasets (`eval_data/components/`)
+| File | Cases | Type |
+|------|-------|------|
+| `gate_serp.jsonl` | 3 | pure Python |
+| `cheap_passage.jsonl` | 3 | pure Python |
+| `route_claim.jsonl` | 4 | pure Python |
+| `classify_intent.jsonl` | 15 | LLM |
+| `verify_claim.jsonl` | 8 | LLM |
+| `synthesize_answer.jsonl` | 3 | LLM |
+
+**Workflow**: change a component → run its component eval (seconds/minutes) → if pass_rate=1.0, optionally run e2e to confirm no latency regression.
 
 ---
 
@@ -245,13 +281,20 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 ### Current best (opt8: intent-aware authority extract, qwen3.5-35b-a3b)
 `median_answer_latency: ~12,345ms` (-40% vs baseline), `claim_support_rate: 1.0`, `source_requirement_rate: 1.0`
 
-| opt | label | latency | claim_support | notes |
-|-----|-------|---------|---------------|-------|
-| baseline | — | 20,743ms | — | 7-case factual dataset |
-| opt6 | parallel SERP + adaptive fetch + caches | ~12,359ms | 1.0 | |
-| opt7 | authority extract 15K (all intents) | 16,865ms ❌ | 0.89 | regression |
-| **opt8** | authority extract 15K (synthesis only) | **12,345ms** ✅ | **1.0** | qwen |
-| opt9 | gpt-oss-120b/groq + PromptedOutput | TBD | TBD | 12-case dataset |
+Note: opt8 was measured on the 7-case factual-only dataset. All runs from opt9 onwards use the 12-case dataset (7 factual + 3 synthesis + 2 news_digest).
+
+| opt | label | latency | claim_support | answer_depth | source_diversity | notes |
+|-----|-------|---------|---------------|--------------|------------------|-------|
+| baseline | — | 20,743ms | — | — | — | 7-case factual dataset |
+| opt6 | parallel SERP + adaptive fetch + caches | ~12,359ms | 1.0 | — | — | 7-case |
+| opt7 | authority extract 15K (all intents) | 16,865ms ❌ | 0.89 | — | — | regression |
+| **opt8** | authority extract 15K (synthesis only) | **12,345ms** ✅ | **1.0** | — | — | qwen, 7-case |
+| opt9/groq | gpt-oss-120b + PromptedOutput, Groq | 16,530ms ❌ | 0.40 | 0.60 | 0.0 | 429 rate-limits |
+| opt9/or | gpt-oss-120b + PromptedOutput, OpenRouter | 25,852ms ❌ | 0.80 | 0.60 | 0.0 | reasoning tokens 2× latency |
+| opt10/seq | rationale_guided query (SAFE-inspired, serial) | 52,037ms ❌ | 1.0 | **1.0** | 0.5 | LLM blocks iter2; 11s per claim |
+| opt10/bg | rationale_guided query (background thread) | 17,391ms ❌ | 0.6 | — | — | extra SERP overhead; no accuracy gain |
+
+**opt10/seq best on accuracy** (claim_support=1.0, answer_depth=1.0) but latency unacceptable. Parallel version (concurrent with SERP) not yet implemented.
 
 ---
 
@@ -286,6 +329,95 @@ DI wired in `bootstrap.py → build_search_agent_use_case()`.
 - `cheap_passage_filter` TF-IDF threshold (0.18) kills cross-language passages — Russian query vs English docs.python.org: feature-specific sections ("f-string improvements", "PEP 695") don't repeat version numbers → score < 0.18 → dropped; synthesis path bypasses this by sorting on `source_score`
 - `SYNTHESIS_PASSAGE_LIMIT=25` controls how many passages go to `synthesize_answer` (was using `CHEAP_PASSAGE_LIMIT=12`)
 - `gpt-oss-120b` on Groq: `verify_claim` still occasionally fails with `Exceeded maximum retries (1) for output validation` on complex passages (4000+ input chars); falls back to heuristic verifier; root cause is model generating extra reasoning commentary around JSON — `PromptedOutput` greatly reduces but does not fully eliminate this
+- **rationale_guided query (opt10) reverted** — SAFE-inspired: after `verify_claim` returns rationale, ask LLM to generate one focused search query from it. Two implementations tried: (1) serial — blocks 11s before iter2 (bad); (2) background thread — LLM+SERP runs during fetch+verify, zero blocking, but extra SERP results add fetch overhead (+5s) with no measurable accuracy improvement on 12-case eval. Serial version tested in this session: 52,037ms (+4× latency). `suggest_rationale_query` method kept in `intelligence.py`/`contracts.py` for future use. **TODO**: implement truly parallel version — start LLM call concurrently with iter2 SERP calls, inject result before fetch stage if ready within SERP wall-time.
+- **`source_diversity_rate: 0.0–0.5`** (news_digest) — structural DDGS limitation: Iranian/geopolitical news sites block automated requests (403), only 1–2 domains successfully fetched. Not a code bug. Would improve with Brave Search news API.
+- **`verify_claim` returns `confidence=0.0`** for short passages (1 sentence) — model doesn't output confidence field for tiny inputs; `_post_adjust_verification` sets `confidence=0.38` for supported, `0.0` for contradicted/insufficient. This is expected behavior for snippet-only evidence.
+
+---
+
+## Research landscape — related work
+
+Architecture places this agent in the **Agentic RAG with claim-level verification** paradigm. Survey based on arxiv literature 2021–2025.
+
+### Closest papers (ranked by similarity)
+
+| # | Paper | Year | arxiv | What's shared |
+|---|-------|------|-------|--------------|
+| 1 | **PASS-FC** — Progressive & Adaptive Search for Fact Checking | 2025 | `2504.09866` | Atomic decomposition + adaptive multi-step web search + credible-source domain filter + reflection-triggered refinement loop |
+| 2 | **Complex Claim Verification in the Wild** | 2023 | `2305.11859` | 5-stage pipeline: decompose → web retrieve → fine-grained evidence → summarize → verdict |
+| 3 | **SAFE** — Search-Augmented Factuality Evaluator (Google DeepMind) | 2024 | `2403.18802` | Decompose LLM output → verify each atomic fact with Google Search → per-fact verdict |
+| 4 | **FAIR-RAG** — Faithful Adaptive Iterative Refinement | 2025 | `2510.22344` | Intent routing + sub-query decomp + hybrid rerank (RRF) + gap-based iterative loop + cited answer |
+| 5 | **HARIS** — Search-Informed Reasoning + Reasoning-Guided Search | 2025 | `2506.07528` | Two-agent claim verification, iterative search refinement, claim-level verdicts |
+
+### Full genealogy
+
+| Paper | Year | Core contribution | Relation |
+|-------|------|------------------|---------|
+| WebGPT `2112.09332` | 2021 | GPT-3 fine-tuned to browse web + cite | Ancestor: multi-step web search → answer with references |
+| Baleen `2101.00436` | 2021 | Multi-hop retrieval with condensed context across hops | Ancestor: iterative retrieval with progressive query refinement |
+| ReAct `2210.03629` | 2022 | Interleaved thought+action traces over Wikipedia | Ancestor: "retrieve when uncertain" loop concept |
+| RARR `2210.08726` | 2022 | Research → revise LLM-generated text | Pioneer: query generation from claims → web search → evidence → verdict per span |
+| FActScore `2305.14251` | 2023 | Decompose LLM output into atomic facts → verify each | Direct ancestor of decompose→verify pipeline |
+| FLARE `2305.06983` | 2023 | Retrieve when low-confidence tokens during generation | Confidence-triggered retrieval → `should_stop_claim_loop()` |
+| AVeriTeC `2305.13117` | 2023 | Benchmark: 3-way verdict supported/refuted/not-enough-info | Defines the exact verdict taxonomy used here |
+| Self-RAG `2310.11511` | 2023 | Fine-tuned model with reflection tokens (IsREL/IsSUP/IsUSE) | Critique tokens ≈ `verify_claim` verdict; adaptive retrieval |
+| SAFE `2403.18802` | 2024 | Decompose + Google Search per atomic fact at scale | Closest to verify_claim loop; evaluator not generator |
+| Search-o1 `2501.05366` | 2025 | Reasoning model triggers search on uncertain knowledge mid-trace | Reason-in-Documents module ≈ passage filter + rerank + verify |
+| PASS-FC `2504.09866` | 2025 | Full pipeline closest to this codebase | See rank #1 above |
+| FAIR-RAG `2510.22344` | 2025 | Intent routing + hybrid rerank + gap-based loop | Closest to overall pipeline on closed corpus |
+| HARIS `2506.07528` | 2025 | Two-agent RL-trained claim verifier | Dense retrieval only, binary verdict, RL-trained |
+
+### What is well-studied (this agent is in mainstream)
+
+| Component | Literature |
+|-----------|-----------|
+| Decompose into atomic claims → verify per claim | FActScore, SAFE, AVeriTeC, Complex Claim Verification |
+| Iterative retrieval with confidence-based stop | FLARE, Self-RAG, Baleen |
+| 3-way verdict: supported / refuted / not-enough-info | AVeriTeC benchmark, FEVER-style systems |
+| Multi-step web agent with inline citations | WebGPT → ReAct → RARR → Search-o1 |
+| Passage reranking (BM25+dense, RRF) | FAIR-RAG; extensive reranker literature |
+| Source credibility / domain filtering | PASS-FC, WebFilter `2508.07956` |
+
+### FActScore / SAFE — detailed comparison
+
+**TL;DR: Both are evaluation frameworks, not search agents. Our verify_claim is richer; their evidence pipeline is weaker. Three techniques worth borrowing.**
+
+FActScore (`2305.14251`) and SAFE (`2403.18802`) solve a *different problem* — they score the factuality of an **already-generated LLM response**, not answer a user query from scratch. This makes direct comparison partially ill-posed, but illuminates concrete differences:
+
+**Evidence quality — SAFE is much weaker:**
+- SAFE works on raw Serper *snippets* (~200 chars). It **never fetches the actual page**.
+- FActScore uses Wikipedia passage chunks of 256 tokens, offline index.
+- We fetch full pages (4,000 chars; 15,000 for authority domains on synthesis) + trafilatura + crawl4ai fallback. Essential for technical queries.
+
+**Verdict taxonomy — ours is strictly richer:**
+- FActScore/SAFE: binary `Supported` / `Not Supported`. Contradiction collapses into "not supported".
+- Ours: `supported` / `contradicted` / `insufficient_evidence` + confidence float + missing_dimensions list + evidence spans with URLs. The `missing_dimensions` field directly drives `refine_query_variants()`.
+
+**Search strategy — SAFE sequential, ours parallel:**
+- SAFE: up to 5 sequential LLM-driven queries per atomic fact; each query conditions on prior results.
+- Ours: 3 parallel typed variants (broad / entity_locked / exact_match) in iter1, up to 12 in iter2 via `refine_query_variants()`. Wall-time faster; less adaptive than SAFE's knowledge accumulation.
+
+**What our pipeline has that they don't:** answer synthesis, full page extraction, domain quality gating (`gate_serp_results`), `contradicted` verdict, confidence-driven stopping, cross-claim page cache, intent routing, multilingual support.
+
+**Three techniques from SAFE worth adopting:**
+
+1. **CoT scratchpad before verdict** — SAFE prompt: *"Think step-by-step and summarize the main points of KNOWLEDGE. Final answer: [Supported] or [Not Supported]."* Our `verify_claim` goes straight to structured JSON. Adding an explicit summarization step before the JSON verdict could reduce false `insufficient_evidence` on ambiguous claims. Cost: ~100–200 extra tokens per call. *(Not yet implemented.)*
+
+2. **LLM-generated focused query from rationale** — SAFE accumulates prior results as "KNOWLEDGE" before generating the next query. We implemented `suggest_rationale_query()` in `intelligence.py`/`contracts.py` (opt10). Two approaches tried: serial (blocks iter2, +40s) and background thread (zero blocking, but extra SERP results add fetch overhead +5s with no measurable accuracy gain). **Reverted** — DDGS non-determinism dominates eval variance; the marginal improvement is not detectable at 12 cases.
+
+3. **Self-contained claim reformulation before search** — SAFE rewrites each atomic fact to resolve pronouns and ambiguous entity references before query generation. For multi-hop decomposed claims that inherit pronouns ("he", "the company", "the above version"), a lightweight rewrite in `build_query_variants()` would improve variant quality. Partially handled by `entity_set` already. *(Not yet implemented.)*
+
+### What is relatively novel in this codebase
+
+| Component | Why it stands out |
+|-----------|------------------|
+| **3-way intent classifier as hard router** (factual / synthesis / news_digest) — bypasses decompose+verify entirely for synthesis queries | Most systems treat all queries uniformly; no paper found with intent-gated bypass |
+| **Multi-variant SERP with typed semantic roles** (broad / entity_locked / exact_match) run in parallel | Diversification literature exists but doesn't distinguish semantic roles of each variant |
+| **`insufficient_evidence` as loop-continuation trigger** (not just a final verdict) | FActScore/SAFE score but don't loop back; FLARE loops at token level not claim verdict level |
+| **Two-stage passage filter**: TF-IDF cheap_passage_filter → utility_rerank | Most papers use one reranker; two-stage at passage level (not document level) uncommon |
+| **Source-score sorted passage selection for synthesis** — replaces TF-IDF with domain-authority ranking | Not found in any paper; closest is WebFilter's pre-retrieval source restriction |
+| **MAX_PER_DOMAIN=1 at prompt-slot level for news_digest** | MMR studied in RAG, but per-domain cap at prompt construction time is novel |
+| **Cross-claim page cache** — shared URL→content dict across parallel claims | Engineering optimization not studied as an architectural pattern |
 
 ---
 

@@ -137,6 +137,10 @@ class _VerificationOutput(BaseModel):
     rationale: str = ""
 
 
+class _RefinedQueryOutput(BaseModel):
+    query: str = ""
+
+
 
 
 class PydanticAIQueryIntelligence:
@@ -224,6 +228,19 @@ class PydanticAIQueryIntelligence:
         )
         # Cache for intent classification: keyed on normalized query string.
         self._intent_cache: dict[str, str] = {}
+
+        # SAFE-inspired: generates one focused search query from the verifier's rationale.
+        self._refiner_agent = Agent(
+            self._model,
+            output_type=_out(_RefinedQueryOutput),
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "Generate one focused web search query (max 12 words) that would find "
+                "the missing evidence described by the verifier. "
+                "Return only the query field. No quotes, no explanation."
+            ),
+        )
     def classify_query(self, query: str, log=None) -> QueryClassification:
         normalized_query = self._normalize_time_references(query, log=log)
         region_hint = extract_region_hint(normalized_query)
@@ -523,6 +540,39 @@ class PydanticAIQueryIntelligence:
         except Exception as exc:
             log(f"  [dim yellow]→ synthesize_answer failed: {exc}[/dim yellow]")
             return ""
+
+    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
+        """SAFE-inspired: generate one targeted search query from verifier rationale.
+
+        Only fires on iter2+ when evidence was insufficient. Adds a single LLM-driven
+        variant conditioned on *why* the verifier said evidence was missing, rather
+        than relying solely on categorical missing_dimensions labels.
+        """
+        log = log or (lambda msg: None)
+        if not self._enabled or not rationale:
+            return None
+        prompt = (
+            f"Claim: {claim_text}\n"
+            f"Verifier concluded: {rationale}\n"
+            "What single search query would find the missing evidence?"
+        )
+        try:
+            with log_llm_call(
+                log,
+                task="suggest_rationale_query",
+                model=self._settings.llm_model,
+                detail=claim_text,
+                input_chars=len(prompt),
+            ):
+                model_settings = build_model_settings(self._settings, max_tokens=80, temperature=0)
+                result = self._refiner_agent.run_sync(prompt, model_settings=model_settings)
+            query = (result.output.query or "").strip().strip('"').strip("'")
+            if query:
+                log(f"  [dim]-> rationale_guided: {query}[/dim]")
+            return query or None
+        except Exception as exc:
+            log(f"  [dim]LLM SKIP suggest_rationale_query: {exc}[/dim]")
+            return None
 
     def _normalize_time_references(self, query: str, log=None) -> str:
         log = log or (lambda msg: None)

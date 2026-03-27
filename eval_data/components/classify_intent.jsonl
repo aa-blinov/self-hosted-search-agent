@@ -1,0 +1,15 @@
+{"case_id": "ci-001", "query": "Who is the CEO of Microsoft?", "expected_intent": "factual", "notes": "person role lookup"}
+{"case_id": "ci-002", "query": "When was Python 3.13 released?", "expected_intent": "factual", "notes": "specific date lookup"}
+{"case_id": "ci-003", "query": "Is the IRS a government agency?", "expected_intent": "factual", "notes": "yes/no factual"}
+{"case_id": "ci-004", "query": "What is the boiling point of water?", "expected_intent": "factual", "notes": "physical constant"}
+{"case_id": "ci-005", "query": "What are the new features in Python 3.13?", "expected_intent": "synthesis", "notes": "what's-new overview"}
+{"case_id": "ci-006", "query": "How does asyncio work in Python?", "expected_intent": "synthesis", "notes": "how-to explanation"}
+{"case_id": "ci-007", "query": "What are the differences between Python 3.11 and 3.12?", "expected_intent": "synthesis", "notes": "comparison query"}
+{"case_id": "ci-008", "query": "Explain garbage collection in Python", "expected_intent": "synthesis", "notes": "technical explanation"}
+{"case_id": "ci-009", "query": "Latest news about the war in Ukraine", "expected_intent": "news_digest", "notes": "recent events digest"}
+{"case_id": "ci-010", "query": "What happened in AI this week?", "expected_intent": "news_digest", "notes": "weekly news digest"}
+{"case_id": "ci-011", "query": "Latest news about Iran sanctions", "expected_intent": "news_digest", "notes": "geopolitical news"}
+{"case_id": "ci-012", "query": "Когда вышел Python 3.13?", "expected_intent": "factual", "notes": "Russian: specific release date"}
+{"case_id": "ci-013", "query": "Чем отличается Python 3.11 от 3.12?", "expected_intent": "synthesis", "notes": "Russian: comparison"}
+{"case_id": "ci-014", "query": "Новости об искусственном интеллекте на этой неделе", "expected_intent": "news_digest", "notes": "Russian: news digest"}
+{"case_id": "ci-015", "query": "What year did Satya Nadella become CEO of Microsoft?", "expected_intent": "factual", "notes": "specific year lookup"}

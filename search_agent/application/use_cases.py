@@ -10,7 +10,7 @@ import logfire
 from search_agent import tuning
 from search_agent.infrastructure.caching_search_gateway import CachingBudgetSearchGateway
 from search_agent.settings import get_settings
-from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, RoutingDecision
+from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, QueryVariant, RoutingDecision
 
 from search_agent.application.contracts import (
     FetchGatewayPort,
@@ -261,6 +261,7 @@ class SearchAgentUseCase:
                     new_snapshots.extend(
                         self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots
                     )
+
             snapshots.extend(new_snapshots)
 
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
