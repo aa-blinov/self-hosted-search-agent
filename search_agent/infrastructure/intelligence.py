@@ -64,9 +64,49 @@ def _claim_sounds_python_related(claim_text: str) -> bool:
     )
 
 
+def _claim_looks_like_feature_listing(claim_text: str) -> bool:
+    t = (claim_text or "").lower()
+    return any(
+        marker in t
+        for marker in (
+            "what are the key new features",
+            "what's new",
+            "what is new",
+            "new features",
+            "main differences",
+            "key differences",
+            "compare",
+            "comparison",
+            "pros and cons",
+            "что нового",
+            "новые возможности",
+            "новые функции",
+            "основные отличия",
+            "сравни",
+            "сравнение",
+        )
+    )
+
+
 def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
     if result.verdict == "supported" and result.confidence < 0.05:
         result = replace(result, confidence=max(result.confidence, 0.38))
+    if result.verdict == "supported" and _claim_looks_like_feature_listing(claim.claim_text):
+        rationale = (result.rationale or "").strip()
+        suffix = (
+            "| Adjusted: open-ended comparison/feature request stays claim-level insufficient_evidence."
+            if rationale
+            else "Adjusted: open-ended comparison/feature request stays claim-level insufficient_evidence."
+        )
+        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
+        return replace(
+            result,
+            verdict="insufficient_evidence",
+            confidence=min(result.confidence, 0.45),
+            supporting_spans=[],
+            missing_dimensions=result.missing_dimensions or ["coverage"],
+            rationale=merged_rationale,
+        )
     if result.verdict != "insufficient_evidence":
         return result
     if result.contradicting_spans:
@@ -74,9 +114,13 @@ def _post_adjust_verification(claim: Claim, passages: list[Passage], result: Ver
     candidates = [
         p
         for p in passages
-        if _is_official_python_doc_url(p.url) and len(p.text or "") >= 500 and p.utility_score >= 0.22
+        if _is_official_python_doc_url(p.url) and len(p.text or "") >= 350 and p.utility_score >= 0.15
     ]
-    if not candidates or not _claim_sounds_python_related(claim.claim_text):
+    if (
+        not candidates
+        or not _claim_sounds_python_related(claim.claim_text)
+        or _claim_looks_like_feature_listing(claim.claim_text)
+    ):
         return result
     best = max(candidates, key=lambda p: len(p.text or ""))
     quote = (best.text or "")[:400]
@@ -247,12 +291,22 @@ class PydanticAIQueryIntelligence:
             retries=1,
             instrument=True,
             system_prompt=(
-                "Task 1 — classify intent (pick exactly one):\n"
-                "  factual: single verifiable fact (who/when/is-it-true/specific number or date).\n"
-                "  synthesis: list of specs/features/characteristics, explanation, comparison,\n"
-                "             how-to, overview, enumeration of changes or differences.\n"
-                "  news_digest: recent events or news feed.\n"
-                "  Rule: 'what are the X of Y' or 'what characteristics/features' → synthesis.\n"
+                "Task 1 — classify intent (pick exactly one: factual / synthesis / news_digest).\n"
+                "\n"
+                "  factual    — single verifiable fact: who/when/is-it-true/specific number or date.\n"
+                "               Examples: 'Who is CEO of Microsoft?' | 'When was Python 3.13 released?'\n"
+                "                         'Is IRS a government agency?' | 'How many EU countries?'\n"
+                "\n"
+                "  synthesis  — aggregated answer: list of features/specs/changes, explanation,\n"
+                "               comparison, how-to, overview, OR current-state lookup.\n"
+                "               Examples: 'What are new features in Python 3.13?' | 'How does asyncio work?'\n"
+                "                         'MacBook Pro M4 specs?' | 'Погода в Астане?' | 'Bitcoin price today'\n"
+                "                         'USD/EUR exchange rate?' | 'Pros and cons of Docker?'\n"
+                "\n"
+                "  news_digest — recent events, news feed, what's happening.\n"
+                "               Examples: 'Latest news on Iran?' | 'What happened in AI this week?'\n"
+                "                         'Последние новости из Казахстана' | 'How is Ukraine war going?'\n"
+                "\n"
                 "Task 2 — generate 3 to 5 short keyword search queries.\n"
                 "  Rules: keyword phrases only (no question words); match input language;\n"
                 "  add one English query when input is non-English; max 8 words each;\n"
@@ -279,7 +333,12 @@ class PydanticAIQueryIntelligence:
         region_hint = extract_region_hint(normalized_query)
         time_scope = extract_time_scope(normalized_query)
         freshness = needs_freshness(query)
-        intent = self._classify_intent_llm(normalized_query, log=log)
+        if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness):
+            intent = "news_digest"
+            if log:
+                log("  [dim]-> heuristic intent override: [italic]news_digest[/italic][/dim]")
+        else:
+            intent = self._classify_intent_llm(normalized_query, log=log)
         complexity = "multi_hop" if should_decompose(normalized_query) else "single_hop"
         entities = extract_entities(normalized_query)
         entity_disambiguation = any(len(entity) <= 4 for entity in entities)

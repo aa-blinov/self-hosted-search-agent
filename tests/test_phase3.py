@@ -159,7 +159,7 @@ class Phase3Tests(unittest.TestCase):
         cases = load_evaluation_cases("eval_data/control_dataset.jsonl")
 
         self.assertGreaterEqual(len(cases), 8)
-        microsoft_case = next(case for case in cases if case.case_id == "microsoft-ceo")
+        microsoft_case = next(case for case in cases if case.case_id == "ceo-microsoft")
         self.assertIn("targeted_retrieval", microsoft_case.expected_claims[0].expected_routes)
         self.assertEqual(microsoft_case.expected_claims[0].min_independent_sources, 2)
 

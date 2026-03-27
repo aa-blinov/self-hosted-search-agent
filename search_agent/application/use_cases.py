@@ -267,6 +267,12 @@ class SearchAgentUseCase:
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
+            if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
+                routing_decision = replace(
+                    routing_decision,
+                    mode="iterative_loop",
+                    rationale=routing_decision.rationale + " | synthesis requires broader retrieval",
+                )
             if bundle and bundle.verification and bundle.verification.verdict != "supported":
                 if routing_decision.mode == "short_path":
                     routing_decision = replace(

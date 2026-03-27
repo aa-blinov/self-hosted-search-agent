@@ -82,7 +82,20 @@ class _FakeSearchGateway:
 
 
 class _FakeFetchGateway:
-    def fetch_claim_documents(self, claim, gated_results, profile, routing_decision, *, seen_urls, log=None):
+    def fetch_claim_documents(
+        self,
+        claim,
+        gated_results,
+        profile,
+        routing_decision,
+        *,
+        seen_urls,
+        log=None,
+        iteration=1,
+        page_cache=None,
+        page_cache_lock=None,
+        intent="factual",
+    ):
         return (
             [
                 FetchPlan(

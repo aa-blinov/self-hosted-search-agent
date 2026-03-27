@@ -172,15 +172,125 @@ def _variant_keywords(text: str, entities: Iterable[str]) -> str:
     return " ".join(tokens[:6])
 
 
+def _compose_query(*parts: str | None) -> str:
+    return _normalized_text(" ".join(part for part in parts if part))
+
+
+def _news_digest_site_hint(claim: Claim, classification: QueryClassification) -> str | None:
+    haystack = " ".join(
+        part
+        for part in (
+            claim.claim_text,
+            classification.normalized_query,
+            classification.region_hint,
+            " ".join(claim.entity_set),
+        )
+        if part
+    ).casefold()
+    if any(marker in haystack for marker in ("астан", "алмат", "казах", "қазақ", "kazakh", "kazakhstan", ".kz")):
+        return "site:.kz"
+    return None
+
+
+def _heuristic_query_candidates(
+    claim: Claim,
+    classification: QueryClassification,
+) -> list[tuple[str, str, str, str | None, str | None]]:
+    cyrillic = _is_cyrillic_text(claim.claim_text or classification.normalized_query)
+    entities = claim.entity_set or _extract_entities(claim.claim_text)
+    base_keywords = _variant_keywords(claim.claim_text, entities)
+    time_scope = claim.time_scope or classification.time_scope
+    time_terms = _time_query_terms(time_scope, cyrillic=cyrillic)
+    explicit_time = time_terms[0] if time_terms else None
+
+    if classification.intent == "news_digest":
+        region = classification.region_hint or (entities[0] if entities else claim.claim_text)
+        local_word = "новости" if cyrillic else "news"
+        event_word = "события" if cyrillic else "events"
+        site_hint = _news_digest_site_hint(claim, classification)
+        english_region = entities[0] if entities else region
+        return [
+            (
+                _compose_query(f'"{region}"', local_word, explicit_time, site_hint),
+                "news_digest_local_news",
+                "Bias toward local news coverage for the requested place and date.",
+                site_hint,
+                time_scope,
+            ),
+            (
+                _compose_query(f'"{region}"', event_word, explicit_time, site_hint),
+                "news_digest_local_events",
+                "Bias toward event recaps for the requested place and date.",
+                site_hint,
+                time_scope,
+            ),
+            (
+                _compose_query(region, local_word, explicit_time),
+                "news_digest_broad",
+                "Use a broader local news query without domain restriction.",
+                None,
+                time_scope,
+            ),
+            (
+                _compose_query(english_region, "news", explicit_time, site_hint),
+                "news_digest_english",
+                "Add an English variant for broader recall across international coverage.",
+                site_hint,
+                time_scope,
+            ),
+        ]
+
+    joined_entities = " ".join(entities[:2])
+    quoted_entities = " ".join(f'"{entity}"' for entity in entities[:2])
+    anchor = joined_entities or base_keywords or claim.claim_text
+    candidates = [
+        (
+            _compose_query(quoted_entities or f'"{claim.claim_text}"', base_keywords, explicit_time),
+            "exact_match",
+            "Quoted entity or claim match for precise retrieval.",
+            None,
+            time_scope,
+        ),
+        (
+            _compose_query(joined_entities, base_keywords, explicit_time),
+            "entity_keywords",
+            "Entity-preserving keyword query.",
+            None,
+            time_scope,
+        ),
+        (
+            _compose_query(f'"{entities[0]}"' if entities else None, base_keywords, explicit_time),
+            "entity_focus",
+            "Focus on the primary entity with compact keywords.",
+            None,
+            time_scope,
+        ),
+        (
+            _compose_query(anchor, explicit_time),
+            "time_scoped",
+            "Reinforce the temporal constraint explicitly.",
+            None,
+            time_scope,
+        ),
+        (
+            _compose_query(base_keywords or claim.claim_text),
+            "broad_match",
+            "Broader lexical match to improve recall.",
+            None,
+            time_scope,
+        ),
+    ]
+    return candidates
+
+
 def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
     """Convert LLM-generated search queries from the claim into QueryVariant objects.
 
     Falls back to claim text directly if search_queries is empty (LLM disabled or failed).
     """
-    queries = claim.search_queries or [claim.claim_text]
     seen: set[str] = set()
     variants: list[QueryVariant] = []
-    for idx, query_text in enumerate(queries, 1):
+    for idx, query_text in enumerate(claim.search_queries or [], 1):
         key = query_text.casefold().strip()
         if not key or key in seen:
             continue
@@ -194,8 +304,37 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
             source_restriction=None,
             freshness_hint=claim.time_scope,
         ))
-        if len(variants) >= tuning.AGENT_MAX_QUERY_VARIANTS_ITER1:
+        if len(variants) >= tuning.AGENT_MAX_QUERY_VARIANTS:
             break
+    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(
+        _heuristic_query_candidates(claim, classification),
+        len(variants) + 1,
+    ):
+        key = query_text.casefold().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        variants.append(QueryVariant(
+            variant_id=f"{claim.claim_id}-q{idx}",
+            claim_id=claim.claim_id,
+            query_text=query_text,
+            strategy=strategy,
+            rationale=rationale,
+            source_restriction=source_restriction,
+            freshness_hint=freshness_hint,
+        ))
+        if len(variants) >= tuning.AGENT_MAX_QUERY_VARIANTS:
+            break
+    if not variants:
+        variants.append(QueryVariant(
+            variant_id=f"{claim.claim_id}-q1",
+            claim_id=claim.claim_id,
+            query_text=claim.claim_text,
+            strategy="fallback_claim_text",
+            rationale="Fallback to the raw claim text.",
+            source_restriction=None,
+            freshness_hint=claim.time_scope,
+        ))
     return variants
 
 
@@ -1426,36 +1565,42 @@ def refine_query_variants(
     existing_queries: set[str],
 ) -> list[QueryVariant]:
     if classification.intent == "news_digest":
-        region = classification.region_hint or (claim.entity_set[0] if claim.entity_set else claim.claim_text)
+        topic = (
+            classification.region_hint
+            or (claim.entity_set[0] if claim.entity_set else None)
+            or _variant_keywords(claim.claim_text, claim.entity_set)
+            or claim.claim_text
+        )
         cyrillic = _is_cyrillic_text(claim.claim_text)
         time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
         explicit_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
         fallback_time = explicit_time
         local_word = "\u043d\u043e\u0432\u043e\u0441\u0442\u0438" if cyrillic else "news"
         event_word = "\u0441\u043e\u0431\u044b\u0442\u0438\u044f" if cyrillic else "events"
+        site_hint = _news_digest_site_hint(claim, classification)
 
         candidates: list[tuple[str, str, str, str | None, str | None]] = [
             (
-                _normalized_text(f"{region} {local_word} {explicit_time} site:.kz"),
+                _compose_query(topic, local_word, explicit_time, site_hint),
                 "refined_local_news",
                 "Tighten the search around local news coverage for the exact place and date.",
-                "site:.kz",
+                site_hint,
                 claim.time_scope,
             ),
             (
-                _normalized_text(f'"{region}" {event_word} {fallback_time} site:.kz'),
+                _compose_query(f'"{topic}"', event_word, fallback_time, site_hint),
                 "refined_local_events",
                 "Bias toward local event recaps for the requested place and date.",
-                "site:.kz",
+                site_hint,
                 claim.time_scope,
             ),
         ]
         if "source" in verification.missing_dimensions or verification.verdict != "supported":
             candidates.append((
-                _normalized_text(f'"{region}" {fallback_time} site:.kz'),
+                _compose_query(f'"{topic}"', fallback_time, site_hint),
                 "refined_local_exact",
-                "Force retrieval from local Kazakhstan domains for a precise place/date match.",
-                "site:.kz",
+                "Force a tighter place/date match, with local-domain bias when available.",
+                site_hint,
                 claim.time_scope,
             ))
 
@@ -1578,9 +1723,11 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
     if verification is None:
         return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
     if verification.verdict == "supported":
+        if claim.entity_set and not bundle.has_primary_source:
+            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
         if bundle.independent_source_count >= 2 and bundle.has_primary_source:
             return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2:
+        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2 and not claim.entity_set:
             return True
     # For comparison/synthesis claims, verify_claim reliably returns insufficient_evidence
     # even when rich passages are found (the verifier looks for a binary provable fact).

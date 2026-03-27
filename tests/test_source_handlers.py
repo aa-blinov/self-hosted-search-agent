@@ -26,7 +26,7 @@ class SourceHandlersTests(unittest.TestCase):
         ids = [h.id for h in SHALLOW_SOURCE_HANDLERS]
         self.assertEqual(
             ids,
-            ["reddit", "wikipedia", "arxiv", "crossref", "semantic_scholar", "github"],
+            ["reddit", "arxiv", "crossref", "semantic_scholar", "github"],
         )
 
 

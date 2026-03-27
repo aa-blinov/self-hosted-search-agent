@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import threading
+from concurrent.futures import Future
 
 import logfire
 
@@ -23,6 +24,7 @@ class CachingBudgetSearchGateway:
         self._provider_label = provider_label
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str, str], list[SearchSnapshot]] = {}
+        self._inflight: dict[tuple[str, str, str], Future[list[SearchSnapshot]]] = {}
         self._search_calls = 0
 
     @property
@@ -36,6 +38,8 @@ class CachingBudgetSearchGateway:
         key = (self._provider_label, pname, routed)
 
         # Fast path: cache hit — return without network I/O.
+        wait_for: Future[list[SearchSnapshot]] | None = None
+        owner = False
         with self._lock:
             if key in self._cache:
                 logfire.info(
@@ -45,27 +49,43 @@ class CachingBudgetSearchGateway:
                     routed_prefix=routed[:120],
                 )
                 return copy.deepcopy(self._cache[key])
+            if key in self._inflight:
+                wait_for = self._inflight[key]
+            else:
+                cap = tuning.AGENT_MAX_SEARCH_CALLS_PER_RUN
+                if cap > 0 and self._search_calls >= cap:
+                    logfire.warning(
+                        "search_gateway.budget_exhausted",
+                        cap=cap,
+                        provider=self._provider_label,
+                    )
+                    log("  [yellow]Search budget exhausted; skipping backend search.[/yellow]")
+                    return []
 
-            cap = tuning.AGENT_MAX_SEARCH_CALLS_PER_RUN
-            if cap > 0 and self._search_calls >= cap:
-                logfire.warning(
-                    "search_gateway.budget_exhausted",
-                    cap=cap,
-                    provider=self._provider_label,
-                )
-                log("  [yellow]Search budget exhausted; skipping backend search.[/yellow]")
-                return []
+                # Reserve a slot before releasing the lock for the network call.
+                self._search_calls += 1
+                wait_for = Future()
+                self._inflight[key] = wait_for
+                owner = True
 
-            # Reserve a slot before releasing the lock for the network call.
-            self._search_calls += 1
+        if not owner and wait_for is not None:
+            return copy.deepcopy(wait_for.result())
 
         # Network I/O without holding the lock so parallel variants run concurrently.
-        out = self._inner.search_variant(query, profile, log=log)
-        stored = copy.deepcopy(out)
+        try:
+            out = self._inner.search_variant(query, profile, log=log)
+            stored = copy.deepcopy(out)
+        except Exception as exc:
+            with self._lock:
+                pending = self._inflight.pop(key, None)
+                if pending is not None and not pending.done():
+                    pending.set_exception(exc)
+            raise
 
         with self._lock:
-            # Another thread may have fetched the same key concurrently; last write wins
-            # (both results are equivalent so this is safe).
             self._cache[key] = stored
+            pending = self._inflight.pop(key, None)
+            if pending is not None and not pending.done():
+                pending.set_result(copy.deepcopy(stored))
 
         return copy.deepcopy(stored)

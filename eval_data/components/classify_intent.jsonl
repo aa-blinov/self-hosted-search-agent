@@ -18,3 +18,23 @@
 {"case_id": "ci-018", "query": "What changes were made to the EU AI Act?", "expected_intent": "synthesis", "notes": "specific document changes — synthesis not news_digest"}
 {"case_id": "ci-019", "query": "Последние новости из Казахстана", "expected_intent": "news_digest", "notes": "Russian: pure latest-news request — news_digest"}
 {"case_id": "ci-020", "query": "Что происходит сейчас в Иране?", "expected_intent": "news_digest", "notes": "Russian: general current events — news_digest"}
+{"case_id": "ci-021", "query": "Погода в Астане?", "expected_intent": "synthesis", "notes": "current-state lookup: weather — synthesis not factual"}
+{"case_id": "ci-022", "query": "What's the USD to EUR exchange rate today?", "expected_intent": "synthesis", "notes": "current-state lookup: exchange rate"}
+{"case_id": "ci-023", "query": "Курс доллара к тенге сейчас", "expected_intent": "synthesis", "notes": "Russian: current exchange rate — synthesis"}
+{"case_id": "ci-024", "query": "Bitcoin price today", "expected_intent": "synthesis", "notes": "current-state price lookup — synthesis"}
+{"case_id": "ci-025", "query": "Какие характеристики MacBook Pro M4?", "expected_intent": "synthesis", "notes": "Russian: device specs — synthesis"}
+{"case_id": "ci-026", "query": "iPhone 16 Pro specs and features", "expected_intent": "synthesis", "notes": "device specs — synthesis"}
+{"case_id": "ci-027", "query": "What are the system requirements for Windows 11?", "expected_intent": "synthesis", "notes": "requirements list — synthesis"}
+{"case_id": "ci-028", "query": "Какие налоги платит ИП в Казахстане?", "expected_intent": "synthesis", "notes": "Russian: list/enumeration — synthesis"}
+{"case_id": "ci-029", "query": "What are the pros and cons of using Docker?", "expected_intent": "synthesis", "notes": "pros/cons comparison — synthesis"}
+{"case_id": "ci-030", "query": "Как настроить nginx на Ubuntu?", "expected_intent": "synthesis", "notes": "Russian: how-to — synthesis"}
+{"case_id": "ci-031", "query": "Is Python open source?", "expected_intent": "factual", "notes": "yes/no verifiable fact"}
+{"case_id": "ci-032", "query": "How many countries are in the EU?", "expected_intent": "factual", "notes": "specific count — factual"}
+{"case_id": "ci-033", "query": "Who won the 2022 FIFA World Cup?", "expected_intent": "factual", "notes": "specific historical outcome — factual"}
+{"case_id": "ci-034", "query": "Какой минимальный размер оплаты труда в России в 2024 году?", "expected_intent": "factual", "notes": "Russian: specific legislated number — factual"}
+{"case_id": "ci-035", "query": "What's the latest news on Gaza?", "expected_intent": "news_digest", "notes": "ongoing conflict news feed — news_digest"}
+{"case_id": "ci-036", "query": "Последние новости Apple", "expected_intent": "news_digest", "notes": "Russian: company news digest — news_digest"}
+{"case_id": "ci-037", "query": "What happened in crypto markets this week?", "expected_intent": "news_digest", "notes": "weekly market events — news_digest"}
+{"case_id": "ci-038", "query": "Новости о санкциях против России", "expected_intent": "news_digest", "notes": "Russian: sanctions news — news_digest"}
+{"case_id": "ci-039", "query": "Что нового в Python 3.13?", "expected_intent": "synthesis", "notes": "Russian: specific version features (not news) — synthesis"}
+{"case_id": "ci-040", "query": "How is the war in Ukraine going?", "expected_intent": "news_digest", "notes": "current events status of ongoing conflict — news_digest"}
