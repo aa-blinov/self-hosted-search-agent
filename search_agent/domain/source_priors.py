@@ -35,6 +35,13 @@ _EXACT_ROOT_PRIORS: dict[str, SourcePrior] = {
         domain_type_override="official",
         labels=["official_root"],
     ),
+    "apple.com": SourcePrior(
+        source_prior=0.22,
+        primary_boost=0.22,
+        verification_bonus=0.22,
+        domain_type_override="official",
+        labels=["official_root"],
+    ),
     "github.com": SourcePrior(
         source_prior=0.08,
         primary_boost=0.08,

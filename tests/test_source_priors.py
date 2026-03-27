@@ -18,6 +18,13 @@ class SourcePriorsTests(unittest.TestCase):
         self.assertIn("community_forum", prior.labels)
         self.assertLess(prior.primary_boost, 0.0)
 
+    def test_lookup_source_prior_treats_apple_root_as_official(self) -> None:
+        prior = lookup_source_prior("www.apple.com")
+
+        self.assertEqual(prior.domain_type_override, "official")
+        self.assertIn("official_root", prior.labels)
+        self.assertGreater(prior.primary_boost, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

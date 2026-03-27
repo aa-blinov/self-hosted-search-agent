@@ -1,19 +1,23 @@
 import unittest
 
 from search_agent.application.agent_steps import (
+    _compose_ui_labels,
     _answer_type,
     build_evidence_bundle,
     build_query_variants,
     compose_answer,
     gate_serp_results,
+    infer_claim_profile,
     refine_query_variants,
     route_claim_retrieval,
     should_stop_claim_loop,
 )
+from search_agent import tuning
 from search_agent.domain.models import (
     AgentRunResult,
     Claim,
     ClaimRun,
+    ClaimProfile,
     EvidenceBundle,
     EvidenceSpan,
     GatedSerpResult,
@@ -1052,6 +1056,460 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertIn("Answer", answer)
         self.assertIn("Not enough claim-level evidence for a direct answer.", answer)
         self.assertNotIn("- Not enough claim-level evidence for a direct answer.", answer)
+
+    def test_compose_ui_labels_use_readable_russian_strings(self):
+        labels = _compose_ui_labels("Какие характеистики нового MacBook Neo?")
+
+        self.assertEqual(labels["answer"], "Ответ")
+        self.assertEqual(labels["sources"], "Источники")
+        self.assertEqual(labels["insufficient"], "Недостаточно данных")
+
+    def test_infer_claim_profile_marks_product_specs_contract(self):
+        classification = QueryClassification(
+            query="Какие характеристики нового MacBook Neo?",
+            normalized_query="Какие характеристики нового MacBook Neo?",
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=True,
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["MacBook Neo"],
+        )
+
+        profile = infer_claim_profile(claim, classification)
+
+        self.assertEqual(profile.answer_shape, "product_specs")
+        self.assertTrue(profile.primary_source_required)
+        self.assertEqual(profile.min_independent_sources, 2)
+        self.assertTrue(profile.strict_contract)
+
+    def test_infer_claim_profile_marks_product_specs_contract_for_russian_typo(self):
+        query = "Какие характеистики нового MacBook Neo?"
+        classification = QueryClassification(
+            query=query,
+            normalized_query=query,
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=True,
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text=query,
+            priority=1,
+            needs_freshness=True,
+            entity_set=["MacBook Neo"],
+        )
+
+        profile = infer_claim_profile(claim, classification)
+
+        self.assertEqual(profile.answer_shape, "product_specs")
+        self.assertTrue(profile.primary_source_required)
+        self.assertTrue(profile.strict_contract)
+
+    def test_product_specs_query_variants_prioritize_spec_queries(self):
+        classification = QueryClassification(
+            query="Какие характеристики нового MacBook Neo?",
+            normalized_query="Какие характеристики нового MacBook Neo?",
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=True,
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+
+        variants = build_query_variants(claim, classification)
+
+        self.assertGreaterEqual(len(variants), 3)
+        self.assertEqual([variant.strategy for variant in variants[:3]], ["product_technical", "product_features", "product_announcement"])
+
+    def test_product_specs_query_variants_extract_topic_and_keep_llm_backup(self):
+        classification = QueryClassification(
+            query="Какие характеистики нового macbook neo?",
+            normalized_query="Какие характеистики нового macbook neo?",
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=True,
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеистики нового macbook neo?",
+            priority=1,
+            needs_freshness=True,
+            search_queries=[
+                "MacBook Neo specifications 2026",
+                "MacBook Neo features release date",
+            ],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+
+        variants = build_query_variants(claim, classification)
+
+        self.assertIn('"macbook neo"', variants[0].query_text.casefold())
+        self.assertNotIn("какие характеистики", variants[0].query_text.casefold())
+        self.assertTrue(any(variant.strategy == "llm_1" for variant in variants[:3]))
+
+    def test_product_specs_bundle_tracks_contract_gaps(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+        passage = Passage(
+            passage_id="p1",
+            url="https://reviews.example.com/macbook-neo",
+            canonical_url="https://reviews.example.com/macbook-neo",
+            host="reviews.example.com",
+            title="MacBook Neo review",
+            section="Specs",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-28T00:00:00+00:00",
+            chunk_id="p1",
+            text="MacBook Neo has a 13-inch display and starts at $599.",
+            source_score=0.7,
+            utility_score=0.8,
+        )
+        verification = VerificationResult(
+            verdict="supported",
+            confidence=0.8,
+            supporting_spans=[
+                EvidenceSpan(
+                    passage_id="p1",
+                    url=passage.url,
+                    title=passage.title,
+                    section=passage.section,
+                    text="MacBook Neo has a 13-inch display and starts at $599.",
+                )
+            ],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title=passage.title,
+                    url=passage.url,
+                    snippet=passage.text,
+                    canonical_url=passage.canonical_url,
+                    host=passage.host,
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="major_media",
+                    source_prior=0.3,
+                    primary_source_likelihood=0.2,
+                    freshness_score=0.0,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.9,
+                    semantic_match_score=0.9,
+                    source_score=0.75,
+                ),
+            )
+        ]
+
+        bundle = build_evidence_bundle(claim, [passage], verification, gated)
+
+        self.assertFalse(bundle.contract_satisfied)
+        self.assertEqual(set(bundle.contract_gaps), {"primary_source", "independent_sources", "freshness"})
+
+    def test_product_specs_bundle_can_satisfy_contract_without_supported_verdict(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+        official = Passage(
+            passage_id="p1",
+            url="https://www.apple.com/macbook-neo/specs/",
+            canonical_url="https://www.apple.com/macbook-neo/specs/",
+            host="www.apple.com",
+            title="MacBook Neo Technical Specifications",
+            section="Specs",
+            published_at="2026-03-04T00:00:00+00:00",
+            author=None,
+            extracted_at="2026-03-28T00:00:00+00:00",
+            chunk_id="p1",
+            text="MacBook Neo has a 13-inch display, A18 Pro, up to 16 GB RAM, and starts at $599.",
+            source_score=0.95,
+            utility_score=0.95,
+        )
+        secondary = Passage(
+            passage_id="p2",
+            url="https://www.macworld.com/article/2854313/macbook-neo-design-processor-specs-release.html",
+            canonical_url="https://www.macworld.com/article/2854313/macbook-neo-design-processor-specs-release.html",
+            host="www.macworld.com",
+            title="MacBook Neo review",
+            section="Review",
+            published_at="2026-03-18T00:00:00+00:00",
+            author=None,
+            extracted_at="2026-03-28T00:00:00+00:00",
+            chunk_id="p2",
+            text="MacBook Neo is Apple's affordable laptop with an A18 Pro chip and 13-inch screen.",
+            source_score=0.82,
+            utility_score=0.8,
+        )
+        verification = VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=0.2,
+            missing_dimensions=["coverage"],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title=official.title,
+                    url=official.url,
+                    snippet=official.text,
+                    canonical_url=official.canonical_url,
+                    host=official.host,
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="vendor",
+                    source_prior=0.9,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.9,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=1.0,
+                    source_score=0.98,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title=secondary.title,
+                    url=secondary.url,
+                    snippet=secondary.text,
+                    canonical_url=secondary.canonical_url,
+                    host=secondary.host,
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="major_media",
+                    source_prior=0.5,
+                    primary_source_likelihood=0.2,
+                    freshness_score=0.8,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.9,
+                    semantic_match_score=0.9,
+                    source_score=0.8,
+                ),
+            ),
+        ]
+
+        bundle = build_evidence_bundle(claim, [official, secondary], verification, gated)
+
+        self.assertTrue(bundle.has_primary_source)
+        self.assertEqual(bundle.independent_source_count, 2)
+        self.assertTrue(bundle.contract_satisfied)
+        self.assertEqual(bundle.contract_gaps, [])
+
+    def test_product_specs_supported_claim_keeps_loop_until_contract_or_cap(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+        bundle = EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            independent_source_count=1,
+            has_primary_source=False,
+            freshness_ok=False,
+            verification=VerificationResult(verdict="supported", confidence=0.92),
+            contract_satisfied=False,
+            contract_gaps=["primary_source", "independent_sources", "freshness"],
+        )
+
+        self.assertFalse(should_stop_claim_loop(claim, bundle, iteration=1))
+        self.assertTrue(should_stop_claim_loop(claim, bundle, iteration=tuning.AGENT_MAX_CLAIM_ITERATIONS))
+
+    def test_product_specs_insufficient_verdict_stops_when_contract_is_satisfied(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
+        )
+        bundle = EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            supporting_passages=[],
+            considered_passages=[
+                Passage(
+                    passage_id="p1",
+                    url="https://www.apple.com/macbook-neo/specs/",
+                    canonical_url="https://www.apple.com/macbook-neo/specs/",
+                    host="www.apple.com",
+                    title="MacBook Neo Technical Specifications",
+                    section="Specs",
+                    published_at="2026-03-04T00:00:00+00:00",
+                    author=None,
+                    extracted_at="2026-03-28T00:00:00+00:00",
+                    chunk_id="p1",
+                    text="MacBook Neo has a 13-inch display and starts at $599.",
+                    source_score=0.95,
+                    utility_score=0.95,
+                )
+            ],
+            independent_source_count=2,
+            has_primary_source=True,
+            freshness_ok=True,
+            verification=VerificationResult(
+                verdict="insufficient_evidence",
+                confidence=0.2,
+                missing_dimensions=["coverage"],
+            ),
+            contract_satisfied=True,
+            contract_gaps=[],
+        )
+
+        self.assertTrue(should_stop_claim_loop(claim, bundle, iteration=1))
+
+    def test_compose_answer_hides_supported_product_specs_until_contract_satisfied(self):
+        passage = Passage(
+            passage_id="p1",
+            url="https://reviews.example.com/macbook-neo",
+            canonical_url="https://reviews.example.com/macbook-neo",
+            host="reviews.example.com",
+            title="MacBook Neo review",
+            section="Specs",
+            published_at="2026-03-18T00:00:00+00:00",
+            author=None,
+            extracted_at="2026-03-28T00:00:00+00:00",
+            chunk_id="p1",
+            text="MacBook Neo has a 13-inch display and starts at $599.",
+            source_score=0.7,
+            utility_score=0.8,
+        )
+        bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="Какие характеристики нового MacBook Neo?",
+            supporting_passages=[passage],
+            considered_passages=[passage],
+            independent_source_count=1,
+            has_primary_source=False,
+            freshness_ok=True,
+            verification=VerificationResult(verdict="supported", confidence=0.8),
+            contract_satisfied=False,
+            contract_gaps=["primary_source", "independent_sources"],
+        )
+        report = AgentRunResult(
+            user_query="Какие характеристики нового MacBook Neo?",
+            classification=QueryClassification(
+                query="Какие характеристики нового MacBook Neo?",
+                normalized_query="Какие характеристики нового MacBook Neo?",
+                intent="factual",
+                complexity="single_hop",
+                needs_freshness=True,
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="Какие характеристики нового MacBook Neo?",
+                        priority=1,
+                        needs_freshness=True,
+                        entity_set=["MacBook Neo"],
+                        claim_profile=ClaimProfile(
+                            answer_shape="product_specs",
+                            primary_source_required=True,
+                            min_independent_sources=2,
+                            preferred_domain_types=["official", "vendor", "major_media"],
+                            routing_bias="iterative_loop",
+                            required_dimensions=["source", "specs"],
+                            allow_synthesis_without_primary=False,
+                            strict_contract=True,
+                        ),
+                    ),
+                    evidence_bundle=bundle,
+                )
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("недостаточно данных (нужно подтверждение из первичного источника, нужно минимум 2 независимых источника)", answer)
+        self.assertNotIn("13-inch display", answer)
 
 
 if __name__ == "__main__":

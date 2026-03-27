@@ -119,6 +119,55 @@ def _claim_looks_like_feature_listing(claim_text: str) -> bool:
     )
 
 
+def _claim_requests_role_identity(claim_text: str) -> bool:
+    t = (claim_text or "").casefold().strip()
+    return t.startswith("who ") or t.startswith("кто ")
+
+
+def _claim_role_terms(claim_text: str) -> tuple[str, ...]:
+    t = (claim_text or "").casefold()
+    role_groups = (
+        ("chief executive officer", "ceo"),
+        ("chief technology officer", "cto"),
+        ("chief financial officer", "cfo"),
+        ("president",),
+        ("founder",),
+        ("chairman",),
+    )
+    for group in role_groups:
+        if any(term in t for term in group):
+            return group
+    return ()
+
+
+def _direct_role_support_passage(claim: Claim, passages: list[Passage]) -> Passage | None:
+    if not _claim_requests_role_identity(claim.claim_text):
+        return None
+
+    role_terms = _claim_role_terms(claim.claim_text)
+    if not role_terms:
+        return None
+
+    entity_hints = claim.entity_set or extract_entities(claim.claim_text)
+    candidates: list[Passage] = []
+    for passage in passages:
+        lead = f"{passage.title}. {passage.text[:500]}"
+        lowered = lead.casefold()
+        if not any(term in lowered for term in role_terms):
+            continue
+        if entity_hints and not any(entity.casefold() in lowered for entity in entity_hints):
+            continue
+        if not any(marker in lowered for marker in (" is ", " serves as ", " became ", " was named ")):
+            continue
+        if not any(" " in entity for entity in extract_entities(lead)):
+            continue
+        candidates.append(passage)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda passage: (passage.utility_score, len(passage.text or ""), passage.source_score))
+
+
 def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
     if result.verdict == "supported" and result.confidence < 0.05:
         result = replace(result, confidence=max(result.confidence, 0.38))
@@ -142,6 +191,31 @@ def _post_adjust_verification(claim: Claim, passages: list[Passage], result: Ver
         return result
     if result.contradicting_spans:
         return result
+    role_passage = _direct_role_support_passage(claim, passages)
+    if role_passage is not None:
+        quote = (role_passage.text or "")[:280]
+        span = EvidenceSpan(
+            passage_id=role_passage.passage_id,
+            url=role_passage.url,
+            title=role_passage.title,
+            section=role_passage.section,
+            text=quote,
+        )
+        rationale = (result.rationale or "").strip()
+        suffix = (
+            "| Adjusted: direct role-identification sentence found in retrieved evidence."
+            if rationale
+            else "Adjusted: direct role-identification sentence found in retrieved evidence."
+        )
+        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
+        return replace(
+            result,
+            verdict="supported",
+            confidence=max(result.confidence, 0.46),
+            supporting_spans=[span],
+            missing_dimensions=[],
+            rationale=merged_rationale,
+        )
     candidates = [
         p
         for p in passages

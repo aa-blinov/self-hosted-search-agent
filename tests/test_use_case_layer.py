@@ -3,6 +3,7 @@ import unittest
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import (
     Claim,
+    ClaimProfile,
     EvidenceBundle,
     FetchedDocument,
     FetchPlan,
@@ -22,6 +23,7 @@ from search_agent.application.use_cases import SearchAgentUseCase, _select_synth
 class _FakeIntelligence:
     def __init__(self):
         self.verify_calls = 0
+        self.synthesize_calls = 0
 
     def classify_query(self, query: str, log=None):
         return QueryClassification(
@@ -51,6 +53,10 @@ class _FakeIntelligence:
             supporting_spans=[],
             rationale="Enough evidence.",
         )
+
+    def synthesize_answer(self, query: str, passages, log=None, intent: str = "synthesis"):
+        self.synthesize_calls += 1
+        return "Synthesized answer"
 
 
 class _FakeSearchGateway:
@@ -136,6 +142,9 @@ class _FakeReceiptWriter:
 class _FakeSteps:
     def build_run_id(self, query, started_at):
         return "test-run"
+
+    def infer_claim_profile(self, claim, classification):
+        return claim.claim_profile or ClaimProfile(answer_shape="fact", min_independent_sources=2)
 
     def build_query_variants(self, claim, classification):
         return [
@@ -317,6 +326,77 @@ class _FakeContradictionSteps(_FakeSteps):
         return False
 
 
+class _FakeSynthesisIntelligence(_FakeIntelligence):
+    def classify_query(self, query: str, log=None):
+        return QueryClassification(
+            query=query,
+            normalized_query=query,
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=True,
+        )
+
+    def decompose_claims(self, classification, log=None):
+        return [
+            Claim(
+                claim_id="claim-1",
+                claim_text=classification.normalized_query,
+                priority=1,
+                needs_freshness=True,
+                entity_set=["MacBook Neo"],
+            )
+        ]
+
+    def synthesize_answer(self, query: str, passages, log=None, intent: str = "synthesis"):
+        self.synthesize_calls += 1
+        return "Synthesized product answer"
+
+
+class _FakeSynthesisInsufficientIntelligence(_FakeSynthesisIntelligence):
+    def verify_claim(self, claim, passages, log=None):
+        self.verify_calls += 1
+        return VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=0.2,
+            missing_dimensions=["coverage"],
+            rationale="Open-ended product overview.",
+        )
+
+
+class _FakeSynthesisSteps(_FakeSteps):
+    def __init__(self, *, contract_satisfied: bool):
+        self.contract_satisfied = contract_satisfied
+
+    def infer_claim_profile(self, claim, classification):
+        return ClaimProfile(
+            answer_shape="product_specs",
+            primary_source_required=True,
+            min_independent_sources=2,
+            preferred_domain_types=["official", "vendor", "major_media"],
+            routing_bias="iterative_loop",
+            required_dimensions=["source", "specs"],
+            allow_synthesis_without_primary=False,
+            strict_contract=True,
+        )
+
+    def build_evidence_bundle(self, claim, passages, verification, gated_results):
+        return EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            supporting_passages=passages,
+            considered_passages=passages,
+            independent_source_count=2 if self.contract_satisfied else 1,
+            has_primary_source=self.contract_satisfied,
+            freshness_ok=True,
+            verification=verification,
+            contract_satisfied=self.contract_satisfied,
+            contract_gaps=[] if self.contract_satisfied else ["primary_source", "independent_sources"],
+        )
+
+    def compose_answer(self, report):
+        return "Fallback product answer"
+
+
 class UseCaseLayerTests(unittest.TestCase):
     def test_select_synthesis_passages_diversifies_news_digest_domains(self):
         passages = [
@@ -449,6 +529,73 @@ class UseCaseLayerTests(unittest.TestCase):
         self.assertEqual(len(search_gateway.queries), 1)
         self.assertEqual(intelligence.verify_calls, 1)
         self.assertEqual(report.claims[0].routing_decision.mode, "iterative_loop")
+
+    def test_use_case_skips_synthesis_when_strict_claim_contract_is_not_satisfied(self):
+        receipt_writer = _FakeReceiptWriter()
+        search_gateway = _FakeSearchGateway()
+        intelligence = _FakeSynthesisIntelligence()
+        use_case = SearchAgentUseCase(
+            intelligence=intelligence,
+            search_gateway=search_gateway,
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=receipt_writer,
+            steps=_FakeSynthesisSteps(contract_satisfied=False),
+        )
+
+        report = use_case.run(
+            "Какие характеристики нового MacBook Neo?",
+            get_profile("web"),
+            receipts_dir=None,
+        )
+
+        self.assertEqual(intelligence.synthesize_calls, 0)
+        self.assertEqual(report.answer, "Fallback product answer")
+        self.assertEqual(report.claims[0].claim.claim_profile.answer_shape, "product_specs")
+
+    def test_use_case_allows_synthesis_when_strict_claim_contract_is_satisfied(self):
+        receipt_writer = _FakeReceiptWriter()
+        search_gateway = _FakeSearchGateway()
+        intelligence = _FakeSynthesisIntelligence()
+        use_case = SearchAgentUseCase(
+            intelligence=intelligence,
+            search_gateway=search_gateway,
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=receipt_writer,
+            steps=_FakeSynthesisSteps(contract_satisfied=True),
+        )
+
+        report = use_case.run(
+            "Какие характеристики нового MacBook Neo?",
+            get_profile("web"),
+            receipts_dir=None,
+        )
+
+        self.assertEqual(intelligence.synthesize_calls, 1)
+        self.assertEqual(report.answer, "Synthesized product answer")
+        self.assertTrue(report.claims[0].evidence_bundle.contract_satisfied)
+
+    def test_use_case_allows_synthesis_when_contract_is_satisfied_but_verdict_is_insufficient(self):
+        receipt_writer = _FakeReceiptWriter()
+        search_gateway = _FakeSearchGateway()
+        intelligence = _FakeSynthesisInsufficientIntelligence()
+        use_case = SearchAgentUseCase(
+            intelligence=intelligence,
+            search_gateway=search_gateway,
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=receipt_writer,
+            steps=_FakeSynthesisSteps(contract_satisfied=True),
+        )
+
+        report = use_case.run(
+            "Какие характеристики нового MacBook Neo?",
+            get_profile("web"),
+            receipts_dir=None,
+        )
+
+        self.assertEqual(intelligence.verify_calls, 1)
+        self.assertEqual(intelligence.synthesize_calls, 1)
+        self.assertEqual(report.answer, "Synthesized product answer")
+        self.assertTrue(report.claims[0].evidence_bundle.contract_satisfied)
 
 
 if __name__ == "__main__":

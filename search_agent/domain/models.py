@@ -8,6 +8,7 @@ DomainType = Literal["official", "academic", "vendor", "major_media", "forum", "
 Verdict = Literal["supported", "contradicted", "insufficient_evidence"]
 RouteMode = Literal["short_path", "targeted_retrieval", "iterative_loop"]
 FetchDepth = Literal["shallow", "deep", "snippet_only"]
+AnswerShape = Literal["fact", "exact_date", "exact_number", "product_specs", "overview", "comparison", "news_digest"]
 
 
 @dataclass(slots=True)
@@ -23,6 +24,18 @@ class QueryClassification:
 
 
 @dataclass(slots=True)
+class ClaimProfile:
+    answer_shape: AnswerShape
+    primary_source_required: bool = False
+    min_independent_sources: int = 1
+    preferred_domain_types: list[DomainType] = field(default_factory=list)
+    routing_bias: RouteMode | None = None
+    required_dimensions: list[str] = field(default_factory=list)
+    allow_synthesis_without_primary: bool = True
+    strict_contract: bool = False
+
+
+@dataclass(slots=True)
 class Claim:
     claim_id: str
     claim_text: str
@@ -31,6 +44,7 @@ class Claim:
     entity_set: list[str] = field(default_factory=list)
     time_scope: str | None = None
     search_queries: list[str] = field(default_factory=list)
+    claim_profile: ClaimProfile | None = None
 
 
 @dataclass(slots=True)
@@ -175,6 +189,8 @@ class EvidenceBundle:
     has_primary_source: bool = False
     freshness_ok: bool = True
     verification: VerificationResult | None = None
+    contract_satisfied: bool = False
+    contract_gaps: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

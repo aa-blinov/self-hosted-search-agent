@@ -13,6 +13,7 @@ from search_agent.application.agent_steps import (
     cheap_passage_filter,
     compose_answer,
     gate_serp_results,
+    infer_claim_profile,
     refine_query_variants,
     route_claim_retrieval,
     should_stop_claim_loop,
@@ -23,6 +24,9 @@ from search_agent.application.agent_steps import (
 class LegacyAgentStepLibrary:
     def build_run_id(self, query: str, started_at) -> str:
         return _build_run_id(query, started_at)
+
+    def infer_claim_profile(self, claim, classification):
+        return infer_claim_profile(claim, classification)
 
     def build_query_variants(self, claim, classification):
         return build_query_variants(claim, classification)

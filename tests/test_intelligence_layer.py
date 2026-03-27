@@ -219,6 +219,51 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertGreaterEqual(verification.confidence, 0.46)
         self.assertTrue(verification.supporting_spans)
 
+    def test_verify_claim_boosts_insufficient_for_role_identity_question(self) -> None:
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Who is the CEO of Microsoft?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Microsoft"],
+        )
+        passage = Passage(
+            passage_id="p-role",
+            url="https://news.microsoft.com/source/exec/satya-nadella/",
+            canonical_url="https://news.microsoft.com/source/exec/satya-nadella/",
+            host="news.microsoft.com",
+            title="Satya Nadella",
+            section="Leadership",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p-role",
+            text="Satya Nadella is Chairman and Chief Executive Officer of Microsoft. Before being named CEO, he held leadership roles across the company.",
+            source_score=0.9,
+            utility_score=0.4,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _VerificationOutput(
+                    verdict="insufficient_evidence",
+                    confidence=0.2,
+                    supporting_passages=[],
+                    rationale="Need clearer entity attribution.",
+                )
+            },
+        )()
+
+        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+            verification = service.verify_claim(claim, [passage])
+
+        self.assertEqual(verification.verdict, "supported")
+        self.assertGreaterEqual(verification.confidence, 0.46)
+        self.assertTrue(verification.supporting_spans)
+        self.assertIn("Chief Executive Officer of Microsoft", verification.supporting_spans[0].text)
+
     def test_verify_claim_boosts_insufficient_when_python_release_page(self) -> None:
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(

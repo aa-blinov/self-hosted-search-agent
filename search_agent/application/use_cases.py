@@ -11,7 +11,7 @@ import logfire
 from search_agent import tuning
 from search_agent.infrastructure.caching_search_gateway import CachingBudgetSearchGateway
 from search_agent.settings import get_settings
-from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, QueryVariant, RoutingDecision
+from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, GatedSerpResult, QueryVariant, RoutingDecision
 
 from search_agent.application.contracts import (
     FetchGatewayPort,
@@ -68,6 +68,56 @@ def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> li
     return selected
 
 
+def _claim_run_allows_synthesis(claim_run: ClaimRun) -> bool:
+    bundle = claim_run.evidence_bundle
+    if bundle is None or bundle.verification is None:
+        return False
+    if bundle.verification.verdict != "supported":
+        profile = claim_run.claim.claim_profile
+        if profile is None:
+            return False
+        if profile.strict_contract:
+            return bundle.contract_satisfied and bool(bundle.considered_passages)
+        return bool(profile.allow_synthesis_without_primary and bundle.considered_passages)
+    profile = claim_run.claim.claim_profile
+    if profile is None:
+        return True
+    if profile.strict_contract:
+        return bundle.contract_satisfied
+    if profile.primary_source_required and not profile.allow_synthesis_without_primary and not bundle.has_primary_source:
+        return False
+    return True
+
+
+def _merge_gated_results(existing: list[GatedSerpResult], new_results: list[GatedSerpResult]) -> list[GatedSerpResult]:
+    by_url: dict[str, GatedSerpResult] = {}
+    for result in existing + new_results:
+        key = result.serp.canonical_url or result.serp.url
+        current = by_url.get(key)
+        if current is None:
+            by_url[key] = result
+            continue
+        current_rank = (
+            current.assessment.primary_source_likelihood,
+            current.assessment.source_score,
+        )
+        next_rank = (
+            result.assessment.primary_source_likelihood,
+            result.assessment.source_score,
+        )
+        if next_rank > current_rank:
+            by_url[key] = result
+    merged = list(by_url.values())
+    merged.sort(
+        key=lambda result: (
+            result.assessment.primary_source_likelihood,
+            result.assessment.source_score,
+        ),
+        reverse=True,
+    )
+    return merged
+
+
 class SearchAgentUseCase:
     def __init__(
         self,
@@ -104,6 +154,13 @@ class SearchAgentUseCase:
             claims = self._intelligence.decompose_claims(classification, log=log)
             if tuning.DECOMPOSE_MAX_CLAIMS > 0:
                 claims = claims[:tuning.DECOMPOSE_MAX_CLAIMS]
+            claims = [
+                replace(
+                    claim,
+                    claim_profile=self._steps.infer_claim_profile(claim, classification),
+                )
+                for claim in claims
+            ]
             log(f"\n[bold]Agent Search[/bold] [dim]{len(claims)} claim(s)[/dim]")
 
             provider = get_settings().resolved_search_provider()
@@ -193,6 +250,8 @@ class SearchAgentUseCase:
             if classification.intent in ("synthesis", "news_digest"):
                 synth_passages: list = []
                 for cr in claim_runs:
+                    if not _claim_run_allows_synthesis(cr):
+                        continue
                     # Re-extract all split passages from fetched documents.
                     # For synthesis we skip TF-IDF threshold filtering: the query may be
                     # in a different language from the content (e.g. Russian query vs
@@ -272,6 +331,7 @@ class SearchAgentUseCase:
         all_variants = []
         snapshots = []
         gated_results = []
+        all_gated_results: list[GatedSerpResult] = []
         fetch_plans = []
         documents = []
         final_passages = []
@@ -319,6 +379,7 @@ class SearchAgentUseCase:
 
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
+            all_gated_results = _merge_gated_results(all_gated_results, gated_results)
             routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
             if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
                 routing_decision = replace(
@@ -383,7 +444,7 @@ class SearchAgentUseCase:
             )
 
             verification = self._intelligence.verify_claim(claim, final_passages, log=log)
-            bundle = self._steps.build_evidence_bundle(claim, final_passages, verification, gated_results)
+            bundle = self._steps.build_evidence_bundle(claim, final_passages, verification, all_gated_results)
             log(
                 f"  [dim]verdict={verification.verdict} | "
                 f"confidence={verification.confidence:.2f} | "
@@ -410,7 +471,7 @@ class SearchAgentUseCase:
                 claim,
                 classification,
                 verification,
-                gated_results,
+                all_gated_results,
                 bundle,
                 iteration + 1,
                 existing_queries,
@@ -420,7 +481,7 @@ class SearchAgentUseCase:
             claim=claim,
             query_variants=all_variants,
             search_snapshots=snapshots,
-            gated_results=gated_results,
+            gated_results=all_gated_results,
             fetch_plans=fetch_plans,
             fetched_documents=documents,
             passages=final_passages,

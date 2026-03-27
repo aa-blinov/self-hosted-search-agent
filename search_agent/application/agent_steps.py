@@ -9,6 +9,7 @@ from search_agent.domain.models import (
     AgentRunResult,
     AuditTrail,
     Claim,
+    ClaimProfile,
     ClaimRun,
     DomainType,
     EvidenceBundle,
@@ -145,6 +146,98 @@ _NON_ENTITY_TOKENS = {
     "release", "released", "latest", "current",
 }
 
+_PRODUCT_SPECS_MARKERS = (
+    "spec",
+    "specs",
+    "specification",
+    "specifications",
+    "technical specifications",
+    "feature",
+    "features",
+    "характерист",
+    "характеист",
+    "параметр",
+    "процессор",
+    "экран",
+    "диспле",
+    "памят",
+    "батар",
+    "цена",
+    "стоимост",
+    "price",
+    "processor",
+    "chip",
+    "display",
+    "screen",
+    "memory",
+    "ram",
+    "storage",
+    "battery",
+    "color",
+    "colours",
+    "colors",
+)
+_PRODUCT_ENTITY_MARKERS = (
+    "macbook",
+    "iphone",
+    "ipad",
+    "watch",
+    "airpods",
+    "galaxy",
+    "pixel",
+    "surface",
+    "thinkpad",
+    "xps",
+    "ideapad",
+    "laptop",
+    "notebook",
+    "ультрабук",
+    "ноутбук",
+    "смартфон",
+    "планшет",
+)
+_PRODUCT_PRIMARY_PAGE_CUES = (
+    "spec",
+    "specs",
+    "specification",
+    "technical",
+    "product",
+    "products",
+    "announcement",
+    "newsroom",
+    "introducing",
+    "say hello",
+    "launch",
+    "price",
+    "processor",
+    "display",
+    "battery",
+)
+_PRODUCT_QUERY_NOISE = {
+    "what",
+    "which",
+    "how",
+    "new",
+    "latest",
+    "spec",
+    "specs",
+    "specification",
+    "specifications",
+    "technical",
+    "features",
+    "feature",
+    "price",
+    "review",
+    "характеристики",
+    "характеистики",
+    "параметры",
+    "цена",
+    "анонс",
+    "нового",
+    "новый",
+    "какие",
+}
+
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
@@ -236,6 +329,195 @@ def _is_temporal_event_verification_claim(claim: Claim) -> bool:
     return _temporal_event_focus_term(claim.claim_text) is not None
 
 
+def _product_query_topic(claim: Claim) -> str:
+    if claim.entity_set:
+        return " ".join(claim.entity_set[:2])
+    entities = _extract_entities(claim.claim_text)
+    if entities:
+        return " ".join(entities[:2])
+    raw_tokens = [token.strip("\"'`.,:;!?()[]{}<>") for token in claim.claim_text.split()]
+    latin_tokens = [
+        token
+        for token in raw_tokens
+        if token
+        and token.casefold() not in _PRODUCT_QUERY_NOISE
+        and any(("a" <= ch.casefold() <= "z") or ch.isdigit() for ch in token)
+    ]
+    if latin_tokens:
+        for index, token in enumerate(latin_tokens):
+            if any(marker in token.casefold() for marker in _PRODUCT_ENTITY_MARKERS):
+                return " ".join(latin_tokens[index : index + 2])
+        return " ".join(latin_tokens[:2])
+    return claim.claim_text
+
+
+def _product_specs_signal(text: str) -> float:
+    lowered = (text or "").casefold()
+    hits = sum(1 for cue in _PRODUCT_SPECS_MARKERS if cue in lowered)
+    if hits >= 4:
+        return 1.0
+    if hits == 3:
+        return 0.8
+    if hits == 2:
+        return 0.6
+    if hits == 1:
+        return 0.35
+    return 0.0
+
+
+def _is_product_specs_claim(claim: Claim, classification: QueryClassification) -> bool:
+    if classification.intent != "synthesis":
+        return False
+    haystack = " ".join(
+        part for part in (claim.claim_text, classification.normalized_query, " ".join(claim.entity_set)) if part
+    ).casefold()
+    has_entity_cue = any(marker in haystack for marker in _PRODUCT_ENTITY_MARKERS)
+    has_specs_cue = _product_specs_signal(haystack) > 0.0
+    has_newness_cue = any(marker in haystack for marker in (" new ", " latest ", "нов", "2025", "2026", "2027"))
+    return has_entity_cue and (has_specs_cue or has_newness_cue)
+
+
+def _heuristic_answer_type(claim: Claim) -> str:
+    lowered = claim.claim_text.lower()
+    numeric_dimension_cues = (
+        "how many",
+        "how much",
+        "temperature",
+        "temp",
+        "boiling point",
+        "melting point",
+        "price",
+        "salary",
+        "rate",
+        "percent",
+        "percentage",
+        "amount",
+        "size",
+        "height",
+        "weight",
+        "exact",
+        "room temperature",
+        "С‚РµРјРїРµСЂР°С‚СѓСЂ",
+        "С†РµРЅР°",
+        "СЃС‚РѕРёРјРѕСЃС‚СЊ",
+        "РєСѓСЂСЃ",
+        "РїСЂРѕС†РµРЅС‚",
+        "СЂР°Р·РјРµСЂ",
+        "РІРµСЃ",
+        "СЂРѕСЃС‚",
+        "С‚РѕС‡РЅ",
+    )
+    if lowered.startswith("who ") or " who " in lowered:
+        return "person"
+    if lowered.startswith("where ") or " where " in lowered:
+        return "location"
+    if any(cue in lowered for cue in numeric_dimension_cues):
+        return "number"
+    if lowered.startswith("when ") or " when " in lowered or "release" in lowered or "released" in lowered:
+        return "time"
+    return "fact"
+
+
+def infer_claim_profile(claim: Claim, classification: QueryClassification) -> ClaimProfile:
+    if classification.intent == "news_digest":
+        return ClaimProfile(
+            answer_shape="news_digest",
+            min_independent_sources=3,
+            preferred_domain_types=["major_media", "official", "vendor"],
+            routing_bias="iterative_loop",
+            required_dimensions=["time", "source"],
+            allow_synthesis_without_primary=True,
+        )
+
+    if _is_product_specs_claim(claim, classification):
+        return ClaimProfile(
+            answer_shape="product_specs",
+            primary_source_required=True,
+            min_independent_sources=2,
+            preferred_domain_types=["official", "vendor", "major_media"],
+            routing_bias="iterative_loop",
+            required_dimensions=["source", "specs"],
+            allow_synthesis_without_primary=False,
+            strict_contract=True,
+        )
+
+    if any(marker in (claim.claim_text or "").lower() for marker in COMPARISON_MARKERS):
+        return ClaimProfile(
+            answer_shape="comparison",
+            min_independent_sources=2,
+            preferred_domain_types=["official", "academic", "vendor", "major_media"],
+            routing_bias="iterative_loop",
+            allow_synthesis_without_primary=True,
+        )
+
+    answer_type = _heuristic_answer_type(claim)
+    if answer_type == "time":
+        return ClaimProfile(
+            answer_shape="exact_date",
+            primary_source_required=_claim_requires_primary_source_heuristic(claim),
+            min_independent_sources=2,
+            preferred_domain_types=["official", "academic", "vendor", "major_media"],
+            required_dimensions=["time"],
+            allow_synthesis_without_primary=True,
+        )
+    if answer_type == "number":
+        return ClaimProfile(
+            answer_shape="exact_number",
+            primary_source_required=_claim_requires_primary_source_heuristic(claim),
+            min_independent_sources=2,
+            preferred_domain_types=["official", "academic", "vendor", "major_media"],
+            required_dimensions=["number"],
+            allow_synthesis_without_primary=True,
+        )
+    if classification.intent == "synthesis":
+        return ClaimProfile(
+            answer_shape="overview",
+            min_independent_sources=2,
+            preferred_domain_types=["official", "academic", "vendor", "major_media"],
+            routing_bias="iterative_loop",
+            allow_synthesis_without_primary=True,
+        )
+    return ClaimProfile(
+        answer_shape="fact",
+        primary_source_required=_claim_requires_primary_source_heuristic(claim),
+        min_independent_sources=2,
+        preferred_domain_types=["official", "academic", "vendor", "major_media"],
+        allow_synthesis_without_primary=True,
+    )
+
+
+def _claim_answer_shape(claim: Claim) -> str:
+    if claim.claim_profile is not None:
+        return claim.claim_profile.answer_shape
+    answer_type = _heuristic_answer_type(claim)
+    if answer_type == "time":
+        return "exact_date"
+    if answer_type == "number":
+        return "exact_number"
+    return "fact"
+
+
+def _preferred_domain_bonus(claim: Claim, domain_type: DomainType) -> float:
+    profile = claim.claim_profile
+    if profile is None or not profile.preferred_domain_types:
+        return 0.0
+    return 0.08 if domain_type in profile.preferred_domain_types else 0.0
+
+
+def _product_specs_result_bonus(claim: Claim, title: str, snippet: str, url: str) -> float:
+    if _claim_answer_shape(claim) != "product_specs":
+        return 0.0
+    lowered = f"{title} {snippet} {url}".casefold()
+    cue_hits = sum(1 for cue in _PRODUCT_PRIMARY_PAGE_CUES if cue in lowered)
+    signal = _product_specs_signal(lowered)
+    bonus = 0.0
+    if signal > 0.0:
+        bonus += min(0.12, 0.04 * cue_hits) + 0.08 * signal
+    if any(cue in lowered for cue in ("newsroom", "announcement", "spec", "specification", "technical")):
+        bonus += 0.08
+    return bonus
+
+
 def _heuristic_query_candidates(
     claim: Claim,
     classification: QueryClassification,
@@ -280,6 +562,35 @@ def _heuristic_query_candidates(
                 "news_digest_english",
                 "Add an English variant for broader recall across international coverage.",
                 site_hint,
+                time_scope,
+            ),
+        ]
+
+    if _claim_answer_shape(claim) == "product_specs":
+        topic = _product_query_topic(claim)
+        specs_word = "технические характеристики" if cyrillic else "technical specifications"
+        feature_word = "характеристики цена" if cyrillic else "features price"
+        release_word = "анонс характеристики" if cyrillic else "announcement specs"
+        return [
+            (
+                _compose_query(f'"{topic}"', specs_word, explicit_time),
+                "product_technical",
+                "Target technical-spec pages for the product.",
+                None,
+                time_scope,
+            ),
+            (
+                _compose_query(f'"{topic}"', feature_word, explicit_time),
+                "product_features",
+                "Collect broad product features and pricing details.",
+                None,
+                time_scope,
+            ),
+            (
+                _compose_query(f'"{topic}"', release_word, explicit_time),
+                "product_announcement",
+                "Bias retrieval toward launch and newsroom pages.",
+                None,
                 time_scope,
             ),
         ]
@@ -372,11 +683,20 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
         for idx, query_text in enumerate(claim.search_queries or [], 1)
     ]
     heuristic_candidates = _heuristic_query_candidates(claim, classification)
-    candidate_pool = (
-        heuristic_candidates + llm_candidates
-        if _is_temporal_event_verification_claim(claim)
-        else llm_candidates + heuristic_candidates
-    )
+    if _is_temporal_event_verification_claim(claim):
+        candidate_pool = heuristic_candidates + llm_candidates
+    elif _claim_answer_shape(claim) == "product_specs" and llm_candidates:
+        candidate_pool = []
+        pair_count = max(len(heuristic_candidates), len(llm_candidates))
+        for idx in range(pair_count):
+            if idx < len(heuristic_candidates):
+                candidate_pool.append(heuristic_candidates[idx])
+            if idx < len(llm_candidates):
+                candidate_pool.append(llm_candidates[idx])
+    elif _claim_answer_shape(claim) == "product_specs":
+        candidate_pool = heuristic_candidates + llm_candidates
+    else:
+        candidate_pool = llm_candidates + heuristic_candidates
     for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(
         candidate_pool,
         1,
@@ -806,6 +1126,8 @@ def gate_serp_results(
             time_alignment = _time_scope_alignment(claim, result)
             spam = _spam_risk(result)
             primary = _primary_source_likelihood(claim, result, domain_type)
+            preferred_domain_bonus = _preferred_domain_bonus(claim, domain_type)
+            product_bonus = _product_specs_result_bonus(claim, result.title, result.snippet, result.url)
             source_score = _clamp(
                 0.22 * domain_prior
                 + 0.22 * primary
@@ -814,6 +1136,8 @@ def gate_serp_results(
                 + 0.12 * semantic_match
                 + 0.06 * host_entity_match
                 + 0.10 * time_alignment
+                + preferred_domain_bonus
+                + product_bonus
                 + prior.source_prior
                 - 0.25 * spam
             )
@@ -826,6 +1150,8 @@ def gate_serp_results(
                 f"time_alignment={time_alignment:.2f}",
                 f"entity_match={entity_match:.2f}",
                 f"spam={spam:.2f}",
+                f"preferred_bonus={preferred_domain_bonus:.2f}",
+                f"shape_bonus={product_bonus:.2f}",
             ]
             reasons.extend(prior.labels)
             gated = GatedSerpResult(
@@ -1183,6 +1509,34 @@ def _exact_detail_guardrail_claim(claim: Claim) -> bool:
         and ("exact" in lowered or "точн" in lowered)
         and bool(_numeric_dimension_terms(claim))
     )
+
+
+def _claim_requires_primary_source_heuristic(claim: Claim) -> bool:
+    if not claim.entity_set:
+        return False
+    return any(_entity_requires_primary_source(entity) for entity in claim.entity_set)
+
+
+def _claim_requires_primary_source(claim: Claim) -> bool:
+    if claim.claim_profile is not None:
+        return claim.claim_profile.primary_source_required
+    return _claim_requires_primary_source_heuristic(claim)
+
+
+def _claim_min_independent_sources(claim: Claim) -> int:
+    if claim.claim_profile is not None:
+        return max(1, claim.claim_profile.min_independent_sources)
+    return 2
+
+
+def _answer_type(claim: Claim) -> str:
+    profile = claim.claim_profile
+    if profile is not None:
+        if profile.answer_shape == "exact_date":
+            return "time"
+        if profile.answer_shape == "exact_number":
+            return "number"
+    return _heuristic_answer_type(claim)
 
 
 def _verification_source_bonus(claim: Claim, *, host: str, title: str, url: str) -> float:
@@ -1563,6 +1917,18 @@ def cheap_passage_score(claim: Claim, passage: Passage) -> float:
     claim_numbers = set(_shared_extract_numbers(claim.claim_text))
     passage_numbers = set(_shared_extract_numbers(passage.text))
     number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
+    if _claim_answer_shape(claim) == "product_specs":
+        lead = f"{passage.title} {passage.text[:360]} {passage.url}"
+        preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+        spec_signal = _product_specs_signal(lead)
+        return _clamp(
+            0.24 * overlap
+            + 0.22 * entity_overlap
+            + 0.10 * dimension_overlap
+            + 0.24 * spec_signal
+            + 0.10 * passage.source_score
+            + 0.10 * preferred_bonus
+        )
     return _clamp(
         0.35 * overlap
         + 0.25 * entity_overlap
@@ -1574,6 +1940,25 @@ def cheap_passage_score(claim: Claim, passage: Passage) -> float:
 
 def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     lowered = passage.text.casefold()
+    if _claim_answer_shape(claim) == "product_specs":
+        lead = f"{passage.title} {passage.text[:360]} {passage.url}"
+        preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+        source_bonus = _verification_source_bonus(
+            claim,
+            host=passage.host,
+            title=passage.title,
+            url=passage.url,
+        )
+        spec_signal = _product_specs_signal(lead)
+        primary_page_bonus = 0.18 if any(cue in lead.casefold() for cue in _PRODUCT_PRIMARY_PAGE_CUES) else 0.0
+        return _clamp(
+            0.28 * cheap_passage_score(claim, passage)
+            + 0.22 * spec_signal
+            + 0.14 * preferred_bonus
+            + 0.16 * max(source_bonus, 0.0)
+            + 0.10 * primary_page_bonus
+            + 0.10 * passage.source_score
+        )
     directness = 0.0
     answer_type = _answer_type(claim)
     source_bonus = _verification_source_bonus(
@@ -1631,6 +2016,8 @@ def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = tun
 
 
 def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = tuning.AGENT_PASSAGE_TOP_K) -> list[Passage]:
+    if _claim_answer_shape(claim) == "product_specs":
+        limit = max(limit, 4)
     reranked = [
         replace(passage, utility_score=utility_score_for_claim(claim, passage))
         for passage in passages
@@ -1821,6 +2208,54 @@ def _select_passages_from_spans(passages: list[Passage], spans: list[EvidenceSpa
     return [passage for passage in passages if passage.passage_id in wanted]
 
 
+def _claim_contract_gaps(
+    claim: Claim,
+    verification: VerificationResult,
+    *,
+    independent_source_count: int,
+    has_primary_source: bool,
+    freshness_ok: bool,
+) -> list[str]:
+    gaps: list[str] = []
+    if _claim_requires_primary_source(claim) and not has_primary_source:
+        gaps.append("primary_source")
+
+    min_sources = _claim_min_independent_sources(claim)
+    if independent_source_count < min_sources:
+        gaps.append("independent_sources")
+
+    if claim.needs_freshness and not freshness_ok:
+        gaps.append("freshness")
+
+    return gaps
+
+
+def _retrieval_contract_can_drive_synthesis(claim: Claim) -> bool:
+    profile = claim.claim_profile
+    if profile is None:
+        return False
+    return profile.answer_shape in {"product_specs", "overview", "comparison", "news_digest"}
+
+
+def _primary_domain_types_for_claim(claim: Claim) -> set[DomainType]:
+    domain_types: set[DomainType] = {"official", "academic"}
+    if _claim_answer_shape(claim) == "product_specs":
+        domain_types.add("vendor")
+    return domain_types
+
+
+def _is_primary_support_passage(
+    claim: Claim,
+    passage: Passage,
+    gated_by_url: dict[str, GatedSerpResult] | None = None,
+) -> bool:
+    if gated_by_url is not None:
+        gated = gated_by_url.get(passage.canonical_url) or gated_by_url.get(passage.url)
+        if gated and gated.assessment.primary_source_likelihood >= 0.7:
+            return True
+    return _effective_domain_type(claim, passage.host) in _primary_domain_types_for_claim(claim)
+
+
 def build_evidence_bundle(
     claim: Claim,
     passages: list[Passage],
@@ -1830,19 +2265,33 @@ def build_evidence_bundle(
     gated_by_url = {result.serp.canonical_url: result for result in gated_results}
     supporting_passages = _select_passages_from_spans(passages, verification.supporting_spans)
     contradicting_passages = _select_passages_from_spans(passages, verification.contradicting_spans)
-    all_supporting = _bundle_support_passages(claim, supporting_passages, passages, max_count=3) or passages[:2]
-    independent_sources = {_host_root(passage.host) for passage in all_supporting}
-    has_primary = any(
-        (
-            gated_by_url.get(passage.canonical_url)
-            and gated_by_url[passage.canonical_url].assessment.primary_source_likelihood >= 0.7
+    support_limit = max(3, _claim_min_independent_sources(claim) + 1)
+    all_supporting = (
+        _bundle_support_passages(
+            claim,
+            supporting_passages,
+            passages,
+            max_count=support_limit,
+            gated_by_url=gated_by_url,
         )
-        or _effective_domain_type(claim, passage.host) in {"official", "academic"}
-        for passage in all_supporting
+        or passages[: max(2, _claim_min_independent_sources(claim))]
     )
+    independent_sources = {_host_root(passage.host) for passage in all_supporting}
+    has_primary = any(_is_primary_support_passage(claim, passage, gated_by_url) for passage in all_supporting)
     freshness_ok = True
     if claim.needs_freshness:
         freshness_ok = any(passage.published_at for passage in all_supporting)
+    contract_gaps = _claim_contract_gaps(
+        claim,
+        verification,
+        independent_source_count=len(independent_sources),
+        has_primary_source=has_primary,
+        freshness_ok=freshness_ok,
+    )
+    contract_satisfied = not contract_gaps and (
+        verification.verdict == "supported"
+        or (_retrieval_contract_can_drive_synthesis(claim) and bool(all_supporting))
+    )
 
     return EvidenceBundle(
         claim_id=claim.claim_id,
@@ -1854,6 +2303,8 @@ def build_evidence_bundle(
         has_primary_source=has_primary,
         freshness_ok=freshness_ok,
         verification=verification,
+        contract_satisfied=contract_satisfied,
+        contract_gaps=contract_gaps,
     )
 
 
@@ -2055,13 +2506,28 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
     if verification is None:
         return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
     primary_sensitive = _claim_requires_primary_source(claim)
+    min_sources = _claim_min_independent_sources(claim)
     if verification.verdict == "supported":
+        if bundle.contract_satisfied:
+            return True
+        if claim.needs_freshness and not bundle.freshness_ok:
+            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
+        if claim.claim_profile is not None and claim.claim_profile.strict_contract:
+            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
         if primary_sensitive and not bundle.has_primary_source:
             return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if bundle.independent_source_count >= 2 and bundle.has_primary_source:
+        if bundle.independent_source_count >= min_sources and bundle.has_primary_source:
             return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= 2 and not primary_sensitive:
+        if verification.confidence >= 0.75 and bundle.independent_source_count >= min_sources and not primary_sensitive:
             return True
+    if (
+        verification.verdict == "insufficient_evidence"
+        and claim.claim_profile is not None
+        and claim.claim_profile.strict_contract
+        and bundle.contract_satisfied
+        and bundle.considered_passages
+    ):
+        return True
     if (
         verification.verdict == "insufficient_evidence"
         and _exact_detail_guardrail_claim(claim)
@@ -2103,7 +2569,7 @@ def _sanitize_compose_fragment(text: str) -> str:
     return " ".join(" ".join(parts).split())
 
 
-def _compose_ui_labels(user_query: str) -> dict[str, str]:
+def _compose_ui_labels_legacy_mojibake(user_query: str) -> dict[str, str]:
     """Section titles: Russian if the user query contains Cyrillic, else English."""
     rq = user_query or ""
     ru = _is_cyrillic_text(rq)
@@ -2220,7 +2686,7 @@ def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
     return selected
 
 
-def _compose_ui_labels(user_query: str) -> dict[str, str]:
+def _compose_ui_labels_mojibake(user_query: str) -> dict[str, str]:
     rq = user_query or ""
     ru = _is_cyrillic_text(rq)
     if ru:
@@ -2231,6 +2697,28 @@ def _compose_ui_labels(user_query: str) -> dict[str, str]:
             "caveats": "РћРіРѕРІРѕСЂРєРё",
             "no_evidence": "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅС‹С… СѓС‚РІРµСЂР¶РґРµРЅРёР№ РґР»СЏ РїСЂСЏРјРѕРіРѕ РѕС‚РІРµС‚Р°.",
             "digest_header": "РЎРѕР±С‹С‚РёСЏ РёР· РёСЃС‚РѕС‡РЅРёРєРѕРІ:",
+        }
+    return {
+        "answer": "Answer",
+        "sources": "Sources",
+        "insufficient": "Insufficient data",
+        "caveats": "Caveats",
+        "no_evidence": "Not enough claim-level evidence for a direct answer.",
+        "digest_header": "Events from retrieved sources:",
+    }
+
+
+def _compose_ui_labels(user_query: str) -> dict[str, str]:
+    rq = user_query or ""
+    ru = _is_cyrillic_text(rq)
+    if ru:
+        return {
+            "answer": "\u041e\u0442\u0432\u0435\u0442",
+            "sources": "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438",
+            "insufficient": "\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u0434\u0430\u043d\u043d\u044b\u0445",
+            "caveats": "\u041e\u0433\u043e\u0432\u043e\u0440\u043a\u0438",
+            "no_evidence": "\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0445 \u0443\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0439 \u0434\u043b\u044f \u043f\u0440\u044f\u043c\u043e\u0433\u043e \u043e\u0442\u0432\u0435\u0442\u0430.",
+            "digest_header": "\u0421\u043e\u0431\u044b\u0442\u0438\u044f \u0438\u0437 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u043e\u0432:",
         }
     return {
         "answer": "Answer",
@@ -2323,6 +2811,7 @@ def _bundle_support_passages(
     passages: list[Passage],
     *,
     max_count: int,
+    gated_by_url: dict[str, GatedSerpResult] | None = None,
 ) -> list[Passage]:
     selected: list[Passage] = []
     seen_urls: set[str] = set()
@@ -2338,18 +2827,57 @@ def _bundle_support_passages(
             seen_hosts.add(host)
         selected.append(passage)
 
-    for passage in supporting_passages:
+    def support_score(passage: Passage) -> float:
+        lead = f"{passage.title} {passage.text[:320]} {passage.url}"
+        score = (
+            0.36 * _semantic_overlap(claim.claim_text, lead)
+            + 0.16 * _entity_overlap(claim.entity_set, lead)
+            + 0.16 * _dimension_coverage_score(claim, lead)
+            + 0.16 * max(passage.utility_score, passage.source_score)
+            + 0.10 * max(
+                _verification_source_bonus(
+                    claim,
+                    host=passage.host,
+                    title=passage.title,
+                    url=passage.url,
+                ),
+                0.0,
+            )
+            + 0.06 * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+        )
+        if _claim_answer_shape(claim) == "product_specs":
+            score += 0.14 * _product_specs_signal(lead)
+        return score
+
+    for passage in sorted(
+        supporting_passages,
+        key=lambda item: (support_score(item), item.source_score),
+        reverse=True,
+    ):
         add(passage)
         if len(selected) >= max_count:
             return selected[:max_count]
 
+    if _claim_requires_primary_source(claim) and not any(
+        _is_primary_support_passage(claim, passage, gated_by_url) for passage in selected
+    ):
+        for passage in sorted(
+            passages,
+            key=lambda item: (support_score(item), item.source_score),
+            reverse=True,
+        ):
+            if not _is_primary_support_passage(claim, passage, gated_by_url):
+                continue
+            add(passage)
+            if len(selected) >= max_count:
+                return selected[:max_count]
+            break
+
     ranked = sorted(
         passages,
         key=lambda passage: (
-            _semantic_overlap(claim.claim_text, f"{passage.title} {passage.text[:320]}")
-            + 0.25 * _entity_overlap(claim.entity_set, passage.text)
-            + 0.2 * _dimension_coverage_score(claim, passage.text)
-            + 0.15 * max(passage.utility_score, passage.source_score)
+            support_score(passage),
+            passage.source_score,
         ),
         reverse=True,
     )
@@ -2378,19 +2906,38 @@ def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_cou
             seen_hosts.add(host)
         selected.append(passage)
 
-    for passage in bundle.supporting_passages:
-        add(passage)
-        if len(selected) >= max_count:
-            return selected[:max_count]
-
     def support_score(passage: Passage) -> float:
-        lead = f"{passage.title} {passage.text[:320]}"
-        return (
+        lead = f"{passage.title} {passage.text[:320]} {passage.url}"
+        score = (
             0.45 * _semantic_overlap(claim.claim_text, lead)
             + 0.20 * _entity_overlap(claim.entity_set, lead)
             + 0.20 * _dimension_coverage_score(claim, lead)
-            + 0.15 * max(passage.utility_score, passage.source_score)
+            + 0.08 * max(
+                _verification_source_bonus(
+                    claim,
+                    host=passage.host,
+                    title=passage.title,
+                    url=passage.url,
+                ),
+                0.0,
+            )
+            + 0.07 * max(passage.utility_score, passage.source_score)
         )
+        if _claim_answer_shape(claim) == "product_specs":
+            score += (
+                0.14 * _product_specs_signal(lead)
+                + 0.08 * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+            )
+        return score
+
+    for passage in sorted(
+        bundle.supporting_passages,
+        key=lambda item: (support_score(item), item.source_score),
+        reverse=True,
+    ):
+        add(passage)
+        if len(selected) >= max_count:
+            return selected[:max_count]
 
     for passage in sorted(
         bundle.considered_passages,
@@ -2410,8 +2957,48 @@ def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_cou
     return selected[:max_count]
 
 
+def _publish_supported_claim(claim: Claim, bundle: EvidenceBundle) -> bool:
+    profile = claim.claim_profile
+    if profile is None:
+        return True
+    if profile.strict_contract and not bundle.contract_satisfied:
+        return False
+    return True
+
+
+def _contract_gap_text(claim: Claim, bundle: EvidenceBundle, *, cyrillic: bool = False) -> str:
+    if not bundle.contract_gaps:
+        return "покрытие" if cyrillic else "coverage"
+
+    min_sources = _claim_min_independent_sources(claim)
+    labels: list[str] = []
+    for gap in bundle.contract_gaps:
+        if gap == "primary_source":
+            labels.append(
+                "нужно подтверждение из первичного источника"
+                if cyrillic
+                else "needs primary-source evidence"
+            )
+        elif gap == "independent_sources":
+            labels.append(
+                f"нужно минимум {min_sources} независимых источника"
+                if cyrillic
+                else f"needs {min_sources} independent sources"
+            )
+        elif gap == "freshness":
+            labels.append(
+                "нужно свежее датированное подтверждение"
+                if cyrillic
+                else "needs fresh dated evidence"
+            )
+        else:
+            labels.append(gap.replace("_", " "))
+    return ", ".join(labels)
+
+
 def compose_answer(report: AgentRunResult) -> str:
     lb = _compose_ui_labels(report.user_query)
+    ru = _is_cyrillic_text(report.user_query)
     if report.classification.intent == "news_digest":
         selected_passages: list[Passage] = []
         for run in sorted(report.claims, key=lambda item: item.claim.priority):
@@ -2446,6 +3033,8 @@ def compose_answer(report: AgentRunResult) -> str:
         if bundle is None or bundle.verification is None:
             continue
         if bundle.verification.verdict == "supported":
+            if not _publish_supported_claim(run.claim, bundle):
+                continue
             cited_passages.extend(_supporting_answer_passages(run.claim, bundle, max_count=3))
         elif bundle.verification.verdict == "contradicted":
             cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
@@ -2469,6 +3058,12 @@ def compose_answer(report: AgentRunResult) -> str:
             continue
         verification = bundle.verification
         if verification.verdict == "supported":
+            if not _publish_supported_claim(run.claim, bundle):
+                verdict_text = "недостаточно данных" if ru else "insufficient evidence"
+                gap_lines.append(
+                    f"- {run.claim.claim_text}: {verdict_text} ({_contract_gap_text(run.claim, bundle, cyrillic=ru)})."
+                )
+                continue
             passages = _supporting_answer_passages(run.claim, bundle, max_count=2)
             if not passages:
                 continue
@@ -2478,10 +3073,25 @@ def compose_answer(report: AgentRunResult) -> str:
             sentence = _sanitize_compose_fragment(sentence)
             citations = _format_citations(url_to_index, passages)
             qualifier = ""
-            if bundle.independent_source_count < 2:
-                qualifier = " (supported by fewer than two independent sources)"
-            elif not bundle.has_primary_source:
-                qualifier = " (without a detected primary source)"
+            min_sources = _claim_min_independent_sources(run.claim)
+            if bundle.independent_source_count < min_sources:
+                qualifier = (
+                    f" (подтверждено менее чем {min_sources} независимыми источниками)"
+                    if ru
+                    else f" (supported by fewer than {min_sources} independent sources)"
+                )
+            elif _claim_requires_primary_source(run.claim) and not bundle.has_primary_source:
+                qualifier = (
+                    " (без обнаруженного первичного источника)"
+                    if ru
+                    else " (without a detected primary source)"
+                )
+            elif run.claim.needs_freshness and not bundle.freshness_ok:
+                qualifier = (
+                    " (без свежего датированного подтверждения)"
+                    if ru
+                    else " (without fresh dated evidence)"
+                )
             supported_lines.append(f"- {sentence}{qualifier} {citations}".rstrip())
         elif verification.verdict == "contradicted":
             passages = bundle.contradicting_passages[:2] or bundle.considered_passages[:1]
@@ -2492,10 +3102,14 @@ def compose_answer(report: AgentRunResult) -> str:
                 continue
             sentence = _sanitize_compose_fragment(sentence)
             citations = _format_citations(url_to_index, passages)
-            caveat_lines.append(f"- {run.claim.claim_text}: contradicted. {sentence} {citations}".rstrip())
+            verdict_text = "противоречит данным" if ru else "contradicted"
+            caveat_lines.append(f"- {run.claim.claim_text}: {verdict_text}. {sentence} {citations}".rstrip())
         else:
-            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else "coverage"
-            gap_lines.append(f"- {run.claim.claim_text}: insufficient evidence ({missing}).")
+            missing = ", ".join(verification.missing_dimensions) if verification.missing_dimensions else (
+                "покрытие" if ru else "coverage"
+            )
+            verdict_text = "недостаточно данных" if ru else "insufficient evidence"
+            gap_lines.append(f"- {run.claim.claim_text}: {verdict_text} ({missing}).")
 
     lines: list[str] = []
     if supported_lines:

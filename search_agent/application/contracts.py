@@ -5,6 +5,7 @@ from typing import Protocol
 from search_agent.domain.models import (
     AgentRunResult,
     Claim,
+    ClaimProfile,
     EvidenceBundle,
     FetchedDocument,
     FetchPlan,
@@ -65,6 +66,13 @@ class ReceiptWriterPort(Protocol):
 
 class StepLibraryPort(Protocol):
     def build_run_id(self, query: str, started_at) -> str:
+        ...
+
+    def infer_claim_profile(
+        self,
+        claim: Claim,
+        classification: QueryClassification,
+    ) -> ClaimProfile:
         ...
 
     def build_query_variants(
