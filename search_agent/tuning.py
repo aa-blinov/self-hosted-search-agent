@@ -92,9 +92,10 @@ TIME_NORMALIZE_MAX_TOKENS = 120
 # For synthesis intent: skip sub-claim decomposition, search with the original query as a
 # single claim. Avoids N-claims × M-variants SERP fan-out for open-ended questions.
 SYNTHESIS_SKIP_DECOMPOSE = True
-# Tokens for LLM intent classification (factual / synthesis / news_digest).
-# qwen3.5-35b-a3b generates <think>...</think> before the JSON answer — 300 is enough.
-INTENT_CLASSIFY_MAX_TOKENS = 300
+# Tokens for combined intent classification + query generation (factual / synthesis / news_digest).
+# qwen3.5-35b-a3b generates <think>...</think> before the JSON answer; 500 covers
+# ~200 thinking tokens + intent field + 3-5 search queries (~300 output tokens).
+INTENT_CLASSIFY_MAX_TOKENS = 500
 # Max tokens for the synthesize_answer LLM call (synthesis queries only).
 # Higher than verify_claim because thinking models (qwen) consume budget on <think>...</think>
 # before the actual answer, and synthesis needs to produce a complete bullet list.

@@ -30,6 +30,7 @@ class Claim:
     needs_freshness: bool
     entity_set: list[str] = field(default_factory=list)
     time_scope: str | None = None
+    search_queries: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

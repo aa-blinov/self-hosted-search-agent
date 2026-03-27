@@ -13,3 +13,8 @@
 {"case_id": "ci-013", "query": "Чем отличается Python 3.11 от 3.12?", "expected_intent": "synthesis", "notes": "Russian: comparison"}
 {"case_id": "ci-014", "query": "Новости об искусственном интеллекте на этой неделе", "expected_intent": "news_digest", "notes": "Russian: news digest"}
 {"case_id": "ci-015", "query": "What year did Satya Nadella become CEO of Microsoft?", "expected_intent": "factual", "notes": "specific year lookup"}
+{"case_id": "ci-016", "query": "Какие новые правки в Казахстане в конституции?", "expected_intent": "synthesis", "notes": "Russian: asking what specific changes were made to a document — synthesis not news_digest"}
+{"case_id": "ci-017", "query": "Какие изменения внесли в трудовой кодекс России?", "expected_intent": "synthesis", "notes": "Russian: specific changes to a law — synthesis"}
+{"case_id": "ci-018", "query": "What changes were made to the EU AI Act?", "expected_intent": "synthesis", "notes": "specific document changes — synthesis not news_digest"}
+{"case_id": "ci-019", "query": "Последние новости из Казахстана", "expected_intent": "news_digest", "notes": "Russian: pure latest-news request — news_digest"}
+{"case_id": "ci-020", "query": "Что происходит сейчас в Иране?", "expected_intent": "news_digest", "notes": "Russian: general current events — news_digest"}

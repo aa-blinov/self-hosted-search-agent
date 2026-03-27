@@ -131,8 +131,8 @@ query: str  →  classify_query()  →  QueryClassification(intent, complexity, 
                     │                                              │
                     │  iteration 1..AGENT_MAX_CLAIM_ITERATIONS:   │
                     │    A. build_query_variants()                 │
-                    │       → broad, entity_locked, exact_match    │
-                    │         (iter1: capped at 3 variants)        │
+                    │       → LLM-generated queries from           │
+                    │         claim.search_queries (iter1: top 3)  │
                     │                                              │
                     │    B. search_variant() × N variants          │
                     │       (parallel via ThreadPoolExecutor)      │
@@ -293,8 +293,12 @@ Note: opt8 was measured on the 7-case factual-only dataset. All runs from opt9 o
 | opt9/or | gpt-oss-120b + PromptedOutput, OpenRouter | 25,852ms ❌ | 0.80 | 0.60 | 0.0 | reasoning tokens 2× latency |
 | opt10/seq | rationale_guided query (SAFE-inspired, serial) | 52,037ms ❌ | 1.0 | **1.0** | 0.5 | LLM blocks iter2; 11s per claim |
 | opt10/bg | rationale_guided query (background thread) | 17,391ms ❌ | 0.6 | — | — | extra SERP overhead; no accuracy gain |
+| opt11/llm-q | LLM query gen (templates→LLM, separate call) | 20,697ms | 1.0 | **1.0** | **1.0** | source_diversity fixed; contradiction 0.5 |
+| **opt11** | merged classify_intent+generate_queries (1 LLM call) | ~23,410ms* | **1.0** | **1.0** | 0.5 | contradiction **1.0** ✅; *latency includes 2×12s OpenRouter spikes |
 
-**opt10/seq best on accuracy** (claim_support=1.0, answer_depth=1.0) but latency unacceptable. Parallel version (concurrent with SERP) not yet implemented.
+**opt11 current best on accuracy** (claim_support=1.0, contradiction_detection=1.0, answer_depth=1.0). Latency ~23s on 12-case dataset vs ~20s for opt11/llm-q, but the 2.7s delta is OpenRouter API variance (two anomalous 12s calls with tiny output). Structural latency is equivalent.
+
+Key accuracy gain from merged call: better query diversity — e.g. `nadella-wrong-year` now generates `"Microsoft CEO announcement February 2014"` (correctly finding 2014 date) instead of `"Satya Nadella Microsoft CEO 2015"` (biased toward wrong answer).
 
 ---
 
@@ -307,12 +311,13 @@ Note: opt8 was measured on the 7-case factual-only dataset. All runs from opt9 o
 5. **verify_claim cache** — keyed on full prompt (claim + passage texts)
 6. **Cross-claim page cache** — `FetchGatewayPort` shared `dict[url, str]`; prevents re-downloading same URL across claims
 7. **Synthesis intent bypass** — `SYNTHESIS_SKIP_DECOMPOSE=True`; single-claim search + `synthesize_answer` instead of 3–4 sub-claims + `verify_claim×N`; triggered for explanation/comparison/how-to queries
-8. **LLM intent classification** — 3-way classifier (factual | synthesis | news_digest); 100% accuracy on 35-example eval; replaces keyword heuristics; cached per query; `INTENT_CLASSIFY_MAX_TOKENS=300` (accounts for qwen `<think>` tokens)
-9. **Authority domain extract (synthesis only)** — `EXTRACT_MAX_CHARS_AUTHORITY=15000` for wikipedia.org, docs.python.org, MDN etc., applied **only when intent==synthesis**; factual queries keep 4K to avoid slow verify_claim LLM calls
-10. **Source-score ranked synthesis passages** — synthesis path sorts all raw passages by `source_score` desc (authoritative pages first) instead of TF-IDF `cheap_passage_filter`; fixes cross-language mismatch where Russian query scores English docs.python.org sections near zero, dropping feature-specific sections (f-strings, TypeVar, etc.)
-11. **UTF-8 bytes-first encoding** — `extractor.py` tries `response.content.decode("utf-8")` before falling back to requests charset detection; fixes mojibake on Russian sites that declare `windows-1251`/`iso-8859-1` but serve UTF-8 (chardet sometimes returns MacRoman as `apparent_encoding`, making blind override worse)
-12. **news_digest source diversity** — `synthesize_answer` applies `MAX_PER_URL=1` + `MAX_PER_DOMAIN=1` for news_digest intent; prevents aggregator pages (e.g. kommersant.ru/theme/…) from flooding all 12 prompt slots; ensures answers cite ≥ 12 unique news domains
-13. **gpt-oss-120b / reasoning-model compatibility** (`pydantic_ai_factory.py`, `intelligence.py`):
+8. **LLM intent classification + query generation (merged)** — single LLM call classifies intent (factual|synthesis|news_digest) AND generates 3-5 diverse keyword search queries simultaneously; eliminates a second `generate_queries` round-trip; `_IntentOutput.search_queries` cached in `_query_cache` keyed on normalized query; `INTENT_CLASSIFY_MAX_TOKENS=500` (up from 300 to accommodate query output); intent accuracy 100% on 20-example component eval
+9. **LLM-based query generation (replaces templates)** — `build_query_variants()` in `agent_steps.py` uses `claim.search_queries` (LLM-generated) instead of template functions; `_claim_agent` generates queries per sub-claim during decomposition; `_generate_queries_llm` fallback for edge cases; removed ~280 lines of template code (`_build_news_digest_query_variants`, `_source_restricted_query`, `_NEWS_DIGEST_STOP_*`, etc.)
+10. **Authority domain extract (synthesis only)** — `EXTRACT_MAX_CHARS_AUTHORITY=15000` for wikipedia.org, docs.python.org, MDN etc., applied **only when intent==synthesis**; factual queries keep 4K to avoid slow verify_claim LLM calls
+11. **Source-score ranked synthesis passages** — synthesis path sorts all raw passages by `source_score` desc (authoritative pages first) instead of TF-IDF `cheap_passage_filter`; fixes cross-language mismatch where Russian query scores English docs.python.org sections near zero, dropping feature-specific sections (f-strings, TypeVar, etc.)
+12. **UTF-8 bytes-first encoding** — `extractor.py` tries `response.content.decode("utf-8")` before falling back to requests charset detection; fixes mojibake on Russian sites that declare `windows-1251`/`iso-8859-1` but serve UTF-8 (chardet sometimes returns MacRoman as `apparent_encoding`, making blind override worse)
+13. **news_digest source diversity** — `synthesize_answer` applies `MAX_PER_URL=1` + `MAX_PER_DOMAIN=1` for news_digest intent; prevents aggregator pages (e.g. kommersant.ru/theme/…) from flooding all 12 prompt slots; ensures answers cite ≥ 12 unique news domains
+14. **gpt-oss-120b / reasoning-model compatibility** (`pydantic_ai_factory.py`, `intelligence.py`):
     - `_is_reasoning_model()` detects `gpt-oss`, `o1`, `o3`, `o4` family
     - Temperature omitted for reasoning models (400 error if sent)
     - All structured-output agents use `PromptedOutput(Model)` for reasoning models — JSON schema injected in system prompt instead of broken tool-call / response_format spec on Groq
@@ -322,7 +327,7 @@ Note: opt8 was measured on the 7-case factual-only dataset. All runs from opt9 o
 
 - `source_requirement_rate` varies 0.67–0.89 across runs due to DDGS non-determinism (different pages returned each call)
 - DDGS Wikipedia connector errors (`wt.wikipedia.org ConnectError`) are expected and harmless — Wikipedia API is unreachable, DDGS falls back to web results; suppressed to dim log level
-- qwen3.5-35b-a3b uses `<think>` tokens before output — this consumes part of `max_tokens`; `SYNTHESIZE_ANSWER_MAX_TOKENS=2000` accounts for ~800 thinking tokens; `INTENT_CLASSIFY_MAX_TOKENS=300` same reason
+- qwen3.5-35b-a3b uses `<think>` tokens before output — this consumes part of `max_tokens`; `SYNTHESIZE_ANSWER_MAX_TOKENS=2000` accounts for ~800 thinking tokens; `INTENT_CLASSIFY_MAX_TOKENS=500` accounts for thinking + 3-5 search queries in combined classify+generate call
 - Snippet-first optimization was tried and **reverted** — model confidence on short snippets always ~0.38, never reached 0.85 threshold
 - Authority extract 15K applied globally (opt7) caused latency regression: 30 chunks → top-8 utility_rerank → ~5000 chars to verify_claim (was ~1200) → 14s LLM calls; fixed in opt8 by scoping to synthesis intent only
 - WikipediaSourceHandler **removed** — was using REST API returning 500-900 chars lead section only; now trafilatura extracts full article (up to 15K for synthesis)

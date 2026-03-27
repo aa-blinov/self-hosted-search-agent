@@ -172,191 +172,31 @@ def _variant_keywords(text: str, entities: Iterable[str]) -> str:
     return " ".join(tokens[:6])
 
 
-def _source_restricted_query(claim: Claim) -> tuple[str, str] | None:
-    lowered = claim.claim_text.lower()
-    if any(term in lowered for term in ("paper", "study", "research", "исследование", "статья")):
-        return (f'{claim.claim_text} site:arxiv.org', "Target likely academic primary sources.")
-    if any(term in lowered for term in ("law", "regulation", "filing", "policy", "закон", "регулятор")):
-        return (f'{claim.claim_text} site:.gov', "Prefer official or regulatory sources.")
-    if any(term in lowered for term in ("official", "announcement", "пресс-релиз", "официаль")) and claim.entity_set:
-        return (f'"{claim.entity_set[0]}" official announcement', "Prefer an official source path.")
-    return None
-
-
-def _is_cyrillic_text(text: str) -> bool:
-    return bool(re.search(r"[а-яёА-ЯЁ]", text or ""))
-
-
-def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
-    if not time_scope:
-        return []
-    terms = [time_scope]
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", time_scope):
-        try:
-            dt = datetime.fromisoformat(time_scope)
-        except ValueError:
-            return terms
-        if cyrillic:
-            ru_months = [
-                "января", "февраля", "марта", "апреля", "мая", "июня",
-                "июля", "августа", "сентября", "октября", "ноября", "декабря",
-            ]
-            terms.append(f"{dt.day} {ru_months[dt.month - 1]} {dt.year}")
-        else:
-            terms.append(dt.strftime("%B %d %Y"))
-    return terms
-
-
-def _news_digest_region_terms(claim: Claim, classification: QueryClassification) -> list[str]:
-    candidates: list[str] = []
-    if classification.region_hint:
-        candidates.append(_normalized_text(classification.region_hint))
-    for entity in claim.entity_set:
-        cleaned = _normalized_text(entity)
-        if cleaned and cleaned not in candidates:
-            candidates.append(cleaned)
-    return candidates[:3]
-
-
-def _build_news_digest_query_variants(
-    claim: Claim,
-    classification: QueryClassification,
-) -> list[tuple[str, str, str, str | None, str | None]]:
-    cyrillic = _is_cyrillic_text(claim.claim_text)
-    region_terms = _news_digest_region_terms(claim, classification)
-    primary_region = region_terms[0] if region_terms else claim.claim_text
-    time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
-    primary_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
-
-    if cyrillic:
-        return [
-            (
-                _normalized_text(f"{primary_region} новости {primary_time}"),
-                "news_digest_broad",
-                "Target recent local news for the requested place and date.",
-                None,
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f'"{primary_region}" события {primary_time}'),
-                "news_digest_events",
-                "Prefer event-style coverage for the requested location and date.",
-                None,
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f"{primary_region} новости {primary_time} site:.kz"),
-                "news_digest_local",
-                "Bias retrieval toward local Kazakhstan news domains.",
-                "site:.kz",
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f"{primary_region} происшествия {primary_time}"),
-                "news_digest_incidents",
-                "Catch notable incidents that may not use generic news wording.",
-                None,
-                claim.time_scope,
-            ),
-        ]
-
-    return [
-        (
-            _normalized_text(f"{primary_region} news {primary_time}"),
-            "news_digest_broad",
-            "Target recent local news for the requested place and date.",
-            None,
-            claim.time_scope,
-        ),
-        (
-            _normalized_text(f'"{primary_region}" events {primary_time}'),
-            "news_digest_events",
-            "Prefer event coverage for the requested location and date.",
-            None,
-            claim.time_scope,
-        ),
-        (
-            _normalized_text(f"{primary_region} breaking news {primary_time}"),
-            "news_digest_breaking",
-            "Catch breaking-news style coverage for the requested place and date.",
-            None,
-            claim.time_scope,
-        ),
-    ]
-
-
 def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
-    candidates: list[tuple[str, str, str, str | None, str | None]] = []
-    keywords = _variant_keywords(claim.claim_text, claim.entity_set)
+    """Convert LLM-generated search queries from the claim into QueryVariant objects.
 
-    candidates.append((
-        claim.claim_text,
-        "broad",
-        "Broad query to preserve recall and capture general evidence.",
-        None,
-        claim.time_scope,
-    ))
-
-    if claim.entity_set:
-        locked = " ".join(f'"{entity}"' for entity in claim.entity_set[:3])
-        locked = _normalized_text(f"{locked} {keywords}")
-        candidates.append((
-            locked,
-            "entity_locked",
-            "Hard-lock named entities to reduce entity drift.",
-            None,
-            claim.time_scope,
-        ))
-
-    exact_target = claim.claim_text if len(claim.claim_text.split()) <= 12 else f"{' '.join(claim.entity_set[:2])} {keywords}"
-    candidates.append((
-        f'"{_normalized_text(exact_target)}"',
-        "exact_match",
-        "Exact-match variant for literal phrasing and narrow factual lookups.",
-        None,
-        claim.time_scope,
-    ))
-
-    if claim.needs_freshness or claim.time_scope:
-        freshness_suffix = claim.time_scope or str(datetime.now().year)
-        candidates.append((
-            _normalized_text(f"{claim.claim_text} {freshness_suffix}"),
-            "freshness_aware",
-            "Adds explicit time scope so retrieval stays aligned to the intended period.",
-            None,
-            freshness_suffix,
-        ))
-
-    restricted = _source_restricted_query(claim)
-    if restricted:
-        query_text, rationale = restricted
-        candidates.append((
-            _normalized_text(query_text),
-            "source_restricted",
-            rationale,
-            query_text.split()[-1] if "site:" in query_text else "official",
-            claim.time_scope,
-        ))
-
-    deduped: list[QueryVariant] = []
+    Falls back to claim text directly if search_queries is empty (LLM disabled or failed).
+    """
+    queries = claim.search_queries or [claim.claim_text]
     seen: set[str] = set()
-    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
-        key = query_text.casefold()
-        if not query_text or key in seen:
+    variants: list[QueryVariant] = []
+    for idx, query_text in enumerate(queries, 1):
+        key = query_text.casefold().strip()
+        if not key or key in seen:
             continue
         seen.add(key)
-        deduped.append(
-            QueryVariant(
-                variant_id=f"{claim.claim_id}-q{idx}",
-                claim_id=claim.claim_id,
-                query_text=query_text,
-                strategy=strategy,
-                rationale=rationale,
-                source_restriction=source_restriction,
-                freshness_hint=freshness_hint,
-            )
-        )
-    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
+        variants.append(QueryVariant(
+            variant_id=f"{claim.claim_id}-q{idx}",
+            claim_id=claim.claim_id,
+            query_text=query_text,
+            strategy=f"llm_{idx}",
+            rationale="LLM-generated search query.",
+            source_restriction=None,
+            freshness_hint=claim.time_scope,
+        ))
+        if len(variants) >= tuning.AGENT_MAX_QUERY_VARIANTS_ITER1:
+            break
+    return variants
 
 
 def _is_cyrillic_text(text: str) -> bool:
@@ -393,174 +233,6 @@ def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
             terms.append(dt.strftime("%B %d %Y"))
             terms.append(str(dt.year))
     return terms
-
-
-def _news_digest_region_terms(claim: Claim, classification: QueryClassification) -> list[str]:
-    candidates: list[str] = []
-    if classification.region_hint:
-        candidates.append(_normalized_text(classification.region_hint))
-    for entity in claim.entity_set:
-        cleaned = _normalized_text(entity)
-        if cleaned and cleaned not in candidates:
-            candidates.append(cleaned)
-    return candidates[:3]
-
-
-def _build_news_digest_query_variants(
-    claim: Claim,
-    classification: QueryClassification,
-) -> list[tuple[str, str, str, str | None, str | None]]:
-    cyrillic = _is_cyrillic_text(claim.claim_text)
-    region_terms = _news_digest_region_terms(claim, classification)
-    primary_region = region_terms[0] if region_terms else claim.claim_text
-    time_terms = _time_query_terms(claim.time_scope, cyrillic=cyrillic)
-    primary_time = time_terms[0] if time_terms else (claim.time_scope or str(datetime.now().year))
-    fallback_time = primary_time
-
-    if cyrillic:
-        return [
-            (
-                _normalized_text(f"{primary_region} \u043d\u043e\u0432\u043e\u0441\u0442\u0438 {primary_time}"),
-                "news_digest_broad",
-                "Target recent local news for the requested place and date.",
-                None,
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f'"{primary_region}" \u0441\u043e\u0431\u044b\u0442\u0438\u044f {primary_time}'),
-                "news_digest_events",
-                "Prefer event-style coverage for the requested location and date.",
-                None,
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f"{primary_region} \u043d\u043e\u0432\u043e\u0441\u0442\u0438 {fallback_time} site:.kz"),
-                "news_digest_local",
-                "Bias retrieval toward local Kazakhstan news domains.",
-                "site:.kz",
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f"{primary_region} \u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432\u0438\u044f {fallback_time}"),
-                "news_digest_incidents",
-                "Catch notable incidents that may not use generic news wording.",
-                None,
-                claim.time_scope,
-            ),
-            (
-                _normalized_text(f'"{primary_region}" {fallback_time} site:.kz'),
-                "news_digest_exact_local",
-                "Force the requested place and time into a local-domain search.",
-                "site:.kz",
-                claim.time_scope,
-            ),
-        ]
-
-    return [
-        (
-            _normalized_text(f"{primary_region} news {primary_time}"),
-            "news_digest_broad",
-            "Target recent local news for the requested place and date.",
-            None,
-            claim.time_scope,
-        ),
-        (
-            _normalized_text(f'"{primary_region}" events {primary_time}'),
-            "news_digest_events",
-            "Prefer event coverage for the requested location and date.",
-            None,
-            claim.time_scope,
-        ),
-        (
-            _normalized_text(f"{primary_region} breaking news {primary_time}"),
-            "news_digest_breaking",
-            "Catch breaking-news style coverage for the requested place and date.",
-            None,
-            claim.time_scope,
-        ),
-    ]
-
-
-def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
-    if classification.intent == "news_digest":
-        candidates: list[tuple[str, str, str, str | None, str | None]] = _build_news_digest_query_variants(
-            claim,
-            classification,
-        )
-    else:
-        candidates = []
-
-    keywords = _variant_keywords(claim.claim_text, claim.entity_set)
-
-    if classification.intent != "news_digest":
-        candidates.append((
-            claim.claim_text,
-            "broad",
-            "Broad query to preserve recall and capture general evidence.",
-            None,
-            claim.time_scope,
-        ))
-
-        if claim.entity_set:
-            locked = " ".join(f'"{entity}"' for entity in claim.entity_set[:3])
-            locked = _normalized_text(f"{locked} {keywords}")
-            candidates.append((
-                locked,
-                "entity_locked",
-                "Hard-lock named entities to reduce entity drift.",
-                None,
-                claim.time_scope,
-            ))
-
-        exact_target = claim.claim_text if len(claim.claim_text.split()) <= 12 else f"{' '.join(claim.entity_set[:2])} {keywords}"
-        candidates.append((
-            f'"{_normalized_text(exact_target)}"',
-            "exact_match",
-            "Exact-match variant for literal phrasing and narrow factual lookups.",
-            None,
-            claim.time_scope,
-        ))
-
-        if claim.needs_freshness or claim.time_scope:
-            freshness_suffix = claim.time_scope or str(datetime.now().year)
-            candidates.append((
-                _normalized_text(f"{claim.claim_text} {freshness_suffix}"),
-                "freshness_aware",
-                "Adds explicit time scope so retrieval stays aligned to the intended period.",
-                None,
-                freshness_suffix,
-            ))
-
-        restricted = _source_restricted_query(claim)
-        if restricted:
-            query_text, rationale = restricted
-            candidates.append((
-                _normalized_text(query_text),
-                "source_restricted",
-                rationale,
-                query_text.split()[-1] if "site:" in query_text else "official",
-                claim.time_scope,
-            ))
-
-    deduped: list[QueryVariant] = []
-    seen: set[str] = set()
-    for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(candidates, 1):
-        key = query_text.casefold()
-        if not query_text or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(
-            QueryVariant(
-                variant_id=f"{claim.claim_id}-q{idx}",
-                claim_id=claim.claim_id,
-                query_text=query_text,
-                strategy=strategy,
-                rationale=rationale,
-                source_restriction=source_restriction,
-                freshness_hint=freshness_hint,
-            )
-        )
-    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
 
 
 def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSnapshot:

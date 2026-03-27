@@ -109,6 +109,7 @@ class _NormalizedQueryOutput(BaseModel):
 
 class _IntentOutput(BaseModel):
     intent: Literal["factual", "synthesis", "news_digest"]
+    search_queries: list[str] = Field(default_factory=list)
 
 
 class _ClaimDraft(BaseModel):
@@ -117,10 +118,15 @@ class _ClaimDraft(BaseModel):
     needs_freshness: bool = False
     entity_set: list[str] = Field(default_factory=list)
     time_scope: str | None = None
+    search_queries: list[str] = Field(default_factory=list)
 
 
 class _ClaimDecompositionOutput(BaseModel):
     claims: list[_ClaimDraft] = Field(default_factory=list)
+
+
+class _QueryListOutput(BaseModel):
+    queries: list[str] = Field(default_factory=list)
 
 
 class _EvidenceQuote(BaseModel):
@@ -154,6 +160,9 @@ class PydanticAIQueryIntelligence:
         self._verify_cache: dict[str, VerificationResult] = {}
         # Cache for normalize_time_references: keyed on raw query string (deterministic LLM call).
         self._normalize_cache: dict[str, str] = {}
+        # Cache for query generation: populated by _classify_intent_llm alongside intent,
+        # consumed by decompose_claims to avoid a second LLM round-trip.
+        self._query_cache: dict[str, list[str]] = {}
 
         # Reasoning models (gpt-oss, o1, o3, o4) don't support JSON schema / tool calls
         # reliably — use PromptedOutput so the schema is injected in the system prompt
@@ -182,7 +191,24 @@ class PydanticAIQueryIntelligence:
             instrument=True,
             system_prompt=(
                 "Break user requests into atomic factual claims or subquestions. "
-                "Preserve exact named entities and do not invent facts."
+                "Preserve exact named entities and do not invent facts. "
+                "For each claim also generate 3-5 short keyword search queries (no question words) "
+                "that would retrieve evidence from the web."
+            ),
+        )
+        self._query_gen_agent = Agent(
+            self._model,
+            output_type=_out(_QueryListOutput),
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "Generate 3 to 5 short, diverse web search queries for the given topic.\n"
+                "Rules:\n"
+                "- Use keyword phrases, not questions (no what/who/when/how/why)\n"
+                "- Match the language of the input; add one English query if input is not English\n"
+                "- Vary specificity: one broad, one with quoted entities, one with key topic terms\n"
+                "- Keep each query under 8 words; skip filler like 'information about'\n"
+                "- Include the year or time scope when relevant for freshness"
             ),
         )
         self._verifier_agent = Agent(
@@ -212,18 +238,22 @@ class PydanticAIQueryIntelligence:
             ),
         )
 
-        # Intent classification: factual | synthesis | news_digest.
-        # Prompt validated at 100% accuracy on 35-example dataset (intent_eval.py).
+        # Intent classification + query generation: combined to save one LLM round-trip.
+        # Intent accuracy validated at 100% on 20-example component eval dataset.
         self._intent_agent: Agent[None, _IntentOutput] = Agent(
             self._model,
             output_type=_out(_IntentOutput),
             retries=1,
             instrument=True,
             system_prompt=(
-                "Classify query intent. Reply with exactly one token: factual, synthesis, or news_digest.\n"
-                "factual: specific verifiable fact (who/when/what/where).\n"
-                "synthesis: explanation, comparison, how-to, overview, what's new.\n"
-                "news_digest: recent news or events."
+                "Task 1 — classify intent (pick exactly one):\n"
+                "  factual: single verifiable fact (who/when/is-it-true/specific number or date).\n"
+                "  synthesis: explanation, comparison, how-to, overview, list of features/changes/differences.\n"
+                "  news_digest: recent events or news feed.\n"
+                "Task 2 — generate 3 to 5 short keyword search queries.\n"
+                "  Rules: keyword phrases only (no question words); match input language;\n"
+                "  add one English query when input is non-English; max 8 words each;\n"
+                "  vary specificity (broad / quoted entity / key terms); include year if relevant."
             ),
         )
         # Cache for intent classification: keyed on normalized query string.
@@ -299,6 +329,10 @@ class PydanticAIQueryIntelligence:
                     )
                 metrics.output_chars = output_char_len(result.output)
             intent = result.output.intent
+            # Store queries generated alongside intent — avoids a second LLM call in decompose_claims.
+            queries = [q.strip() for q in result.output.search_queries if q.strip()]
+            if queries:
+                self._query_cache[normalized_query] = queries[:6]
         except Exception as exc:
             log(f"  [dim yellow]-> intent classification failed: {exc}[/dim yellow]")
             intent = "news_digest" if is_news_digest_query(normalized_query) else "factual"
@@ -312,13 +346,16 @@ class PydanticAIQueryIntelligence:
         # news_digest additionally gets synthesize_answer in use_cases.py (same as synthesis).
         if classification.intent in ("synthesis", "news_digest") and tuning.SYNTHESIS_SKIP_DECOMPOSE:
             log(f"  [dim]-> {classification.intent} intent: single-claim search (no decomposition)[/dim]")
-            return self._fallback_claims(classification)
+            queries = self._get_or_generate_queries(classification, log)
+            return self._fallback_claims(classification, search_queries=queries)
         if not self._enabled or not should_decompose(classification.normalized_query):
-            return self._fallback_claims(classification)
+            queries = self._get_or_generate_queries(classification, log)
+            return self._fallback_claims(classification, search_queries=queries)
 
         prompt = (
             "Return JSON with one key `claims`.\n"
-            "Each claim must have claim_text, priority, needs_freshness, entity_set, time_scope.\n"
+            "Each claim must have: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries.\n"
+            "search_queries: 3-5 short keyword queries (no question words) to retrieve evidence for this claim.\n"
             "Keep claims atomic, exact, and capped at 4.\n\n"
             f"User request: {classification.normalized_query}"
         )
@@ -353,12 +390,62 @@ class PydanticAIQueryIntelligence:
                             if normalized_text(entity)
                         ] or extract_entities(item.claim_text),
                         time_scope=normalized_text(item.time_scope) if item.time_scope else extract_time_scope(item.claim_text),
+                        search_queries=[q.strip() for q in (item.search_queries or []) if q.strip()],
                     )
                 )
             return claims or self._fallback_claims(classification)
         except Exception:
             log("  [dim yellow]→ fallback: single claim from query[/dim yellow]")
             return self._fallback_claims(classification)
+
+    def _get_or_generate_queries(self, classification: QueryClassification, log=None) -> list[str]:
+        """Return pre-generated queries from the intent-classification cache, or generate them now.
+
+        The combined _intent_agent call populates _query_cache alongside the intent verdict,
+        eliminating a second LLM round-trip for the simple (non-decomposed) path.
+        """
+        log = log or (lambda msg: None)
+        cached = self._query_cache.get(classification.normalized_query)
+        if cached:
+            for q in cached:
+                log(f"  [dim]-> llm_query: {q}[/dim]")
+            return cached
+        # Fallback: intent call didn't return queries (e.g. LLM disabled path, cache miss).
+        return self._generate_queries_llm(classification.normalized_query, classification, log)
+
+    def _generate_queries_llm(
+        self,
+        claim_text: str,
+        classification: QueryClassification,
+        log=None,
+    ) -> list[str]:
+        """Generate search queries via LLM for a single claim (used for synthesis/news_digest)."""
+        log = log or (lambda msg: None)
+        if not self._enabled:
+            return []
+        context = claim_text
+        if classification.time_scope:
+            context += f" [{classification.time_scope}]"
+        try:
+            with log_llm_call(
+                log,
+                task="generate_queries",
+                model=self._settings.llm_model,
+                detail=claim_text[:60],
+                input_chars=len(context),
+            ) as metrics:
+                result = self._query_gen_agent.run_sync(
+                    context,
+                    model_settings=self._model_settings(max_tokens=200, temperature=0),
+                )
+                metrics.output_chars = output_char_len(result.output)
+            queries = [q.strip() for q in result.output.queries if q.strip()]
+            for q in queries:
+                log(f"  [dim]-> llm_query: {q}[/dim]")
+            return queries[:6]
+        except Exception as exc:
+            log(f"  [dim yellow]-> generate_queries failed: {exc}[/dim yellow]")
+            return []
 
     def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
         log = log or (lambda msg: None)
@@ -622,7 +709,10 @@ class PydanticAIQueryIntelligence:
             return query
 
     @staticmethod
-    def _fallback_claims(classification: QueryClassification) -> list[Claim]:
+    def _fallback_claims(
+        classification: QueryClassification,
+        search_queries: list[str] | None = None,
+    ) -> list[Claim]:
         return [
             Claim(
                 claim_id="claim-1",
@@ -631,6 +721,7 @@ class PydanticAIQueryIntelligence:
                 needs_freshness=classification.needs_freshness,
                 entity_set=extract_entities(classification.normalized_query),
                 time_scope=classification.time_scope,
+                search_queries=search_queries or [],
             )
         ]
 
