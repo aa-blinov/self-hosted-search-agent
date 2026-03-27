@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -161,7 +160,7 @@ def _git_revision() -> str | None:
 def _default_artifact_filename(component: str) -> str:
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     short = (_git_revision() or "nogit")[:8]
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", component)
+    slug = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in component)
     return f"eval_comp_{ts}_{short}_{slug}.json"
 
 

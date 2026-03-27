@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
-
 def preview_snippet(text: str, max_len: int = 72) -> str:
     """Collapse whitespace, truncate; Rich markup must be escaped by the caller."""
-    one = re.sub(r"\s+", " ", (text or "").strip())
+    one = " ".join((text or "").split())
     if not one:
         return "(empty)"
     if len(one) > max_len:

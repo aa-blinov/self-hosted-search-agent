@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +25,10 @@ def _git_revision(fallback: str | None = None) -> str | None:
 
 def _slug_dataset(path: str) -> str:
     stem = Path(path).stem
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-")
+    slug = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in stem)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    slug = slug.strip("-")
     return slug or "dataset"
 
 

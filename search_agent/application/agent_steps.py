@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Iterable
@@ -27,7 +26,19 @@ from search_agent.domain.models import (
 )
 from search_agent.domain.source_priors import lookup_source_prior
 from search_agent import tuning
-from search_agent.application.text_heuristics import COMPARISON_MARKERS
+from search_agent.application.text_heuristics import (
+    COMPARISON_MARKERS,
+    compact_text as _shared_compact_text,
+    contains_date_like as _shared_contains_date_like,
+    extract_entities as _shared_extract_entities,
+    extract_numbers as _shared_extract_numbers,
+    extract_region_hint as _shared_extract_region_hint,
+    extract_time_scope as _shared_extract_time_scope,
+    is_cyrillic_text as _shared_is_cyrillic_text,
+    is_news_digest_query as _shared_is_news_digest_query,
+    normalized_text as _shared_normalized_text,
+    tokenize as _shared_tokenize,
+)
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
@@ -134,17 +145,6 @@ _NON_ENTITY_TOKENS = {
     "release", "released", "latest", "current",
 }
 
-_DATE_LIKE_RE = re.compile(
-    r"(?:"
-    r"\b\d{1,2}\s+[A-Z][a-z]+\s+\d{4}\b|"
-    r"\b\d{1,2}\s+[А-Яа-яЁё]+\s+\d{4}\b|"
-    r"\b[A-Z][a-z]{2,9}\.?\s+\d{1,2},\s+\d{4}\b|"
-    r"\b[А-ЯЁ][а-яё]{2,12}\s+\d{1,2},\s+\d{4}\b|"
-    r"\b20\d{2}\b"
-    r")"
-)
-
-
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
@@ -155,76 +155,36 @@ def _build_run_id(query: str, started_at: datetime) -> str:
 
 
 def _normalized_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    return _shared_normalized_text(text)
 
 
 def _compact_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9а-яё]+", "", (text or "").casefold())
+    return _shared_compact_text(text)
 
 
 def _tokenize(text: str) -> list[str]:
-    return [
-        token
-        for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9.+/-]*", text.lower())
-        if len(token) > 1 and token not in _STOPWORDS
-    ] 
+    return [token for token in _shared_tokenize(text) if token not in _STOPWORDS]
 
 
 def _contains_date_like(text: str) -> bool:
-    return bool(_DATE_LIKE_RE.search(text or ""))
+    return _shared_contains_date_like(text)
 
 
 def _extract_entities(text: str) -> list[str]:
-    entities: list[str] = []
-    for quoted in re.findall(r'"([^"]{2,80})"', text):
-        entities.append(_normalized_text(quoted))
-
-    patterns = [
-        r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9.+/-]*)(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9.+/-]*){0,3}",
-        r"(?:[A-Z]{2,}[A-Za-z0-9.+/-]*)(?:\s+[A-Z]{2,}[A-Za-z0-9.+/-]*){0,2}",
-    ]
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            cleaned = _normalized_text(match)
-            cleaned_key = cleaned.casefold()
-            token_keys = [token.casefold() for token in _tokenize(cleaned)]
-            if (
-                len(cleaned) > 1
-                and cleaned_key not in _NON_ENTITY_TOKENS
-                and token_keys
-                and not all(token in _NON_ENTITY_TOKENS for token in token_keys)
-            ):
-                entities.append(cleaned)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for entity in entities:
-        key = entity.casefold()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(entity)
-    return deduped[:tuning.AGENT_MAX_QUERY_VARIANTS]
+    return _shared_extract_entities(text)[:tuning.AGENT_MAX_QUERY_VARIANTS]
 
 
 def _extract_time_scope(text: str) -> str | None:
-    patterns = [
-        r"\b(20\d{2})\b",
-        r"\bQ[1-4]\s+20\d{2}\b",
-        r"\b\d{4}-\d{2}-\d{2}\b",
-        r"\b\d{1,2}\s+[A-Z][a-z]+\s+20\d{2}\b",
-        r"\b\d{1,2}\s+[А-Яа-яЁё]+\s+20\d{2}\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(0)
-    return None
+    return _shared_extract_time_scope(text)
 
-def _variant_keywords(text: str, entities: Iterable[str]) -> str:
+def _variant_keywords(text: str, entities: Iterable[str], excluded_tokens: Iterable[str] = ()) -> str:
     entity_tokens = {token.casefold() for entity in entities for token in _tokenize(entity)}
+    excluded = {token.casefold() for token in excluded_tokens}
     tokens: list[str] = []
     for token in _tokenize(text):
         if token.casefold() in entity_tokens:
+            continue
+        if token.casefold() in excluded:
             continue
         if token not in tokens:
             tokens.append(token)
@@ -249,6 +209,31 @@ def _news_digest_site_hint(claim: Claim, classification: QueryClassification) ->
     if any(marker in haystack for marker in ("астан", "алмат", "казах", "қазақ", "kazakh", "kazakhstan", ".kz")):
         return "site:.kz"
     return None
+
+
+def _temporal_event_focus_term(text: str) -> str | None:
+    lowered = (text or "").casefold()
+    marker_map = (
+        (("named", "appointed", "elected"), "appointment"),
+        (("released", "launched", "introduced"), "release"),
+        (("announced",), "announcement"),
+        (("founded",), "founding"),
+        (("born",), "birth"),
+        (("died",), "death"),
+    )
+    for markers, focus in marker_map:
+        if any(marker in lowered for marker in markers):
+            return focus
+    return None
+
+
+def _is_temporal_event_verification_claim(claim: Claim) -> bool:
+    lowered = (claim.claim_text or "").casefold().strip()
+    if not lowered.startswith(("was ", "were ", "is ", "are ", "did ", "does ", "do ", "has ", "have ", "had ")):
+        return False
+    if not (claim.time_scope or _extract_time_scope(claim.claim_text) or _contains_date_like(claim.claim_text)):
+        return False
+    return _temporal_event_focus_term(claim.claim_text) is not None
 
 
 def _heuristic_query_candidates(
@@ -302,6 +287,33 @@ def _heuristic_query_candidates(
     joined_entities = " ".join(entities[:2])
     quoted_entities = " ".join(f'"{entity}"' for entity in entities[:2])
     anchor = joined_entities or base_keywords or claim.claim_text
+    if _is_temporal_event_verification_claim(claim):
+        time_tokens = _tokenize(time_scope or _extract_time_scope(claim.claim_text) or "")
+        event_focus = _temporal_event_focus_term(claim.claim_text) or "date"
+        event_keywords = _variant_keywords(claim.claim_text, entities, excluded_tokens=time_tokens)
+        return [
+            (
+                _compose_query(joined_entities, event_focus, "date"),
+                "event_date",
+                "Target the event date instead of mirroring the asserted year.",
+                None,
+                None,
+            ),
+            (
+                _compose_query(quoted_entities or f'"{claim.claim_text}"', event_focus, "announcement"),
+                "event_announcement",
+                "Bias retrieval toward announcement-style evidence for event verification.",
+                None,
+                None,
+            ),
+            (
+                _compose_query(joined_entities, event_keywords or event_focus),
+                "event_background",
+                "Retrieve event background without anchoring to the possibly wrong date.",
+                None,
+                None,
+            ),
+        ]
     candidates = [
         (
             _compose_query(quoted_entities or f'"{claim.claim_text}"', base_keywords, explicit_time),
@@ -349,25 +361,25 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
     """
     seen: set[str] = set()
     variants: list[QueryVariant] = []
-    for idx, query_text in enumerate(claim.search_queries or [], 1):
-        key = query_text.casefold().strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        variants.append(QueryVariant(
-            variant_id=f"{claim.claim_id}-q{idx}",
-            claim_id=claim.claim_id,
-            query_text=query_text,
-            strategy=f"llm_{idx}",
-            rationale="LLM-generated search query.",
-            source_restriction=None,
-            freshness_hint=claim.time_scope,
-        ))
-        if len(variants) >= tuning.AGENT_MAX_QUERY_VARIANTS:
-            break
+    llm_candidates = [
+        (
+            query_text,
+            f"llm_{idx}",
+            "LLM-generated search query.",
+            None,
+            claim.time_scope,
+        )
+        for idx, query_text in enumerate(claim.search_queries or [], 1)
+    ]
+    heuristic_candidates = _heuristic_query_candidates(claim, classification)
+    candidate_pool = (
+        heuristic_candidates + llm_candidates
+        if _is_temporal_event_verification_claim(claim)
+        else llm_candidates + heuristic_candidates
+    )
     for idx, (query_text, strategy, rationale, source_restriction, freshness_hint) in enumerate(
-        _heuristic_query_candidates(claim, classification),
-        len(variants) + 1,
+        candidate_pool,
+        1,
     ):
         key = query_text.casefold().strip()
         if not key or key in seen:
@@ -398,14 +410,21 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
 
 
 def _is_cyrillic_text(text: str) -> bool:
-    return bool(re.search(r"[\u0400-\u04FF]", text or ""))
+    return _shared_is_cyrillic_text(text)
 
 
 def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
     if not time_scope:
         return []
     terms = [time_scope]
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", time_scope):
+    if (
+        len(time_scope) == 10
+        and time_scope[4] == "-"
+        and time_scope[7] == "-"
+        and time_scope[:4].isdigit()
+        and time_scope[5:7].isdigit()
+        and time_scope[8:10].isdigit()
+    ):
         try:
             dt = datetime.fromisoformat(time_scope)
         except ValueError:
@@ -431,6 +450,154 @@ def _time_query_terms(time_scope: str | None, *, cyrillic: bool) -> list[str]:
             terms.append(dt.strftime("%B %d %Y"))
             terms.append(str(dt.year))
     return terms
+
+
+def _is_iso_date_text(text: str | None) -> bool:
+    if not text:
+        return False
+    return (
+        len(text) == 10
+        and text[4] == "-"
+        and text[7] == "-"
+        and text[:4].isdigit()
+        and text[5:7].isdigit()
+        and text[8:10].isdigit()
+    )
+
+
+def _is_year_text(text: str | None) -> bool:
+    return bool(text and len(text) == 4 and text.isdigit() and text.startswith("20"))
+
+
+def _contains_person_span(text: str) -> bool:
+    return any(" " in entity for entity in _shared_extract_entities(text))
+
+
+def _contains_location_span(text: str) -> bool:
+    return _shared_extract_region_hint(text) is not None
+
+
+def _contains_negation_cue(text: str) -> bool:
+    lowered = (text or "").casefold()
+    tokens = set(_shared_tokenize(text))
+    return bool(tokens & {"not", "no", "never", "false", "incorrect"} or "debunked" in lowered or "contradict" in lowered)
+
+
+def _split_sentences(text: str) -> list[str]:
+    source = text or ""
+    sentences: list[str] = []
+    start = 0
+    index = 0
+    while index < len(source):
+        ch = source[index]
+        if ch == "." and 0 < index < len(source) - 1 and source[index - 1].isdigit() and source[index + 1].isdigit():
+            index += 1
+            continue
+        if ch not in ".!?":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(source) and source[end] in ".!?":
+            end += 1
+        sentence = _normalized_text(source[start:end])
+        if sentence:
+            sentences.append(sentence)
+        index = end
+        while index < len(source) and source[index].isspace():
+            index += 1
+        start = index
+    remainder = _normalized_text(source[start:])
+    if remainder:
+        sentences.append(remainder)
+    return sentences
+
+
+def _extract_date_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for sentence in _split_sentences(text):
+        scope = _extract_time_scope(sentence)
+        if not scope:
+            continue
+        key = scope.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(scope)
+        if len(candidates) >= 3:
+            break
+    if not candidates:
+        scope = _extract_time_scope(text)
+        if scope:
+            candidates.append(scope)
+    return candidates[:3]
+
+
+def _extract_person_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for entity in _extract_entities(text):
+        token_count = len(_tokenize(entity))
+        if token_count >= 2:
+            candidates.append(entity)
+        if len(candidates) >= 3:
+            break
+    return candidates
+
+
+def _extract_location_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for sentence in _split_sentences(text):
+        region = _shared_extract_region_hint(sentence)
+        if not region:
+            continue
+        key = region.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(region)
+        if len(candidates) >= 3:
+            break
+    if not candidates:
+        region = _shared_extract_region_hint(text)
+        if region:
+            candidates.append(region)
+    return candidates[:3]
+
+
+def _contains_release_date_cue(text: str) -> bool:
+    lowered = (text or "").casefold()
+    return any(phrase in lowered for phrase in ("released on", "release date", "announced on", "dated"))
+
+
+def _clean_title_key(title: str) -> str:
+    return " ".join(_tokenize(title))
+
+
+def _extract_author(text: str) -> str | None:
+    head = (text or "")[:600]
+    for raw_line in head.splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        for marker in ("by:", "author:", "автор:"):
+            if lowered.startswith(marker):
+                return _normalized_text(line.split(":", 1)[1])
+    return None
+
+
+def _sanitize_compose_fragment(text: str) -> str:
+    if not text:
+        return text
+    parts: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip()
+        while line.startswith("#"):
+            line = line[1:].lstrip()
+        if line:
+            parts.append(line)
+    if not parts:
+        return ""
+    return " ".join(" ".join(parts).split())
 
 
 def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSnapshot:
@@ -510,7 +677,7 @@ def _effective_domain_type(claim: Claim, host: str) -> DomainType:
 
 
 def _title_key(title: str) -> str:
-    return re.sub(r"[^a-zа-яё0-9]+", " ", title.lower()).strip()
+    return _clean_title_key(title)
 
 
 def _semantic_overlap(query_text: str, candidate_text: str) -> float:
@@ -549,10 +716,10 @@ def _time_scope_alignment(claim: Claim, result) -> float:
         return 1.0
     if result.published_at and result.published_at.startswith(claim.time_scope):
         return 1.0
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", claim.time_scope or "") and result.published_at:
+    if _is_iso_date_text(claim.time_scope) and result.published_at:
         if result.published_at[:7] == claim.time_scope[:7]:
             return 0.45
-    if re.fullmatch(r"20\d{2}", claim.time_scope or "") and result.published_at:
+    if _is_year_text(claim.time_scope) and result.published_at:
         if result.published_at.startswith(claim.time_scope):
             return 0.8
     return 0.0
@@ -748,19 +915,13 @@ def _answer_type(claim: Claim) -> str:
 def _extract_answer_candidates(claim: Claim, text: str) -> list[str]:
     answer_type = _answer_type(claim)
     if answer_type == "time":
-        return _DATE_LIKE_RE.findall(text)[:3]
+        return _extract_date_candidates(text)
     if answer_type == "number":
-        return re.findall(r"\b\d+(?:\.\d+)?\b", text)[:3]
+        return _shared_extract_numbers(text)[:3]
     if answer_type == "person":
-        return re.findall(
-            r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})",
-            text,
-        )[:3]
+        return _extract_person_candidates(text)
     if answer_type == "location":
-        return re.findall(
-            r"(?:in|at|from)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){0,2})",
-            text,
-        )[:3]
+        return _extract_location_candidates(text)
     return _extract_entities(text)[:3]
 
 
@@ -806,6 +967,14 @@ def route_claim_retrieval(
     evidence_sufficiency += 0.15 if any(result.assessment.semantic_match_score >= 0.7 for result in top_results) else 0.0
     evidence_sufficiency += 0.15 if max_detail_coverage >= 0.3 else 0.0
     answer_type = _answer_type(claim)
+    time_source_anchor = answer_type == "time" and any(
+        _contains_release_date_cue(f"{result.serp.title} {result.serp.snippet}")
+        or any(
+            cue in f"{result.serp.title} {result.serp.url}".casefold()
+            for cue in ("release", "released", "announcement", "downloads/release", "whatsnew")
+        )
+        for result in top_results
+    )
     detail_sensitive_numeric = answer_type == "number" and bool(_numeric_dimension_terms(claim))
     exact_detail_request = detail_sensitive_numeric and "exact" in (claim.claim_text or "").casefold()
     if answer_type in {"number", "time", "location", "person"} and max_detail_coverage < 0.2:
@@ -820,10 +989,14 @@ def route_claim_retrieval(
     certainty = _clamp(certainty)
     consistency = _clamp(max(consistency, dimension_alignment * 0.6))
 
-    if exact_detail_request and max_detail_coverage < 0.2:
+    if _is_temporal_event_verification_claim(claim):
+        mode = "iterative_loop"
+    elif exact_detail_request and max_detail_coverage < 0.2:
         mode = "iterative_loop"
     elif certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
         mode = "short_path"
+    elif answer_type == "time" and time_source_anchor and certainty >= 0.45 and evidence_sufficiency >= 0.35:
+        mode = "targeted_retrieval"
     elif answer_type in {"number", "time"} and certainty >= 0.45 and max_detail_coverage >= 0.3 and evidence_sufficiency >= 0.35:
         mode = "targeted_retrieval"
     elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
@@ -845,15 +1018,13 @@ def route_claim_retrieval(
 
 
 def _extract_author(text: str) -> str | None:
-    head = text[:600]
-    patterns = [
-        r"(?:^|\n)(?:By|Author)\s*:\s*([^\n]{2,80})",
-        r"(?:^|\n)(?:Автор)\s*:\s*([^\n]{2,80})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, head, re.IGNORECASE)
-        if match:
-            return _normalized_text(match.group(1))
+    head = (text or "")[:600]
+    for raw_line in head.splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        for marker in ("by:", "author:", "автор:"):
+            if lowered.startswith(marker):
+                return _normalized_text(line.split(":", 1)[1])
     return None
 
 
@@ -956,7 +1127,7 @@ def _dimension_coverage_score(claim: Claim, text: str) -> float:
 
     if answer_type == "time" and _contains_date_like(text):
         score += 0.45
-    if answer_type == "number" and re.search(r"\b\d+(?:\.\d+)?\b", text):
+    if answer_type == "number" and _shared_extract_numbers(text):
         numeric_terms = _numeric_dimension_terms(claim)
         if not numeric_terms:
             score += 0.45
@@ -964,9 +1135,9 @@ def _dimension_coverage_score(claim: Claim, text: str) -> float:
             score += 0.45
         else:
             score += 0.05
-    if answer_type == "person" and re.search(r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})", text):
+    if answer_type == "person" and _contains_person_span(text):
         score += 0.35
-    if answer_type == "location" and re.search(r"\b(?:in|at|from)\s+[A-ZА-ЯЁ]", text):
+    if answer_type == "location" and _contains_location_span(text):
         score += 0.35
     if claim.time_scope and claim.time_scope.casefold() in lowered:
         score += 0.2
@@ -993,7 +1164,7 @@ def _numeric_dimension_terms(claim: Claim) -> tuple[str, ...]:
 
 
 def _entity_requires_primary_source(entity: str) -> bool:
-    tokens = re.findall(r"[A-Za-zА-Яа-яЁё]+", (entity or "").casefold())
+    tokens = _tokenize(entity)
     if not tokens:
         return True
     return not all(token in _UNIT_LIKE_ENTITY_TOKENS for token in tokens)
@@ -1276,7 +1447,7 @@ def _split_into_passages(document: FetchedDocument) -> list[Passage]:
         buffer.clear()
         if len(text) < 60:
             return
-        chunks = re.split(r"(?<=[.!?])\s+(?=[A-ZА-ЯЁ0-9])", text)
+        chunks = _split_sentences(text)
         running = ""
         for piece in chunks:
             piece = _normalized_text(piece)
@@ -1389,8 +1560,8 @@ def cheap_passage_score(claim: Claim, passage: Passage) -> float:
     overlap = _semantic_overlap(claim.claim_text, passage.text)
     entity_overlap = _entity_overlap(claim.entity_set, passage.text)
     dimension_overlap = _dimension_coverage_score(claim, passage.text)
-    claim_numbers = set(re.findall(r"\d+(?:\.\d+)?", claim.claim_text))
-    passage_numbers = set(re.findall(r"\d+(?:\.\d+)?", passage.text))
+    claim_numbers = set(_shared_extract_numbers(claim.claim_text))
+    passage_numbers = set(_shared_extract_numbers(passage.text))
     number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
     return _clamp(
         0.35 * overlap
@@ -1413,7 +1584,7 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     )
 
     if answer_type == "time":
-        if re.search(r"\b(?:released on|release date|announced on|dated)\b", lowered):
+        if _contains_release_date_cue(lowered):
             directness += 0.35
         if _contains_date_like(passage.text):
             directness += 0.25
@@ -1427,16 +1598,16 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     elif answer_type == "person":
         if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
             directness += 0.35
-        if re.search(r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})", passage.text):
+        if _contains_person_span(passage.text):
             directness += 0.2
     elif answer_type == "number":
-        if re.search(r"\b\d+(?:\.\d+)?\b", passage.text):
+        if _shared_extract_numbers(passage.text):
             directness += 0.35
     elif answer_type == "location":
-        if re.search(r"\b(?:in|at|from)\s+[A-ZА-ЯЁ]", passage.text):
+        if _contains_location_span(passage.text):
             directness += 0.25
 
-    contradiction_signal = 0.15 if re.search(r"\b(?:not|no|never|false|incorrect|debunked|contradict)\b", lowered) else 0.0
+    contradiction_signal = 0.15 if _contains_negation_cue(lowered) else 0.0
     return _clamp(
         0.28 * cheap_passage_score(claim, passage)
         + 0.24 * _dimension_coverage_score(claim, passage.text)
@@ -1491,26 +1662,14 @@ def utility_rerank_passages(claim: Claim, passages: list[Passage], limit: int = 
 def _news_digest_region_hint_from_claim(claim: Claim) -> str | None:
     if claim.entity_set:
         return claim.entity_set[0]
-    match = re.search(
-        r"\b(?:in|for|within|at|from|\u0432|\u0434\u043b\u044f|\u043f\u043e)\s+([A-Z\u0410-\u042f\u0401][A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451.-]+(?:\s+[A-Z\u0410-\u042f\u0401][A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451.-]+){0,2})",
-        claim.claim_text,
-    )
-    if match:
-        return _normalized_text(match.group(1))
-    return None
+    return _shared_extract_region_hint(claim.claim_text)
 
 
 def _is_news_digest_claim(claim: Claim) -> bool:
-    lowered = claim.claim_text.casefold()
-    return bool(
-        (claim.needs_freshness or claim.time_scope)
-        and (
-            re.search(r"\bwhat\b.*\bhappened\b", lowered)
-            or re.search(r"\b\u0447\u0442\u043e\b.*\b(?:\u043f\u0440\u043e\u0438\u0437\u043e\u0448\u043b\u043e|\u0441\u043b\u0443\u0447\u0438\u043b\u043e\u0441\u044c|\u0431\u044b\u043b\u043e)\b", lowered)
-            or "\u043d\u043e\u0432\u043e\u0441\u0442\u0438" in lowered
-            or "\u0441\u043e\u0431\u044b\u0442\u0438\u044f" in lowered
-            or "\u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432\u0438\u044f" in lowered
-        )
+    return _shared_is_news_digest_query(
+        claim.claim_text,
+        region_hint=_news_digest_region_hint_from_claim(claim),
+        freshness=bool(claim.needs_freshness or claim.time_scope),
     )
 
 
@@ -1522,7 +1681,7 @@ def _news_digest_time_match(claim: Claim, passage: Passage) -> float:
         return 1.0
     if passage.published_at and passage.published_at.startswith(claim.time_scope):
         return 1.0
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", claim.time_scope):
+    if _is_iso_date_text(claim.time_scope):
         return 0.0
     return 0.0
 
@@ -1540,8 +1699,8 @@ def cheap_passage_score(claim: Claim, passage: Passage) -> float:
     overlap = _semantic_overlap(claim.claim_text, passage.text)
     entity_overlap = _entity_overlap(claim.entity_set, passage.text)
     dimension_overlap = _dimension_coverage_score(claim, passage.text)
-    claim_numbers = set(re.findall(r"\d+(?:\.\d+)?", claim.claim_text))
-    passage_numbers = set(re.findall(r"\d+(?:\.\d+)?", passage.text))
+    claim_numbers = set(_shared_extract_numbers(claim.claim_text))
+    passage_numbers = set(_shared_extract_numbers(passage.text))
     number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
 
     if _is_news_digest_claim(claim):
@@ -1624,7 +1783,7 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     )
 
     if answer_type == "time":
-        if re.search(r"\b(?:released on|release date|announced on|dated)\b", lowered):
+        if _contains_release_date_cue(lowered):
             directness += 0.35
         if _contains_date_like(passage.text):
             directness += 0.25
@@ -1638,16 +1797,16 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
     elif answer_type == "person":
         if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
             directness += 0.35
-        if re.search(r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.-]+){1,2})", passage.text):
+        if _contains_person_span(passage.text):
             directness += 0.2
     elif answer_type == "number":
-        if re.search(r"\b\d+(?:\.\d+)?\b", passage.text):
+        if _shared_extract_numbers(passage.text):
             directness += 0.35
     elif answer_type == "location":
-        if re.search(r"\b(?:in|at|from)\s+[A-ZА-ЯЁ]", passage.text):
+        if _contains_location_span(passage.text):
             directness += 0.25
 
-    contradiction_signal = 0.15 if re.search(r"\b(?:not|no|never|false|incorrect|debunked|contradict)\b", lowered) else 0.0
+    contradiction_signal = 0.15 if _contains_negation_cue(lowered) else 0.0
     return _clamp(
         0.28 * cheap_passage_score(claim, passage)
         + 0.24 * _dimension_coverage_score(claim, passage.text)
@@ -1671,7 +1830,7 @@ def build_evidence_bundle(
     gated_by_url = {result.serp.canonical_url: result for result in gated_results}
     supporting_passages = _select_passages_from_spans(passages, verification.supporting_spans)
     contradicting_passages = _select_passages_from_spans(passages, verification.contradicting_spans)
-    all_supporting = supporting_passages or passages[:2]
+    all_supporting = _bundle_support_passages(claim, supporting_passages, passages, max_count=3) or passages[:2]
     independent_sources = {_host_root(passage.host) for passage in all_supporting}
     has_primary = any(
         (
@@ -1688,7 +1847,7 @@ def build_evidence_bundle(
     return EvidenceBundle(
         claim_id=claim.claim_id,
         claim_text=claim.claim_text,
-        supporting_passages=supporting_passages,
+        supporting_passages=all_supporting,
         contradicting_passages=contradicting_passages,
         considered_passages=passages,
         independent_source_count=len(independent_sources),
@@ -1932,14 +2091,22 @@ def _sanitize_compose_fragment(text: str) -> str:
     """Remove Markdown heading markers that leak from source pages into one line."""
     if not text:
         return text
-    t = re.sub(r"\s*#{1,6}\s+", " ", text)
-    return re.sub(r"\s+", " ", t).strip()
+    parts: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.lstrip()
+        while line.startswith("#"):
+            line = line[1:].lstrip()
+        if line:
+            parts.append(line)
+    if not parts:
+        return ""
+    return " ".join(" ".join(parts).split())
 
 
 def _compose_ui_labels(user_query: str) -> dict[str, str]:
     """Section titles: Russian if the user query contains Cyrillic, else English."""
     rq = user_query or ""
-    ru = bool(re.search(r"[а-яёА-ЯЁ]", rq))
+    ru = _is_cyrillic_text(rq)
     if ru:
         return {
             "answer": "Ответ",
@@ -1962,12 +2129,12 @@ def _compose_ui_labels(user_query: str) -> dict[str, str]:
 def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:
     cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
     head = passage.text[: max(cap, 4000)]
-    sentences = re.split(r"(?<=[.!?])\s+", head)
+    sentences = _split_sentences(head)
     if not sentences:
         return _truncate_compose_line(passage.text, cap)
     scored = sorted(
         sentences,
-        key=lambda sentence: _semantic_overlap(claim.claim_text, sentence),
+        key=lambda sentence: _answer_sentence_score(claim, sentence),
         reverse=True,
     )
     best = _normalized_text(scored[0]) if scored else _truncate_compose_line(passage.text, cap)
@@ -2053,6 +2220,196 @@ def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
     return selected
 
 
+def _compose_ui_labels(user_query: str) -> dict[str, str]:
+    rq = user_query or ""
+    ru = _is_cyrillic_text(rq)
+    if ru:
+        return {
+            "answer": "РћС‚РІРµС‚",
+            "sources": "РСЃС‚РѕС‡РЅРёРєРё",
+            "insufficient": "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С…",
+            "caveats": "РћРіРѕРІРѕСЂРєРё",
+            "no_evidence": "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅС‹С… СѓС‚РІРµСЂР¶РґРµРЅРёР№ РґР»СЏ РїСЂСЏРјРѕРіРѕ РѕС‚РІРµС‚Р°.",
+            "digest_header": "РЎРѕР±С‹С‚РёСЏ РёР· РёСЃС‚РѕС‡РЅРёРєРѕРІ:",
+        }
+    return {
+        "answer": "Answer",
+        "sources": "Sources",
+        "insufficient": "Insufficient data",
+        "caveats": "Caveats",
+        "no_evidence": "Not enough claim-level evidence for a direct answer.",
+        "digest_header": "Events from retrieved sources:",
+    }
+
+
+def _time_specificity_score(text: str) -> float:
+    scope = _extract_time_scope(text)
+    if not scope:
+        return 0.0
+    if _is_iso_date_text(scope):
+        return 1.0
+    if _is_year_text(scope):
+        return 0.2
+    if any(ch.isalpha() for ch in scope) and any(ch.isdigit() for ch in scope):
+        return 0.95
+    if scope.casefold().startswith("q"):
+        return 0.7
+    return 0.5
+
+
+def _answer_sentence_score(claim: Claim, sentence: str) -> float:
+    score = _semantic_overlap(claim.claim_text, sentence) + 0.15 * _entity_overlap(claim.entity_set, sentence)
+    answer_type = _answer_type(claim)
+    if answer_type == "time":
+        score += 0.65 * _time_specificity_score(sentence)
+    elif answer_type == "number" and _shared_extract_numbers(sentence):
+        score += 0.35
+    elif answer_type == "person" and _contains_person_span(sentence):
+        score += 0.2
+    elif answer_type == "location" and _contains_location_span(sentence):
+        score += 0.2
+    if claim.time_scope and claim.time_scope.casefold() in sentence.casefold():
+        score += 0.1
+    return score
+
+
+def _best_sentence_for_claim(claim: Claim, passage: Passage) -> str:
+    cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
+    head = passage.text[: max(cap, 4000)]
+    sentences = _split_sentences(head)
+    if not sentences:
+        return _truncate_compose_line(passage.text, cap)
+    scored = sorted(sentences, key=lambda sentence: _answer_sentence_score(claim, sentence), reverse=True)
+    best = _normalized_text(scored[0]) if scored else _truncate_compose_line(passage.text, cap)
+    return _truncate_compose_line(best, cap)
+
+
+def _best_sentence_from_passages(claim: Claim, passages: list[Passage]) -> str | None:
+    best_sentence: str | None = None
+    best_score = -1.0
+    for passage in passages[:3]:
+        sentence = _best_sentence_for_claim(claim, passage)
+        score = _answer_sentence_score(claim, sentence)
+        if score > best_score:
+            best_sentence = sentence
+            best_score = score
+    return best_sentence
+
+
+def _best_span_text(verification: VerificationResult, passages: list[Passage], claim: Claim, contradicted: bool = False) -> str | None:
+    cap = tuning.COMPOSE_ANSWER_MAX_SPAN_CHARS
+    spans = verification.contradicting_spans if contradicted else verification.supporting_spans
+    if spans:
+        text = _normalized_text(spans[0].text)
+        if not contradicted:
+            answer_type = _answer_type(claim)
+            fallback = _best_sentence_from_passages(claim, passages)
+            if answer_type == "time":
+                if fallback and _time_specificity_score(fallback) > _time_specificity_score(text):
+                    return _truncate_compose_line(fallback, cap)
+            elif answer_type == "number":
+                if fallback and not _shared_extract_numbers(text):
+                    return _truncate_compose_line(fallback, cap)
+        return _truncate_compose_line(text, cap)
+    fallback = _best_sentence_from_passages(claim, passages)
+    if fallback:
+        return _truncate_compose_line(fallback, cap)
+    return None
+
+
+def _bundle_support_passages(
+    claim: Claim,
+    supporting_passages: list[Passage],
+    passages: list[Passage],
+    *,
+    max_count: int,
+) -> list[Passage]:
+    selected: list[Passage] = []
+    seen_urls: set[str] = set()
+    seen_hosts: set[str] = set()
+
+    def add(passage: Passage) -> None:
+        url = passage.url or passage.canonical_url
+        host = _host_root(passage.host)
+        if url in seen_urls:
+            return
+        seen_urls.add(url)
+        if host:
+            seen_hosts.add(host)
+        selected.append(passage)
+
+    for passage in supporting_passages:
+        add(passage)
+        if len(selected) >= max_count:
+            return selected[:max_count]
+
+    ranked = sorted(
+        passages,
+        key=lambda passage: (
+            _semantic_overlap(claim.claim_text, f"{passage.title} {passage.text[:320]}")
+            + 0.25 * _entity_overlap(claim.entity_set, passage.text)
+            + 0.2 * _dimension_coverage_score(claim, passage.text)
+            + 0.15 * max(passage.utility_score, passage.source_score)
+        ),
+        reverse=True,
+    )
+    for passage in ranked:
+        host = _host_root(passage.host)
+        if host in seen_hosts and seen_hosts:
+            continue
+        add(passage)
+        if len(selected) >= max_count or len(seen_hosts) >= 2:
+            break
+    return selected[:max_count]
+
+
+def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_count: int) -> list[Passage]:
+    selected: list[Passage] = []
+    seen_urls: set[str] = set()
+    seen_hosts: set[str] = set()
+
+    def add(passage: Passage) -> None:
+        url = passage.url or passage.canonical_url
+        host = _host_root(passage.host)
+        if url in seen_urls:
+            return
+        seen_urls.add(url)
+        if host:
+            seen_hosts.add(host)
+        selected.append(passage)
+
+    for passage in bundle.supporting_passages:
+        add(passage)
+        if len(selected) >= max_count:
+            return selected[:max_count]
+
+    def support_score(passage: Passage) -> float:
+        lead = f"{passage.title} {passage.text[:320]}"
+        return (
+            0.45 * _semantic_overlap(claim.claim_text, lead)
+            + 0.20 * _entity_overlap(claim.entity_set, lead)
+            + 0.20 * _dimension_coverage_score(claim, lead)
+            + 0.15 * max(passage.utility_score, passage.source_score)
+        )
+
+    for passage in sorted(
+        bundle.considered_passages,
+        key=lambda item: (support_score(item), item.source_score),
+        reverse=True,
+    ):
+        host = _host_root(passage.host)
+        if host in seen_hosts and seen_hosts:
+            continue
+        add(passage)
+        if len(selected) >= max_count or len(seen_hosts) >= 2:
+            break
+
+    if not selected:
+        for passage in bundle.considered_passages[:max_count]:
+            add(passage)
+    return selected[:max_count]
+
+
 def compose_answer(report: AgentRunResult) -> str:
     lb = _compose_ui_labels(report.user_query)
     if report.classification.intent == "news_digest":
@@ -2089,7 +2446,7 @@ def compose_answer(report: AgentRunResult) -> str:
         if bundle is None or bundle.verification is None:
             continue
         if bundle.verification.verdict == "supported":
-            cited_passages.extend((bundle.supporting_passages[:3] or bundle.considered_passages[:3]))
+            cited_passages.extend(_supporting_answer_passages(run.claim, bundle, max_count=3))
         elif bundle.verification.verdict == "contradicted":
             cited_passages.extend((bundle.contradicting_passages[:2] or bundle.considered_passages[:2]))
 
@@ -2112,7 +2469,7 @@ def compose_answer(report: AgentRunResult) -> str:
             continue
         verification = bundle.verification
         if verification.verdict == "supported":
-            passages = bundle.supporting_passages[:2] or bundle.considered_passages[:1]
+            passages = _supporting_answer_passages(run.claim, bundle, max_count=2)
             if not passages:
                 continue
             sentence = _best_span_text(verification, passages, run.claim)

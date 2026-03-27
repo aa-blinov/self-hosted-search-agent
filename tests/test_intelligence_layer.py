@@ -20,7 +20,8 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="OpenAI revenue 2026-03-25"):
             with patch.object(service._normalize_agent, "run_sync") as normalize_call:
-                classification = service.classify_query("OpenAI revenue today")
+                with patch.object(service, "_classify_intent_llm", return_value="factual"):
+                    classification = service.classify_query("OpenAI revenue today")
 
         self.assertEqual(classification.normalized_query, "OpenAI revenue 2026-03-25")
         self.assertEqual(classification.time_scope, "2026-03-25")
@@ -30,7 +31,8 @@ class IntelligenceLayerTests(unittest.TestCase):
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="что 2026-03-25 было в Астане"):
-            classification = service.classify_query("что сегодня было в Астане")
+            with patch.object(service, "_classify_intent_llm", return_value="news_digest"):
+                classification = service.classify_query("что сегодня было в Астане")
 
         self.assertEqual(classification.intent, "news_digest")
         self.assertEqual(classification.time_scope, "2026-03-25")
@@ -204,6 +206,50 @@ class IntelligenceLayerTests(unittest.TestCase):
                 "output": _VerificationOutput(
                     verdict="insufficient_evidence",
                     confidence=0.15,
+                    supporting_passages=[],
+                    rationale="Need clearer quote.",
+                )
+            },
+        )()
+
+        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+            verification = service.verify_claim(claim, [passage])
+
+        self.assertEqual(verification.verdict, "supported")
+        self.assertGreaterEqual(verification.confidence, 0.46)
+        self.assertTrue(verification.supporting_spans)
+
+    def test_verify_claim_boosts_insufficient_when_python_release_page(self) -> None:
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="When was Python 3.13.0 released?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Python"],
+        )
+        passage = Passage(
+            passage_id="p-release",
+            url="https://www.python.org/downloads/release/python-3130/",
+            canonical_url="https://www.python.org/downloads/release/python-3130/",
+            host="www.python.org",
+            title="Python 3.13.0",
+            section="Release",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-24T00:00:00+00:00",
+            chunk_id="p-release",
+            text="Python 3.13.0, released on October 7, 2024, includes new features and bug fixes. " * 8,
+            source_score=0.9,
+            utility_score=0.3,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _VerificationOutput(
+                    verdict="insufficient_evidence",
+                    confidence=0.2,
                     supporting_passages=[],
                     rationale="Need clearer quote.",
                 )

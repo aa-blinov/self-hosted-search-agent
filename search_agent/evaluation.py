@@ -68,11 +68,41 @@ def load_evaluation_cases(path: str) -> list[EvaluationCase]:
 
 def _match_claim(run_list: list[ClaimRun], expected: ExpectedClaim) -> ClaimRun | None:
     needle = expected.match.casefold()
+    needle_tokens = set(_match_tokens(expected.match))
+    best_run: ClaimRun | None = None
+    best_score = 0.0
     for run in run_list:
         haystack = run.claim.claim_text.casefold()
         if needle in haystack or haystack in needle:
             return run
-    return None
+        haystack_tokens = set(_match_tokens(run.claim.claim_text))
+        if not needle_tokens or not haystack_tokens:
+            continue
+        overlap = len(needle_tokens & haystack_tokens) / len(needle_tokens)
+        if overlap > best_score:
+            best_score = overlap
+            best_run = run
+    return best_run if best_score >= 0.6 else None
+
+
+def _match_tokens(text: str) -> list[str]:
+    stopwords = {"a", "an", "the", "of", "is", "was", "were", "on", "in", "at", "for", "and"}
+    tokens: list[str] = []
+    current: list[str] = []
+    for ch in (text or "").casefold():
+        if ch.isalnum():
+            current.append(ch)
+            continue
+        if current:
+            token = "".join(current)
+            if token not in stopwords:
+                tokens.append(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if token not in stopwords:
+            tokens.append(token)
+    return tokens
 
 
 def _answer_unique_source_count(answer: str) -> int:

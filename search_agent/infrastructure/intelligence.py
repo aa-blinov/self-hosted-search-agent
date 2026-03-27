@@ -34,11 +34,42 @@ def _is_official_python_doc_url(url: str) -> bool:
     u = (url or "").lower()
     if "docs.python.org" in u:
         return True
+    if "blog.python.org" in u:
+        return True
     if "python.org" in u and any(
-        p in u for p in ("/whatsnew/", "/library/", "/tutorial/", "/reference/", "/using/", "/glossary/", "/dev/peps/")
+        p in u
+        for p in (
+            "/whatsnew/",
+            "/library/",
+            "/tutorial/",
+            "/reference/",
+            "/using/",
+            "/glossary/",
+            "/dev/peps/",
+            "/downloads/release/",
+        )
     ):
         return True
     return False
+
+
+def _extract_citation_indices(answer: str) -> list[int]:
+    cited: set[int] = set()
+    text = answer or ""
+    index = 0
+    while index < len(text):
+        if text[index] != "[":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and text[end].isdigit():
+            end += 1
+        if end > index + 1 and end < len(text) and text[end] == "]":
+            cited.add(int(text[index + 1:end]))
+            index = end + 1
+            continue
+        index += 1
+    return sorted(cited)
 
 
 def _claim_sounds_python_related(claim_text: str) -> bool:
@@ -333,12 +364,12 @@ class PydanticAIQueryIntelligence:
         region_hint = extract_region_hint(normalized_query)
         time_scope = extract_time_scope(normalized_query)
         freshness = needs_freshness(query)
-        if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness):
-            intent = "news_digest"
-            if log:
-                log("  [dim]-> heuristic intent override: [italic]news_digest[/italic][/dim]")
-        else:
-            intent = self._classify_intent_llm(normalized_query, log=log)
+        intent = self._classify_intent_llm(
+            normalized_query,
+            region_hint=region_hint,
+            freshness=freshness,
+            log=log,
+        )
         complexity = "multi_hop" if should_decompose(normalized_query) else "single_hop"
         entities = extract_entities(normalized_query)
         entity_disambiguation = any(len(entity) <= 4 for entity in entities)
@@ -353,7 +384,14 @@ class PydanticAIQueryIntelligence:
             entity_disambiguation=entity_disambiguation,
         )
 
-    def _classify_intent_llm(self, normalized_query: str, log=None) -> str:
+    def _classify_intent_llm(
+        self,
+        normalized_query: str,
+        *,
+        region_hint: str | None = None,
+        freshness: bool = False,
+        log=None,
+    ) -> str:
         """Classify intent via LLM: factual | synthesis | news_digest.
 
         Falls back to heuristic (is_news_digest_query → 'news_digest', else 'factual')
@@ -369,7 +407,7 @@ class PydanticAIQueryIntelligence:
 
         if not self._enabled:
             # No LLM available — fall back to heuristic.
-            return "news_digest" if is_news_digest_query(normalized_query) else "factual"
+            return "news_digest" if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness) else "factual"
 
         model_settings = build_model_settings(
             self._settings,
@@ -398,7 +436,7 @@ class PydanticAIQueryIntelligence:
                 self._query_cache[normalized_query] = queries[:6]
         except Exception as exc:
             log(f"  [dim yellow]-> intent classification failed: {exc}[/dim yellow]")
-            intent = "news_digest" if is_news_digest_query(normalized_query) else "factual"
+            intent = "news_digest" if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness) else "factual"
 
         self._intent_cache[normalized_query] = intent
         return intent
@@ -676,8 +714,7 @@ class PydanticAIQueryIntelligence:
             if not answer:
                 return ""
             # Append sources section for any [N] references cited in the answer.
-            import re as _re
-            cited = sorted({int(m) for m in _re.findall(r"\[(\d+)\]", answer)})
+            cited = _extract_citation_indices(answer)
             if intent == "news_digest":
                 floor = min(4, len(passage_refs))
                 cited = sorted(set(cited) | set(range(1, floor + 1)))

@@ -16,7 +16,7 @@ from search_agent.domain.models import (
     SourceAssessment,
     VerificationResult,
 )
-from search_agent.application.use_cases import SearchAgentUseCase
+from search_agent.application.use_cases import SearchAgentUseCase, _select_synthesis_passages
 
 
 class _FakeIntelligence:
@@ -318,6 +318,74 @@ class _FakeContradictionSteps(_FakeSteps):
 
 
 class UseCaseLayerTests(unittest.TestCase):
+    def test_select_synthesis_passages_diversifies_news_digest_domains(self):
+        passages = [
+            Passage(
+                passage_id="p1",
+                url="https://news.example.com/story-1",
+                canonical_url="https://news.example.com/story-1",
+                host="news.example.com",
+                title="Story 1",
+                section="News",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p1",
+                text="Story 1",
+                source_score=0.95,
+                utility_score=0.7,
+            ),
+            Passage(
+                passage_id="p2",
+                url="https://news.example.com/story-2",
+                canonical_url="https://news.example.com/story-2",
+                host="news.example.com",
+                title="Story 2",
+                section="News",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p2",
+                text="Story 2",
+                source_score=0.94,
+                utility_score=0.7,
+            ),
+            Passage(
+                passage_id="p3",
+                url="https://wire.example.net/story-3",
+                canonical_url="https://wire.example.net/story-3",
+                host="wire.example.net",
+                title="Story 3",
+                section="News",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p3",
+                text="Story 3",
+                source_score=0.8,
+                utility_score=0.7,
+            ),
+            Passage(
+                passage_id="p4",
+                url="https://local.example.org/story-4",
+                canonical_url="https://local.example.org/story-4",
+                host="local.example.org",
+                title="Story 4",
+                section="News",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p4",
+                text="Story 4",
+                source_score=0.79,
+                utility_score=0.7,
+            ),
+        ]
+
+        selected = _select_synthesis_passages(passages, intent="news_digest", limit=3)
+
+        self.assertEqual([passage.host for passage in selected], ["news.example.com", "wire.example.net", "local.example.org"])
+
     def test_use_case_dedupes_search_across_parallel_claims(self):
         search_gateway = _FakeSearchGateway()
         intelligence = _FakeIntelligenceThreeSameQuery()

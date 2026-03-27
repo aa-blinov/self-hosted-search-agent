@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 import xml.etree.ElementTree as ET
 
@@ -34,9 +33,9 @@ def _parse_arxiv(xml_text: str) -> list[dict]:
         if title_el is None or summary_el is None:
             continue
         papers.append({
-            "title": re.sub(r"\s+", " ", title_el.text or "").strip(),
+            "title": " ".join((title_el.text or "").split()),
             "url": (id_el.text or "").strip(),
-            "abstract": re.sub(r"\s+", " ", summary_el.text or "").strip(),
+            "abstract": " ".join((summary_el.text or "").split()),
             "authors": authors[:3],
         })
     return papers

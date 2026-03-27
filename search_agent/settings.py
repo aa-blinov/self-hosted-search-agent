@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -63,7 +62,7 @@ class AppSettings(BaseSettings):
             if isinstance(data, list):
                 return [str(x).strip() for x in data if str(x).strip()]
             return []
-        return [p.strip() for p in re.split(r"[;\n]", raw) if p.strip()]
+        return [part.strip() for part in raw.replace(";", "\n").splitlines() if part.strip()]
 
     def resolved_search_provider(self) -> str:
         o = (self.search_provider_override or "").strip().lower()

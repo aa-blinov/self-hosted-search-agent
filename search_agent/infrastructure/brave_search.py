@@ -4,7 +4,6 @@ Brave Search API helpers (web + news) with the same fallback chain as legacy bac
 
 from __future__ import annotations
 
-import re
 import time
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -29,10 +28,15 @@ def _is_backend_degraded(snapshot: SearchSnapshot) -> bool:
 
 
 def _simplify_fallback_query(query: str) -> str:
-    text = re.sub(r"[\"“”]", " ", query)
-    text = re.sub(r"\b(?:OR|AND)\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"[?]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    translation = str.maketrans({
+        '"': " ",
+        "“": " ",
+        "”": " ",
+        "?": " ",
+    })
+    text = (query or "").translate(translation)
+    tokens = [token for token in text.split() if token.casefold() not in {"or", "and"}]
+    text = " ".join(tokens).strip()
     return text or query
 
 

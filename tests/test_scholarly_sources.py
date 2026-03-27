@@ -46,6 +46,16 @@ class ScholarlySourcesUrlTests(unittest.TestCase):
             "649deb3e889f0d29cd0d7d698d7d7b7d7d7d7d7d",
         )
 
+    def test_semantic_scholar_arxiv_and_doi_ids(self) -> None:
+        self.assertEqual(
+            parse_semanticscholar_paper_id("https://www.semanticscholar.org/paper/arxiv/2312.12345v2"),
+            "ARXIV:2312.12345",
+        )
+        self.assertEqual(
+            parse_semanticscholar_paper_id("https://www.semanticscholar.org/paper/doi/10.1000/182"),
+            "DOI:10.1000/182",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

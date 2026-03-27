@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import logfire
 
@@ -19,6 +20,52 @@ from search_agent.application.contracts import (
     SearchGatewayPort,
     StepLibraryPort,
 )
+
+
+def _passage_domain_key(passage) -> str:
+    host = (getattr(passage, "host", None) or "").casefold()
+    if not host:
+        host = urlparse(getattr(passage, "url", "") or "").netloc.casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> list:
+    if limit <= 0:
+        return []
+    if intent != "news_digest":
+        return passages[:limit]
+
+    selected: list = []
+    seen_urls: set[str] = set()
+    seen_domains: set[str] = set()
+
+    for passage in passages:
+        url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
+        domain = _passage_domain_key(passage) or url
+        if url and url in seen_urls:
+            continue
+        if domain and domain in seen_domains:
+            continue
+        if url:
+            seen_urls.add(url)
+        if domain:
+            seen_domains.add(domain)
+        selected.append(passage)
+        if len(selected) >= limit:
+            return selected
+
+    for passage in passages:
+        url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        selected.append(passage)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 class SearchAgentUseCase:
@@ -159,7 +206,13 @@ class SearchAgentUseCase:
                     for doc in (cr.fetched_documents or []):
                         raw.extend(self._steps.split_into_passages(doc))
                     raw.sort(key=lambda p: p.source_score, reverse=True)
-                    synth_passages.extend(raw[: tuning.SYNTHESIS_PASSAGE_LIMIT])
+                    synth_passages.extend(
+                        _select_synthesis_passages(
+                            raw,
+                            intent=classification.intent,
+                            limit=tuning.SYNTHESIS_PASSAGE_LIMIT,
+                        )
+                    )
                 if synth_passages:
                     synthesis = self._intelligence.synthesize_answer(query, synth_passages, log=log, intent=classification.intent)
                     if synthesis:

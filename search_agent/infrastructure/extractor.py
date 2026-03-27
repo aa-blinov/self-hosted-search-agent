@@ -14,10 +14,11 @@ import contextlib
 import io
 import json
 import os
-import re
 import threading
 import time
+from dataclasses import dataclass, field
 from html import unescape
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import requests as _requests
@@ -203,57 +204,118 @@ def _http_get_shallow(url: str, *, timeout: float) -> tuple[_requests.Response |
     return None, last_exc
 
 
-def _clean_html_text(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    text = unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
+def _normalize_html_text(text: str) -> str:
+    return " ".join(unescape(text or "").split())
 
 
-def _extract_first(pattern: str, html: str, flags: int = 0) -> str:
-    match = re.search(pattern, html, flags)
-    if not match:
-        return ""
-    return _clean_html_text(match.group(1))
+@dataclass(slots=True)
+class _HTMLSignals:
+    title: str = ""
+    meta_tags: list[dict[str, str]] = field(default_factory=list)
+    headings: list[str] = field(default_factory=list)
+    paragraphs: list[str] = field(default_factory=list)
+    schema_json_blocks: list[str] = field(default_factory=list)
 
 
-def _extract_all(pattern: str, html: str, limit: int = 5, flags: int = 0) -> list[str]:
-    items: list[str] = []
-    for match in re.finditer(pattern, html, flags):
-        text = _clean_html_text(match.group(1))
-        if text and text not in items:
-            items.append(text)
-        if len(items) >= limit:
-            break
-    return items
+class _HTMLSignalsParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.signals = _HTMLSignals()
+        self._capture_tag: str | None = None
+        self._capture_depth = 0
+        self._capture_parts: list[str] = []
+        self._capture_schema = False
+        self._schema_depth = 0
+        self._schema_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attr_map = {(key or "").lower(): (value or "") for key, value in attrs}
+
+        if self._capture_tag is not None:
+            self._capture_depth += 1
+        if self._capture_schema:
+            self._schema_depth += 1
+
+        if normalized_tag == "meta":
+            self.signals.meta_tags.append(attr_map)
+
+        if normalized_tag in {"title", "h1", "h2", "p"} and self._capture_tag is None:
+            self._capture_tag = normalized_tag
+            self._capture_depth = 1
+            self._capture_parts = []
+
+        if (
+            normalized_tag == "script"
+            and not self._capture_schema
+            and attr_map.get("type", "").strip().lower() == "application/ld+json"
+        ):
+            self._capture_schema = True
+            self._schema_depth = 1
+            self._schema_parts = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if self._capture_tag is not None and data:
+            self._capture_parts.append(data)
+        if self._capture_schema and data:
+            self._schema_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+
+        if self._capture_schema:
+            self._schema_depth -= 1
+            if normalized_tag == "script" and self._schema_depth <= 0:
+                raw = "".join(self._schema_parts).strip()
+                if raw:
+                    self.signals.schema_json_blocks.append(raw)
+                self._capture_schema = False
+                self._schema_depth = 0
+                self._schema_parts = []
+
+        if self._capture_tag is not None:
+            self._capture_depth -= 1
+            if self._capture_depth <= 0:
+                text = _normalize_html_text("".join(self._capture_parts))
+                if text:
+                    if self._capture_tag == "title" and not self.signals.title:
+                        self.signals.title = text
+                    elif self._capture_tag in {"h1", "h2"} and text not in self.signals.headings:
+                        self.signals.headings.append(text)
+                    elif self._capture_tag == "p" and text not in self.signals.paragraphs:
+                        self.signals.paragraphs.append(text)
+                self._capture_tag = None
+                self._capture_depth = 0
+                self._capture_parts = []
 
 
-def _extract_meta_content(html: str, keys: list[str]) -> str:
-    for key in keys:
-        pattern = (
-            r'<meta[^>]+(?:name|property)=["\']%s["\'][^>]+content=["\']([^"\']+)["\'][^>]*>'
-            % re.escape(key)
-        )
-        value = _extract_first(pattern, html, flags=re.IGNORECASE)
-        if value:
-            return value
-        reverse_pattern = (
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|property)=["\']%s["\'][^>]*>'
-            % re.escape(key)
-        )
-        value = _extract_first(reverse_pattern, html, flags=re.IGNORECASE)
-        if value:
-            return value
+def _collect_html_signals(html: str) -> _HTMLSignals:
+    parser = _HTMLSignalsParser()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return _HTMLSignals()
+    return parser.signals
+
+
+def _extract_meta_content(signals: _HTMLSignals, keys: list[str]) -> str:
+    expected = {key.lower() for key in keys}
+    for meta in signals.meta_tags:
+        marker = (meta.get("name") or meta.get("property") or "").strip().lower()
+        content = _normalize_html_text(meta.get("content", ""))
+        if marker in expected and content:
+            return content
     return ""
 
 
-def _extract_schema_org(html: str) -> dict:
+def _extract_schema_org(signals: _HTMLSignals) -> dict:
     collected: dict[str, object] = {}
-    for match in re.finditer(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        re.IGNORECASE | re.DOTALL,
-    ):
-        raw = match.group(1).strip()
+    for raw in signals.schema_json_blocks:
         if not raw:
             continue
         try:
@@ -309,23 +371,24 @@ def _trafilatura_main_text(html: str, final_url: str) -> str | None:
 
 
 def _legacy_shallow_payload(html: str, response, max_chars: int) -> dict:
-    title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-    meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or None
-    headings = _extract_all(r"<h[12][^>]*>(.*?)</h[12]>", html, limit=6, flags=re.IGNORECASE | re.DOTALL)
+    signals = _collect_html_signals(html)
+    title = signals.title
+    meta_description = _extract_meta_content(signals, ["description", "og:description", "twitter:description"]) or None
+    headings = signals.headings[:6]
     paragraphs = [
         text
-        for text in _extract_all(r"<p[^>]*>(.*?)</p>", html, limit=8, flags=re.IGNORECASE | re.DOTALL)
+        for text in signals.paragraphs[:8]
         if len(text) >= 40
     ][:3]
-    schema_org = _extract_schema_org(html)
+    schema_org = _extract_schema_org(signals)
     author = (
-        _extract_meta_content(html, ["author", "article:author", "parsely-author"])
+        _extract_meta_content(signals, ["author", "article:author", "parsely-author"])
         or str(schema_org.get("author", ""))
         or None
     )
     published_at = (
         _extract_meta_content(
-            html,
+            signals,
             ["article:published_time", "og:article:published_time", "datePublished", "pubdate", "dc.date"],
         )
         or str(schema_org.get("datePublished", ""))
@@ -337,7 +400,7 @@ def _legacy_shallow_payload(html: str, response, max_chars: int) -> dict:
         summary_parts.append(meta_description)
     summary_parts.extend(headings[:3])
     summary_parts.extend(paragraphs[:2])
-    summary = re.sub(r"\s+", " ", " ".join(part for part in summary_parts if part)).strip()[:max_chars]
+    summary = " ".join(part for part in summary_parts if part).strip()[:max_chars]
 
     return {
         "final_url": response.url,
@@ -420,7 +483,7 @@ def shallow_fetch(url: str, log=None, intent: str = "factual") -> dict:
             if raw_date is not None:
                 published_at = str(raw_date)
         if not title:
-            title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL) or response.url
+            title = _collect_html_signals(html).title or response.url
 
         first_paragraphs: list[str] = []
         for block in main_text.split("\n\n"):
@@ -509,7 +572,7 @@ def shallow_fetch_many(
 
 
 def _http_article_text(url: str) -> str:
-    """HTTP GET + trafilatura main text; fallback to legacy regex heuristics (no browser)."""
+    """HTTP GET + trafilatura main text; fallback to legacy HTML heuristics (no browser)."""
     specialized = dispatch_article_plaintext(url, timeout=tuning.SHALLOW_FETCH_TIMEOUT)
     if specialized:
         return specialized[: _extract_cap(url)]
@@ -536,12 +599,13 @@ def _http_article_text(url: str) -> str:
     if main:
         return main[:cap]
 
-    title = _extract_first(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-    meta_description = _extract_meta_content(html, ["description", "og:description", "twitter:description"]) or ""
-    headings = _extract_all(r"<h[12][^>]*>(.*?)</h[12]>", html, limit=8, flags=re.IGNORECASE | re.DOTALL)
+    signals = _collect_html_signals(html)
+    title = signals.title
+    meta_description = _extract_meta_content(signals, ["description", "og:description", "twitter:description"]) or ""
+    headings = signals.headings[:8]
     paragraphs = [
         text
-        for text in _extract_all(r"<p[^>]*>(.*?)</p>", html, limit=24, flags=re.IGNORECASE | re.DOTALL)
+        for text in signals.paragraphs[:24]
         if len(text) >= 40
     ]
     summary_parts: list[str] = []
@@ -550,7 +614,7 @@ def _http_article_text(url: str) -> str:
             summary_parts.append(part)
     summary_parts.extend(headings[:4])
     summary_parts.extend(paragraphs[:14])
-    text = re.sub(r"\s+", " ", " ".join(summary_parts)).strip()
+    text = " ".join(summary_parts).strip()
     return text[:cap]
 
 

@@ -163,6 +163,36 @@ class Phase3Tests(unittest.TestCase):
         self.assertIn("targeted_retrieval", microsoft_case.expected_claims[0].expected_routes)
         self.assertEqual(microsoft_case.expected_claims[0].min_independent_sources, 2)
 
+    def test_evaluation_matches_claims_with_filler_words(self):
+        report = _make_supported_report()
+        report.claims[0].claim = Claim(
+            claim_id="claim-1",
+            claim_text="Python 3.13.0 was released on October 7, 2024.",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Python 3.13.0"],
+        )
+        report.claims[0].evidence_bundle.claim_text = report.claims[0].claim.claim_text
+        report.claims[0].routing_decision = type("Route", (), {"mode": "targeted_retrieval"})()
+        cases = [
+            EvaluationCase(
+                case_id="case-1",
+                split="factual_single-hop",
+                query=report.user_query,
+                expected_claims=[
+                    ExpectedClaim(
+                        match="Python 3.13.0 released",
+                        expected_verdict="supported",
+                    )
+                ],
+            )
+        ]
+
+        summary = score_reports(cases, {"case-1": report}, {"case-1": 1000})
+
+        self.assertEqual(summary["metrics"]["claim_support_rate"], 1.0)
+        self.assertEqual(summary["cases"][0]["claims"][0]["actual_verdict"], "supported")
+
 
 if __name__ == "__main__":
     unittest.main()

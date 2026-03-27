@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +12,10 @@ DEFAULT_RECEIPTS_DIR = "receipts"
 
 
 def _slugify(text: str, limit: int = 64) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").casefold()).strip("-")
+    slug = "".join(ch if ("a" <= ch <= "z" or "0" <= ch <= "9") else "-" for ch in (text or "").casefold())
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    slug = slug.strip("-")
     return slug[:limit] or "query"
 
 

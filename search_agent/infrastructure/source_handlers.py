@@ -8,9 +8,9 @@ REST miss → generic HTML). Generic HTTP + trafilatura stays in :mod:`extractor
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Callable, Protocol, runtime_checkable
+from urllib.parse import urlparse, urlunparse
 
 import requests as _requests
 
@@ -39,7 +39,6 @@ LogFn = Callable[[str], None]
 #  Reddit — public JSON API                                                    #
 # --------------------------------------------------------------------------- #
 
-_REDDIT_RE = re.compile(r"reddit\.com/r/\w+/comments/\w+")
 _REDDIT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -50,12 +49,30 @@ _REDDIT_HEADERS = {
 
 
 def is_reddit_post_url(url: str) -> bool:
-    return bool(_REDDIT_RE.search(url))
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
+    if host.startswith(("www.", "m.")):
+        host = host.split(".", 1)[1]
+    if host != "reddit.com":
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    return len(parts) >= 4 and parts[0] == "r" and parts[2] == "comments" and bool(parts[3])
+
+
+def _reddit_json_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    if not path.endswith(".json"):
+        path += ".json"
+    return urlunparse(parsed._replace(path=path, query="limit=25&sort=top", fragment=""))
 
 
 def extract_reddit_text(url: str, max_comments: int = 12) -> str:
     """Fetch Reddit post + top comments via ``.json`` API."""
-    json_url = re.sub(r"/?(\?.*)?$", ".json?limit=25&sort=top", url)
+    json_url = _reddit_json_url(url)
     resp = _requests.get(json_url, headers=_REDDIT_HEADERS, timeout=15)
     resp.raise_for_status()
     data = resp.json()

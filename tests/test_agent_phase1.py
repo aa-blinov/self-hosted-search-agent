@@ -15,6 +15,7 @@ from search_agent.domain.models import (
     Claim,
     ClaimRun,
     EvidenceBundle,
+    EvidenceSpan,
     GatedSerpResult,
     Passage,
     QueryClassification,
@@ -105,6 +106,34 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertTrue(any('"OpenAI"' in variant.query_text for variant in variants))
         self.assertTrue(any("Q1 2026" in variant.query_text for variant in variants))
         self.assertTrue(any(variant.strategy == "exact_match" for variant in variants))
+
+    def test_temporal_event_claim_prioritizes_event_date_queries(self):
+        classification = QueryClassification(
+            query="Was Satya Nadella named CEO of Microsoft in 2015?",
+            normalized_query="Was Satya Nadella named CEO of Microsoft in 2015?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Was Satya Nadella named CEO of Microsoft in 2015?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Satya Nadella", "Microsoft"],
+            search_queries=[
+                "Satya Nadella CEO Microsoft 2015",
+                "\"Satya Nadella\" appointed CEO",
+                "Microsoft CEO 2015",
+            ],
+        )
+
+        variants = build_query_variants(claim, classification)
+
+        self.assertEqual(variants[0].strategy, "event_date")
+        self.assertEqual(variants[1].strategy, "event_announcement")
+        self.assertIn("appointment date", variants[0].query_text)
+        self.assertNotIn("2015", variants[0].query_text)
 
     def test_serp_gate_dedupes_and_prefers_official(self):
         claim = Claim(
@@ -596,6 +625,176 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertIn("OpenAI announcement", answer)
         self.assertIn("https://example.com/openai", answer)
 
+    def test_build_evidence_bundle_adds_corroborating_source_for_supported_claim(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Is the IRS a U.S. government agency?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["IRS"],
+        )
+        supporting = Passage(
+            passage_id="p1",
+            url="https://www.usa.gov/agencies/internal-revenue-service",
+            canonical_url="https://www.usa.gov/agencies/internal-revenue-service",
+            host="www.usa.gov",
+            title="Internal Revenue Service (IRS) | USAGov",
+            section="Agency",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-27T00:00:00+00:00",
+            chunk_id="p1",
+            text="The Internal Revenue Service (IRS) is a bureau of the Department of the Treasury.",
+            source_score=0.8,
+            utility_score=0.8,
+        )
+        corroborating = Passage(
+            passage_id="p2",
+            url="https://www.irs.gov/about-irs/the-agency-its-mission-and-statutory-authority",
+            canonical_url="https://www.irs.gov/about-irs/the-agency-its-mission-and-statutory-authority",
+            host="www.irs.gov",
+            title="The agency, its mission and statutory authority | Internal Revenue Service",
+            section="About",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-27T00:00:00+00:00",
+            chunk_id="p2",
+            text="The IRS is one of the world's most efficient tax administrators and carries out the tax laws.",
+            source_score=0.9,
+            utility_score=0.7,
+        )
+        verification = VerificationResult(
+            verdict="supported",
+            confidence=0.85,
+            supporting_spans=[
+                EvidenceSpan(
+                    passage_id="p1",
+                    url=supporting.url,
+                    title=supporting.title,
+                    section=supporting.section,
+                    text="The Internal Revenue Service (IRS) is a bureau of the Department of the Treasury.",
+                )
+            ],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title=supporting.title,
+                    url=supporting.url,
+                    snippet=supporting.text,
+                    canonical_url=supporting.canonical_url,
+                    host=supporting.host,
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.9,
+                    primary_source_likelihood=0.8,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.8,
+                    semantic_match_score=0.9,
+                    source_score=0.9,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title=corroborating.title,
+                    url=corroborating.url,
+                    snippet=corroborating.text,
+                    canonical_url=corroborating.canonical_url,
+                    host=corroborating.host,
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.95,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.8,
+                    semantic_match_score=0.85,
+                    source_score=0.95,
+                ),
+            ),
+        ]
+
+        bundle = build_evidence_bundle(claim, [supporting, corroborating], verification, gated)
+
+        self.assertEqual(bundle.independent_source_count, 2)
+        self.assertEqual(len(bundle.supporting_passages), 2)
+        self.assertTrue(bundle.has_primary_source)
+
+    def test_compose_answer_time_claim_prefers_sentence_with_date(self):
+        passage = Passage(
+            passage_id="p1",
+            url="https://www.python.org/downloads/release/python-3130/",
+            canonical_url="https://www.python.org/downloads/release/python-3130/",
+            host="www.python.org",
+            title="Python 3.13.0",
+            section="Release",
+            published_at=None,
+            author=None,
+            extracted_at="2026-03-27T00:00:00+00:00",
+            chunk_id="p1",
+            text="Python 3.13.0, released on October 7, 2024, includes new features and optimizations.",
+            source_score=0.9,
+            utility_score=0.8,
+        )
+        bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="When was Python 3.13.0 released?",
+            supporting_passages=[passage],
+            considered_passages=[passage],
+            independent_source_count=1,
+            has_primary_source=True,
+            freshness_ok=True,
+            verification=VerificationResult(
+                verdict="supported",
+                confidence=0.8,
+                supporting_spans=[
+                    EvidenceSpan(
+                        passage_id="p1",
+                        url=passage.url,
+                        title=passage.title,
+                        section=passage.section,
+                        text="This is the stable release of Python 3.13.0.",
+                    )
+                ],
+            ),
+        )
+        report = AgentRunResult(
+            user_query="When was Python 3.13.0 released?",
+            classification=QueryClassification(
+                query="When was Python 3.13.0 released?",
+                normalized_query="When was Python 3.13.0 released?",
+                intent="factual",
+                complexity="single_hop",
+                needs_freshness=False,
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="When was Python 3.13.0 released?",
+                        priority=1,
+                        needs_freshness=False,
+                        entity_set=["Python 3.13.0"],
+                    ),
+                    evidence_bundle=bundle,
+                )
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("October 7, 2024", answer)
+
     def test_route_exact_numeric_detail_without_dimension_match_uses_iterative_loop(self):
         claim = Claim(
             claim_id="claim-1",
@@ -714,6 +913,102 @@ class AgentPhase1Tests(unittest.TestCase):
         decision = route_claim_retrieval(claim, gated)
 
         self.assertIn(decision.mode, {"short_path", "targeted_retrieval"})
+
+    def test_route_release_date_query_can_stay_targeted_from_release_source_cues(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="When was Python 3.13.0 released?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Python", "Python 3.13.0"],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title="Python Release Python 3.13.0",
+                    url="https://www.python.org/downloads/release/python-3130/",
+                    snippet="The latest version of Python 3 is available for download.",
+                    canonical_url="https://www.python.org/downloads/release/python-3130/",
+                    host="www.python.org",
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.9,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.7,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=0.8,
+                    source_score=0.92,
+                ),
+            )
+        ]
+
+        decision = route_claim_retrieval(claim, gated)
+
+        self.assertIn(decision.mode, {"short_path", "targeted_retrieval"})
+
+    def test_route_temporal_event_verification_claim_uses_iterative_loop(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Was Satya Nadella named CEO of Microsoft in 2015?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Satya Nadella", "Microsoft"],
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title="Satya Nadella: Ignite 2015",
+                    url="https://news.microsoft.com/speeches/satya-nadella-ignite-2015/",
+                    snippet="Remarks by Satya Nadella, Microsoft CEO, on May 4, 2015.",
+                    canonical_url="https://news.microsoft.com/speeches/satya-nadella-ignite-2015/",
+                    host="news.microsoft.com",
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="official",
+                    source_prior=0.5,
+                    primary_source_likelihood=1.0,
+                    freshness_score=0.5,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=0.8,
+                    source_score=0.9,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title="Microsoft CEO Satya Nadella on transformation",
+                    url="https://fortune.com/2015/05/04/satya-nadella-ceo-microsoft/",
+                    snippet="Microsoft CEO Satya Nadella discusses the company's direction in 2015.",
+                    canonical_url="https://fortune.com/2015/05/04/satya-nadella-ceo-microsoft/",
+                    host="fortune.com",
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="major_media",
+                    source_prior=0.2,
+                    primary_source_likelihood=0.4,
+                    freshness_score=0.5,
+                    seo_spam_risk=0.0,
+                    entity_match_score=1.0,
+                    semantic_match_score=0.75,
+                    source_score=0.75,
+                ),
+            ),
+        ]
+
+        decision = route_claim_retrieval(claim, gated)
+
+        self.assertEqual(decision.mode, "iterative_loop")
 
     def test_compose_answer_no_supported_lines_uses_heading_not_bullet(self):
         insufficient_bundle = EvidenceBundle(

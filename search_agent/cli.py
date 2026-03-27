@@ -10,7 +10,6 @@ Flow:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -26,6 +25,7 @@ from rich.text import Text
 from rich.rule import Rule
 from rich.status import Status
 
+from search_agent.application.text_heuristics import is_cyrillic_text
 from search_agent.config.profiles import DEFAULT_PROFILE, PROFILES, SearchProfile, get_profile, list_profiles
 from search_agent.infrastructure.extractor import get_extractor_name, shutdown as shutdown_crawler
 from search_agent.infrastructure.llm import analyze_rag_papers
@@ -78,7 +78,7 @@ _FACTUAL_RELEASE_KW = {
 
 def _suggest_profile(query: str) -> str:
     lowered = query.lower()
-    has_cyrillic = bool(re.search(r"[а-яёА-ЯЁ]", query))
+    has_cyrillic = is_cyrillic_text(query)
 
     if any(keyword in lowered for keyword in _NEWS_KW):
         if any(keyword in lowered for keyword in _NEWS_FRESH_KW):

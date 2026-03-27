@@ -7,8 +7,8 @@ Used by :mod:`search_agent.infrastructure.source_handlers` before generic HTTP s
 from __future__ import annotations
 
 import base64
-import re
 from collections.abc import Callable
+from html.parser import HTMLParser
 from urllib.parse import quote, unquote, urlparse
 
 import requests
@@ -25,10 +25,6 @@ _API_UA = (
     "(search-agent; +https://github.com/local/search-agent)"
 )
 
-_GITHUB_REPO_RE = re.compile(
-    r"^https?://github\.com/([^/]+)/([^/?#]+)",
-    re.I,
-)
 _GITHUB_RESERVED = frozenset(
     {
         "topics",
@@ -45,22 +41,61 @@ _GITHUB_RESERVED = frozenset(
     },
 )
 
-_ARXIV_PATH_RE = re.compile(
-    r"arxiv\.org/(?:abs|pdf)/([^?#]+)",
-    re.I,
-)
+
+class _MarkupStripper(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return " ".join("".join(self._parts).split())
 
 
-_S2_HEX_RE = re.compile(r"/([a-f0-9]{40})(?:/|$|\?)", re.I)
-_S2_ARXIV_IN_PATH_RE = re.compile(r"arxiv[:\s]+([\d.]+)(?:v\d+)?", re.I)
+def _normalized_host(url: str) -> str:
+    try:
+        host = (urlparse(url.strip()).netloc or "").lower().split("@")[-1].split(":")[0]
+    except Exception:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _path_segments(url: str) -> list[str]:
+    try:
+        path = unquote(urlparse(url.strip()).path or "")
+    except Exception:
+        return []
+    return [segment for segment in path.split("/") if segment]
+
+
+def _is_hex_token(value: str) -> bool:
+    token = (value or "").strip()
+    if len(token) != 40:
+        return False
+    return all(char in "0123456789abcdefABCDEF" for char in token)
+
+
+def _strip_arxiv_version(value: str) -> str:
+    token = (value or "").strip()
+    marker = token.rfind("v")
+    if marker > 0 and token[marker + 1 :].isdigit():
+        return token[:marker]
+    return token
 
 
 def parse_github_repo_url(url: str) -> tuple[str, str] | None:
-    """``https://github.com/owner/repo`` or ``.../tree/...`` — owner/repo only."""
-    m = _GITHUB_REPO_RE.match(url.strip())
-    if not m:
+    """``https://github.com/owner/repo`` or ``.../tree/...`` -> owner/repo only."""
+    if _normalized_host(url) != "github.com":
         return None
-    owner, repo = m.group(1), m.group(2)
+    parts = _path_segments(url)
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
     if owner.lower() in _GITHUB_RESERVED or repo.lower() in _GITHUB_RESERVED:
         return None
     if repo.endswith(".git"):
@@ -69,49 +104,59 @@ def parse_github_repo_url(url: str) -> tuple[str, str] | None:
 
 
 def parse_arxiv_id_from_url(url: str) -> str | None:
-    m = _ARXIV_PATH_RE.search(url)
-    if not m:
+    if _normalized_host(url) != "arxiv.org":
         return None
-    aid = unquote(m.group(1).strip()).rstrip("/")
+    parts = _path_segments(url)
+    if len(parts) < 2 or parts[0].lower() not in {"abs", "pdf"}:
+        return None
+    aid = "/".join(parts[1:]).rstrip("/")
     if aid.lower().endswith(".pdf"):
         aid = aid[:-4]
     return aid or None
 
 
 def parse_doi_from_url(url: str) -> str | None:
-    u = url.strip()
-    m = re.search(r"doi\.org/([^?\s#]+)", u, re.I)
-    if not m:
+    if not _normalized_host(url).endswith("doi.org"):
         return None
-    raw = unquote(m.group(1).strip().rstrip("/"))
-    if "?" in raw:
-        raw = raw.split("?")[0]
+    raw = "/".join(_path_segments(url)).strip().rstrip("/")
     if raw.lower().startswith("10."):
         return raw
     return None
 
 
 def parse_semanticscholar_paper_id(url: str) -> str | None:
-    """Corpus id (40 hex) or ``ARXIV:…`` / ``DOI:…`` for the Graph API."""
-    try:
-        path = unquote(urlparse(url.strip()).path or "")
-    except Exception:
+    """Corpus id (40 hex) or ``ARXIV:...`` / ``DOI:...`` for the Graph API."""
+    if "semanticscholar.org" not in _normalized_host(url):
         return None
-    m = _S2_HEX_RE.search(path)
-    if m:
-        return m.group(1)
-    marx = _S2_ARXIV_IN_PATH_RE.search(path)
-    if marx:
-        return "ARXIV:" + marx.group(1)
-    mdoi = re.search(r"DOI[:\s]+(10\.[^\s/]+/[^\s?#]+)", path, re.I)
-    if mdoi:
-        return "DOI:" + mdoi.group(1)
+    parts = _path_segments(url)
+    for part in parts:
+        if _is_hex_token(part):
+            return part
+
+    for index, part in enumerate(parts):
+        lower = part.casefold()
+        if lower.startswith("arxiv:"):
+            candidate = _strip_arxiv_version(part.split(":", 1)[1])
+            if candidate and all(char.isdigit() or char == "." for char in candidate):
+                return "ARXIV:" + candidate
+        if lower == "arxiv" and index + 1 < len(parts):
+            candidate = _strip_arxiv_version(parts[index + 1])
+            if candidate and all(char.isdigit() or char == "." for char in candidate):
+                return "ARXIV:" + candidate
+        if lower.startswith("doi:10."):
+            return "DOI:" + part.split(":", 1)[1]
+        if lower == "doi" and index + 1 < len(parts):
+            candidate = "/".join(parts[index + 1 :]).strip()
+            if candidate.lower().startswith("10."):
+                return "DOI:" + candidate
     return None
 
 
 def _strip_xmlish(text: str) -> str:
-    t = re.sub(r"<[^>]+>", " ", text or "")
-    return re.sub(r"\s+", " ", t).strip()
+    parser = _MarkupStripper()
+    parser.feed(text or "")
+    parser.close()
+    return parser.text()
 
 
 def _payload(
@@ -218,7 +263,7 @@ def fetch_crossref_work(doi: str, *, timeout: float) -> tuple[str, str, str] | N
             parts.append(str(ct[0] if isinstance(ct, list) else ct))
         if msg.get("issued", {}).get("date-parts"):
             parts.append(str(msg["issued"]["date-parts"][0]))
-        abstract = " — ".join(parts) if parts else ""
+        abstract = " - ".join(parts) if parts else ""
 
     url = f"https://doi.org/{doi}"
     authors = msg.get("author") or []
@@ -237,7 +282,7 @@ def fetch_crossref_work(doi: str, *, timeout: float) -> tuple[str, str, str] | N
 
 
 def fetch_semantic_scholar_paper(paper_id: str, *, timeout: float) -> tuple[str, str, str] | None:
-    """Graph API: corpus id, ``ARXIV:…``, ``DOI:…``, etc."""
+    """Graph API: corpus id, ``ARXIV:...``, ``DOI:...``, etc."""
     enc = quote(paper_id, safe="")
     try:
         r = requests.get(

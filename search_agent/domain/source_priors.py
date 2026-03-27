@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 
@@ -93,9 +92,9 @@ _EXACT_ROOT_PRIORS: dict[str, SourcePrior] = {
     ),
 }
 
-_PATTERN_PRIORS: list[tuple[re.Pattern[str], SourcePrior]] = [
+_SEGMENT_PRIORS: list[tuple[frozenset[str], SourcePrior]] = [
     (
-        re.compile(r"(^|\.)(investor|ir|newsroom|press|media)\."),
+        frozenset({"investor", "ir", "newsroom", "press", "media"}),
         SourcePrior(
             source_prior=0.16,
             primary_boost=0.18,
@@ -105,7 +104,7 @@ _PATTERN_PRIORS: list[tuple[re.Pattern[str], SourcePrior]] = [
         ),
     ),
     (
-        re.compile(r"(^|\.)(blog)\."),
+        frozenset({"blog"}),
         SourcePrior(
             source_prior=0.06,
             primary_boost=0.10,
@@ -114,7 +113,7 @@ _PATTERN_PRIORS: list[tuple[re.Pattern[str], SourcePrior]] = [
         ),
     ),
     (
-        re.compile(r"(^|\.)(docs|developer|support|help|learn|cloud)\."),
+        frozenset({"docs", "developer", "support", "help", "learn", "cloud"}),
         SourcePrior(
             source_prior=0.10,
             primary_boost=0.12,
@@ -124,7 +123,7 @@ _PATTERN_PRIORS: list[tuple[re.Pattern[str], SourcePrior]] = [
         ),
     ),
     (
-        re.compile(r"(^|\.)(community|forum|discuss)\."),
+        frozenset({"community", "forum", "discuss"}),
         SourcePrior(
             source_prior=-0.10,
             primary_boost=-0.14,
@@ -160,6 +159,7 @@ def _copy_prior(prior: SourcePrior) -> SourcePrior:
 def lookup_source_prior(host: str) -> SourcePrior:
     normalized_host = (host or "").lower().strip()
     root = _host_root(normalized_host)
+    host_parts = {part for part in normalized_host.split(".") if part}
 
     if normalized_host in _EXACT_ROOT_PRIORS:
         return _copy_prior(_EXACT_ROOT_PRIORS[normalized_host])
@@ -167,8 +167,8 @@ def lookup_source_prior(host: str) -> SourcePrior:
         return _copy_prior(_EXACT_ROOT_PRIORS[root])
 
     merged = SourcePrior()
-    for pattern, prior in _PATTERN_PRIORS:
-        if pattern.search(normalized_host):
+    for labels, prior in _SEGMENT_PRIORS:
+        if labels & host_parts:
             merged.source_prior += prior.source_prior
             merged.primary_boost += prior.primary_boost
             merged.spam_penalty += prior.spam_penalty
