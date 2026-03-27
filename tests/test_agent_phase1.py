@@ -32,7 +32,7 @@ from search_agent.domain.models import (
 
 class AgentPhase1Tests(unittest.TestCase):
     def test_refine_contradiction_only_when_verdict_contradicted(self):
-        """insufficient_evidence must not add refined_contradiction (noisy SERP)."""
+        """Template-free step library no longer manufactures follow-up queries."""
         classification = QueryClassification(
             query="test",
             normalized_query="test",
@@ -61,10 +61,7 @@ class AgentPhase1Tests(unittest.TestCase):
             iteration=1,
             existing_queries=set(),
         )
-        self.assertFalse(
-            any(v.strategy == "refined_contradiction" for v in variants_ie),
-            "insufficient_evidence should not trigger contradiction query refinement",
-        )
+        self.assertEqual(variants_ie, [])
 
         contradicted = VerificationResult(
             verdict="contradicted",
@@ -80,10 +77,7 @@ class AgentPhase1Tests(unittest.TestCase):
             iteration=1,
             existing_queries=set(),
         )
-        self.assertTrue(
-            any(v.strategy == "refined_contradiction" for v in variants_ct),
-            "contradicted should still offer contradiction-focused refinement",
-        )
+        self.assertEqual(variants_ct, [])
 
     def test_query_variants_preserve_entities(self):
         classification = QueryClassification(
@@ -101,15 +95,20 @@ class AgentPhase1Tests(unittest.TestCase):
             needs_freshness=False,
             entity_set=["OpenAI", "GPT-4.1"],
             time_scope="Q1 2026",
+            search_queries=[
+                'OpenAI GPT-4.1 announcement Q1 2026',
+                '"GPT-4.1" OpenAI Q1 2026',
+                "OpenAI GPT-4.1 release notes",
+            ],
         )
 
         variants = build_query_variants(claim, classification)
 
-        self.assertGreaterEqual(len(variants), 4)
+        self.assertEqual(len(variants), 3)
         self.assertEqual(len({variant.query_text for variant in variants}), len(variants))
-        self.assertTrue(any('"OpenAI"' in variant.query_text for variant in variants))
+        self.assertEqual(variants[0].query_text, "OpenAI GPT-4.1 announcement Q1 2026")
+        self.assertEqual(variants[0].strategy, "llm_1")
         self.assertTrue(any("Q1 2026" in variant.query_text for variant in variants))
-        self.assertTrue(any(variant.strategy == "exact_match" for variant in variants))
 
     def test_temporal_event_claim_prioritizes_event_date_queries(self):
         classification = QueryClassification(
@@ -134,10 +133,8 @@ class AgentPhase1Tests(unittest.TestCase):
 
         variants = build_query_variants(claim, classification)
 
-        self.assertEqual(variants[0].strategy, "event_date")
-        self.assertEqual(variants[1].strategy, "event_announcement")
-        self.assertIn("appointment date", variants[0].query_text)
-        self.assertNotIn("2015", variants[0].query_text)
+        self.assertEqual([variant.strategy for variant in variants], ["llm_1", "llm_2", "llm_3"])
+        self.assertEqual(variants[0].query_text, "Satya Nadella CEO Microsoft 2015")
 
     def test_serp_gate_dedupes_and_prefers_official(self):
         claim = Claim(
@@ -280,6 +277,13 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=False,
             entity_set=["Python", "Python 3.13.0"],
+            claim_profile=ClaimProfile(
+                answer_shape="exact_date",
+                primary_source_required=True,
+                min_independent_sources=2,
+                required_dimensions=["time", "source"],
+                focus_terms=["release date", "Python 3.13.0"],
+            ),
         )
         snapshot = SearchSnapshot(
             query="When was Python 3.13.0 released?",
@@ -336,6 +340,13 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=False,
             entity_set=["Python", "Python 3.13.0"],
+            claim_profile=ClaimProfile(
+                answer_shape="exact_date",
+                primary_source_required=True,
+                min_independent_sources=2,
+                required_dimensions=["time", "source"],
+                focus_terms=["release date", "Python 3.13.0"],
+            ),
         )
         passage = Passage(
             passage_id="p1",
@@ -427,6 +438,12 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=False,
             entity_set=["Satya Nadella", "Microsoft"],
+            claim_profile=ClaimProfile(
+                answer_shape="exact_number",
+                required_dimensions=["number", "time"],
+                focus_terms=["room temperature", "named CEO"],
+                strict_contract=True,
+            ),
         )
         verification = VerificationResult(
             verdict="insufficient_evidence",
@@ -463,12 +480,17 @@ class AgentPhase1Tests(unittest.TestCase):
             needs_freshness=True,
             entity_set=["Астане"],
             time_scope="2026-03-25",
+            search_queries=[
+                '"Астане" новости 2026-03-25 site:.kz',
+                '"Астане" события 2026-03-25 site:.kz',
+                'Астане новости 2026-03-25',
+            ],
         )
 
         variants = build_query_variants(claim, classification)
 
-        self.assertGreaterEqual(len(variants), 4)
-        self.assertTrue(all(variant.strategy.startswith("news_digest_") for variant in variants))
+        self.assertEqual(len(variants), 3)
+        self.assertTrue(all(variant.strategy.startswith("llm_") for variant in variants))
         self.assertTrue(any("site:.kz" in variant.query_text for variant in variants))
         self.assertTrue(any("2026-03-25" in variant.query_text for variant in variants))
         self.assertTrue(
@@ -788,6 +810,7 @@ class AgentPhase1Tests(unittest.TestCase):
                         priority=1,
                         needs_freshness=False,
                         entity_set=["Python 3.13.0"],
+                        claim_profile=ClaimProfile(answer_shape="exact_date", required_dimensions=["time"]),
                     ),
                     evidence_bundle=bundle,
                 )
@@ -806,6 +829,12 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=False,
             entity_set=["Satya Nadella", "Microsoft"],
+            claim_profile=ClaimProfile(
+                answer_shape="exact_number",
+                required_dimensions=["number", "time"],
+                focus_terms=["room temperature", "named CEO"],
+                strict_contract=True,
+            ),
         )
         gated = [
             GatedSerpResult(
@@ -865,6 +894,11 @@ class AgentPhase1Tests(unittest.TestCase):
             claim_text="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
             priority=1,
             needs_freshness=False,
+            claim_profile=ClaimProfile(
+                answer_shape="exact_number",
+                required_dimensions=["number"],
+                focus_terms=["boiling point", "Celsius"],
+            ),
         )
         gated = [
             GatedSerpResult(
@@ -962,6 +996,12 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=False,
             entity_set=["Satya Nadella", "Microsoft"],
+            claim_profile=ClaimProfile(
+                answer_shape="exact_date",
+                routing_bias="iterative_loop",
+                required_dimensions=["time"],
+                focus_terms=["named CEO", "2015"],
+            ),
         )
         gated = [
             GatedSerpResult(
@@ -1078,6 +1118,16 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=True,
             entity_set=["MacBook Neo"],
+            claim_profile=ClaimProfile(
+                answer_shape="product_specs",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official", "vendor", "major_media"],
+                routing_bias="iterative_loop",
+                required_dimensions=["source", "specs"],
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+            ),
         )
 
         profile = infer_claim_profile(claim, classification)
@@ -1106,9 +1156,9 @@ class AgentPhase1Tests(unittest.TestCase):
 
         profile = infer_claim_profile(claim, classification)
 
-        self.assertEqual(profile.answer_shape, "product_specs")
-        self.assertTrue(profile.primary_source_required)
-        self.assertTrue(profile.strict_contract)
+        self.assertEqual(profile.answer_shape, "overview")
+        self.assertEqual(profile.min_independent_sources, 2)
+        self.assertEqual(profile.routing_bias, "iterative_loop")
 
     def test_product_specs_query_variants_prioritize_spec_queries(self):
         classification = QueryClassification(
@@ -1124,6 +1174,11 @@ class AgentPhase1Tests(unittest.TestCase):
             priority=1,
             needs_freshness=True,
             entity_set=["MacBook Neo"],
+            search_queries=[
+                '"MacBook Neo" technical specifications',
+                '"MacBook Neo" features price',
+                '"MacBook Neo" announcement specs',
+            ],
             claim_profile=ClaimProfile(
                 answer_shape="product_specs",
                 primary_source_required=True,
@@ -1139,7 +1194,7 @@ class AgentPhase1Tests(unittest.TestCase):
         variants = build_query_variants(claim, classification)
 
         self.assertGreaterEqual(len(variants), 3)
-        self.assertEqual([variant.strategy for variant in variants[:3]], ["product_technical", "product_features", "product_announcement"])
+        self.assertEqual([variant.strategy for variant in variants[:3]], ["llm_1", "llm_2", "llm_3"])
 
     def test_product_specs_query_variants_extract_topic_and_keep_llm_backup(self):
         classification = QueryClassification(
@@ -1172,8 +1227,7 @@ class AgentPhase1Tests(unittest.TestCase):
 
         variants = build_query_variants(claim, classification)
 
-        self.assertIn('"macbook neo"', variants[0].query_text.casefold())
-        self.assertNotIn("какие характеистики", variants[0].query_text.casefold())
+        self.assertEqual(variants[0].query_text, "MacBook Neo specifications 2026")
         self.assertTrue(any(variant.strategy == "llm_1" for variant in variants[:3]))
 
     def test_product_specs_bundle_tracks_contract_gaps(self):

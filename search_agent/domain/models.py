@@ -31,6 +31,7 @@ class ClaimProfile:
     preferred_domain_types: list[DomainType] = field(default_factory=list)
     routing_bias: RouteMode | None = None
     required_dimensions: list[str] = field(default_factory=list)
+    focus_terms: list[str] = field(default_factory=list)
     allow_synthesis_without_primary: bool = True
     strict_contract: bool = False
 

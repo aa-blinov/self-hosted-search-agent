@@ -35,6 +35,19 @@ class QueryIntelligencePort(Protocol):
     def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
         ...
 
+    def refine_search_queries(
+        self,
+        claim: Claim,
+        classification: QueryClassification,
+        verification: VerificationResult,
+        gated_results: list[GatedSerpResult],
+        bundle: EvidenceBundle | None,
+        next_iteration: int,
+        existing_queries: set[str],
+        log=None,
+    ) -> list[str]:
+        ...
+
 
 class SearchGatewayPort(Protocol):
     def search_variant(self, query: str, profile, log=None) -> list[SearchSnapshot]:

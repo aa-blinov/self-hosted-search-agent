@@ -9,48 +9,32 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.output import PromptedOutput
 
-from search_agent.domain.models import Claim, EvidenceSpan, Passage, QueryClassification, VerificationResult
+from search_agent.domain.models import (
+    Claim,
+    ClaimProfile,
+    DomainType,
+    EvidenceBundle,
+    EvidenceSpan,
+    GatedSerpResult,
+    Passage,
+    QueryClassification,
+    VerificationResult,
+)
 
 from search_agent.application.text_heuristics import (
     clamp,
     extract_entities,
     extract_region_hint,
     extract_time_scope,
-    heuristic_verifier,
-    is_news_digest_query,
     needs_freshness,
     normalize_relative_time_references,
     normalized_text,
-    should_decompose,
 )
 from search_agent import tuning
 from search_agent.infrastructure.llm_log import log_llm_call, output_char_len
 from search_agent.infrastructure.pydantic_ai_factory import _is_reasoning_model, build_model_settings, build_openai_model
 from search_agent.infrastructure.telemetry import configure_logfire
 from search_agent.settings import AppSettings
-
-
-def _is_official_python_doc_url(url: str) -> bool:
-    u = (url or "").lower()
-    if "docs.python.org" in u:
-        return True
-    if "blog.python.org" in u:
-        return True
-    if "python.org" in u and any(
-        p in u
-        for p in (
-            "/whatsnew/",
-            "/library/",
-            "/tutorial/",
-            "/reference/",
-            "/using/",
-            "/glossary/",
-            "/dev/peps/",
-            "/downloads/release/",
-        )
-    ):
-        return True
-    return False
 
 
 def _extract_citation_indices(answer: str) -> list[int]:
@@ -253,13 +237,92 @@ def _post_adjust_verification(claim: Claim, passages: list[Passage], result: Ver
     )
 
 
+def _default_intent_decision() -> "_IntentOutput":
+    return _IntentOutput(intent="factual", complexity="single_hop", search_queries=[])
+
+
+def _default_verification(reason: str) -> VerificationResult:
+    return VerificationResult(
+        verdict="insufficient_evidence",
+        confidence=0.0,
+        missing_dimensions=["coverage"],
+        rationale=reason,
+    )
+
+
+def _claim_profile_lines(claim: Claim) -> list[str]:
+    profile = claim.claim_profile
+    if profile is None:
+        return [
+            "answer_shape=fact",
+            "primary_source_required=False",
+            "min_independent_sources=1",
+            "preferred_domain_types=",
+            "required_dimensions=",
+            "focus_terms=",
+            "strict_contract=False",
+        ]
+    return [
+        f"answer_shape={profile.answer_shape}",
+        f"primary_source_required={profile.primary_source_required}",
+        f"min_independent_sources={profile.min_independent_sources}",
+        f"preferred_domain_types={','.join(profile.preferred_domain_types)}",
+        f"required_dimensions={','.join(profile.required_dimensions)}",
+        f"focus_terms={','.join(profile.focus_terms)}",
+        f"strict_contract={profile.strict_contract}",
+    ]
+
+
+def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passages: int, max_chars: int) -> str:
+    prompt_lines: list[str] = []
+    for passage in passages[:max_passages]:
+        text = normalized_text((passage.text or "")[:max_chars])
+        prompt_lines.append(
+            f"[{passage.passage_id}] {passage.title} | {passage.url}\n"
+            f"Section: {passage.section}\n"
+            f"Text: {text}"
+        )
+    return (
+        "Verify the claim against the retrieved evidence.\n"
+        "Use the claim contract. Do not invent facts. Use only the provided passages.\n"
+        "For open-ended claims, collective coverage across multiple passages is allowed.\n"
+        "If the contract requires a primary source or multiple independent sources and the evidence set does not satisfy that contract, return insufficient_evidence.\n"
+        "Return supporting_passages and contradicting_passages with short quotes.\n"
+        "Use missing_dimensions from time, entity, number, location, source, coverage.\n\n"
+        f"Claim: {claim.claim_text}\n"
+        "Claim contract:\n"
+        + "\n".join(_claim_profile_lines(claim))
+        + "\n\nPassages:\n\n"
+        + "\n\n".join(prompt_lines)
+    )
+
+
+def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
+    if result.verdict == "supported" and result.confidence < 0.05:
+        return replace(result, confidence=max(result.confidence, 0.38))
+    return result
+
+
 class _NormalizedQueryOutput(BaseModel):
     normalized_query: str = Field(min_length=1)
 
 
 class _IntentOutput(BaseModel):
     intent: Literal["factual", "synthesis", "news_digest"]
+    complexity: Literal["single_hop", "multi_hop"] = "single_hop"
     search_queries: list[str] = Field(default_factory=list)
+
+
+class _ClaimProfileOutput(BaseModel):
+    answer_shape: Literal["fact", "exact_date", "exact_number", "product_specs", "overview", "comparison", "news_digest"]
+    primary_source_required: bool = False
+    min_independent_sources: int = 1
+    preferred_domain_types: list[Literal["official", "academic", "vendor", "major_media", "forum", "unknown"]] = Field(default_factory=list)
+    routing_bias: Literal["short_path", "targeted_retrieval", "iterative_loop"] | None = None
+    required_dimensions: list[str] = Field(default_factory=list)
+    focus_terms: list[str] = Field(default_factory=list)
+    allow_synthesis_without_primary: bool = True
+    strict_contract: bool = False
 
 
 class _ClaimDraft(BaseModel):
@@ -269,6 +332,7 @@ class _ClaimDraft(BaseModel):
     entity_set: list[str] = Field(default_factory=list)
     time_scope: str | None = None
     search_queries: list[str] = Field(default_factory=list)
+    claim_profile: _ClaimProfileOutput | None = None
 
 
 class _ClaimDecompositionOutput(BaseModel):
@@ -293,8 +357,8 @@ class _VerificationOutput(BaseModel):
     rationale: str = ""
 
 
-class _RefinedQueryOutput(BaseModel):
-    query: str = ""
+class _RefinedQueriesOutput(BaseModel):
+    queries: list[str] = Field(default_factory=list)
 
 
 
@@ -313,6 +377,7 @@ class PydanticAIQueryIntelligence:
         # Cache for query generation: populated by _classify_intent_llm alongside intent,
         # consumed by decompose_claims to avoid a second LLM round-trip.
         self._query_cache: dict[str, list[str]] = {}
+        self._classification_cache: dict[str, _IntentOutput] = {}
 
         # Reasoning models (gpt-oss, o1, o3, o4) don't support JSON schema / tool calls
         # reliably — use PromptedOutput so the schema is injected in the system prompt
@@ -340,10 +405,44 @@ class PydanticAIQueryIntelligence:
             retries=1,
             instrument=True,
             system_prompt=(
-                "Break user requests into atomic factual claims or subquestions. "
-                "Preserve exact named entities and do not invent facts. "
-                "For each claim also generate 3-5 short keyword search queries (no question words) "
-                "that would retrieve evidence from the web."
+                "Plan a grounded search run for a user query.\n"
+                "Return 1 to 4 claims. Use a single claim when decomposition is unnecessary.\n"
+                "Preserve named entities exactly and do not invent facts.\n"
+                "For each claim return:\n"
+                "- claim_text\n"
+                "- priority\n"
+                "- needs_freshness\n"
+                "- entity_set\n"
+                "- time_scope\n"
+                "- search_queries: 3 to 5 short keyword queries for web search\n"
+                "- claim_profile describing the retrieval contract\n"
+                "\n"
+                "claim_profile rules:\n"
+                "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
+                "- primary_source_required should be true for leadership roles, official status, releases, product specs, and fresh vendor facts\n"
+                "- min_independent_sources should usually be 2; use 3 for news digests; use 1 only for trivial stable facts\n"
+                "- preferred_domain_types should favor official/academic/vendor/major_media as appropriate\n"
+                "- routing_bias should be iterative_loop for synthesis, product specs, comparisons, and news digests\n"
+                "- required_dimensions should reflect what the answer must cover, e.g. time / number / source / specs\n"
+                "- focus_terms should contain 2 to 6 short evidence phrases that must be present in useful passages\n"
+                "- strict_contract should be true when the answer must not be produced without meeting the evidence contract\n"
+                "\n"
+                "Critical semantic rules:\n"
+                "- Never rewrite a features/specifications/характеристики request into an existence-check claim.\n"
+                "- If the user asks for features, specifications, technical characteristics, price/options, or an overview of a product/model, keep that information need intact and use answer_shape=product_specs.\n"
+                "- If the user asks for an explanation, comparison, or overview, keep it open-ended and use answer_shape=overview or comparison.\n"
+                "- Intent hints may be wrong; preserve the actual information need from the user request.\n"
+                "\n"
+                "Examples:\n"
+                "- 'Какие характеристики нового MacBook Neo?' -> one claim about the product specifications, not about whether it exists.\n"
+                "- 'Какие характеистики нового macbook neo?' -> still a product specifications claim.\n"
+                "- 'MacBook Neo specs' -> product_specs.\n"
+                "\n"
+                "Search query rules:\n"
+                "- keyword phrases only, no question wording\n"
+                "- match the user's language; add one English query when the input is non-English and the topic is global\n"
+                "- avoid boilerplate fillers\n"
+                "- include time scope or year when relevant"
             ),
         )
         self._query_gen_agent = Agent(
@@ -397,6 +496,7 @@ class PydanticAIQueryIntelligence:
             instrument=True,
             system_prompt=(
                 "Task 1 — classify intent (pick exactly one: factual / synthesis / news_digest).\n"
+                "Task 2 — classify complexity (pick exactly one: single_hop / multi_hop).\n"
                 "\n"
                 "  factual    — single verifiable fact: who/when/is-it-true/specific number or date.\n"
                 "               Examples: 'Who is CEO of Microsoft?' | 'When was Python 3.13 released?'\n"
@@ -407,12 +507,18 @@ class PydanticAIQueryIntelligence:
                 "               Examples: 'What are new features in Python 3.13?' | 'How does asyncio work?'\n"
                 "                         'MacBook Pro M4 specs?' | 'Погода в Астане?' | 'Bitcoin price today'\n"
                 "                         'USD/EUR exchange rate?' | 'Pros and cons of Docker?'\n"
+                "                         'Какие характеристики нового MacBook Neo?' | 'Какие характеистики нового macbook neo?'\n"
+                "               Treat product/specification requests as synthesis even for a single entity.\n"
                 "\n"
                 "  news_digest — recent events, news feed, what's happening.\n"
                 "               Examples: 'Latest news on Iran?' | 'What happened in AI this week?'\n"
                 "                         'Последние новости из Казахстана' | 'How is Ukraine war going?'\n"
                 "\n"
-                "Task 2 — generate 3 to 5 short keyword search queries.\n"
+                "Complexity guidance:\n"
+                "  single_hop  — one claim is enough to answer the request.\n"
+                "  multi_hop   — multiple independent claims or subquestions are needed.\n"
+                "\n"
+                "Task 3 — generate 3 to 5 short keyword search queries.\n"
                 "  Rules: keyword phrases only (no question words); match input language;\n"
                 "  add one English query when input is non-English; max 8 words each;\n"
                 "  vary specificity (broad / quoted entity / key terms); include year if relevant."
@@ -424,13 +530,14 @@ class PydanticAIQueryIntelligence:
         # SAFE-inspired: generates one focused search query from the verifier's rationale.
         self._refiner_agent = Agent(
             self._model,
-            output_type=_out(_RefinedQueryOutput),
+            output_type=_out(_RefinedQueriesOutput),
             retries=1,
             instrument=True,
             system_prompt=(
-                "Generate one focused web search query (max 12 words) that would find "
-                "the missing evidence described by the verifier. "
-                "Return only the query field. No quotes, no explanation."
+                "Generate 1 to 3 focused follow-up web search queries.\n"
+                "Use the claim, retrieval contract, verifier rationale, and current evidence context.\n"
+                "Return only short keyword queries that would find the missing evidence.\n"
+                "Do not repeat existing queries. No explanations."
             ),
         )
     def classify_query(self, query: str, log=None) -> QueryClassification:
@@ -438,13 +545,14 @@ class PydanticAIQueryIntelligence:
         region_hint = extract_region_hint(normalized_query)
         time_scope = extract_time_scope(normalized_query)
         freshness = needs_freshness(query)
-        intent = self._classify_intent_llm(
+        decision = self._classify_intent_llm(
             normalized_query,
             region_hint=region_hint,
             freshness=freshness,
             log=log,
         )
-        complexity = "multi_hop" if should_decompose(normalized_query) else "single_hop"
+        intent = decision.intent
+        complexity = decision.complexity
         entities = extract_entities(normalized_query)
         entity_disambiguation = any(len(entity) <= 4 for entity in entities)
         return QueryClassification(
@@ -465,23 +573,22 @@ class PydanticAIQueryIntelligence:
         region_hint: str | None = None,
         freshness: bool = False,
         log=None,
-    ) -> str:
-        """Classify intent via LLM: factual | synthesis | news_digest.
+    ) -> _IntentOutput:
+        """Classify query via LLM.
 
         Falls back to heuristic (is_news_digest_query → 'news_digest', else 'factual')
         when LLM is disabled or on error.
         """
         log = log or (lambda msg: None)
 
-        # Fast-path: return cached result for identical normalized queries.
-        cached = self._intent_cache.get(normalized_query)
+        cached = self._classification_cache.get(normalized_query)
         if cached is not None:
-            log(f"  [dim green]-> intent cache hit: [italic]{cached}[/italic][/dim green]")
+            log(f"  [dim green]-> intent cache hit: [italic]{cached.intent}[/italic][/dim green]")
             return cached
 
         if not self._enabled:
             # No LLM available — fall back to heuristic.
-            return "news_digest" if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness) else "factual"
+            return _default_intent_decision()
 
         model_settings = build_model_settings(
             self._settings,
@@ -503,35 +610,37 @@ class PydanticAIQueryIntelligence:
                         model_settings=model_settings,
                     )
                 metrics.output_chars = output_char_len(result.output)
-            intent = result.output.intent
-            # Store queries generated alongside intent — avoids a second LLM call in decompose_claims.
-            queries = [q.strip() for q in result.output.search_queries if q.strip()]
+            decision = result.output
+            queries = [q.strip() for q in decision.search_queries if q.strip()]
             if queries:
                 self._query_cache[normalized_query] = queries[:6]
+            self._classification_cache[normalized_query] = decision
         except Exception as exc:
             log(f"  [dim yellow]-> intent classification failed: {exc}[/dim yellow]")
-            intent = "news_digest" if is_news_digest_query(normalized_query, region_hint=region_hint, freshness=freshness) else "factual"
+            decision = _default_intent_decision()
+            self._classification_cache[normalized_query] = decision
 
-        self._intent_cache[normalized_query] = intent
-        return intent
+        self._intent_cache[normalized_query] = decision.intent
+        return decision
 
     def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
         log = log or (lambda msg: None)
-        # Both synthesis and news_digest are open-ended: skip sub-claim decomposition.
-        # news_digest additionally gets synthesize_answer in use_cases.py (same as synthesis).
-        if classification.intent in ("synthesis", "news_digest") and tuning.SYNTHESIS_SKIP_DECOMPOSE:
-            log(f"  [dim]-> {classification.intent} intent: single-claim search (no decomposition)[/dim]")
-            queries = self._get_or_generate_queries(classification, log)
-            return self._fallback_claims(classification, search_queries=queries)
-        if not self._enabled or not should_decompose(classification.normalized_query):
+        if not self._enabled:
             queries = self._get_or_generate_queries(classification, log)
             return self._fallback_claims(classification, search_queries=queries)
 
         prompt = (
             "Return JSON with one key `claims`.\n"
-            "Each claim must have: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries.\n"
-            "search_queries: 3-5 short keyword queries (no question words) to retrieve evidence for this claim.\n"
-            "Keep claims atomic, exact, and capped at 4.\n\n"
+            "Each claim must include: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
+            "claim_profile must include: answer_shape, primary_source_required, min_independent_sources, "
+            "preferred_domain_types, routing_bias, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
+            "Keep claims atomic, exact, and capped at 4.\n"
+            "Return one claim when the request is already atomic.\n\n"
+            f"Intent: {classification.intent}\n"
+            f"Complexity: {classification.complexity}\n"
+            f"Needs freshness: {classification.needs_freshness}\n"
+            f"Time scope: {classification.time_scope or ''}\n"
+            f"Region hint: {classification.region_hint or ''}\n"
             f"User request: {classification.normalized_query}"
         )
         try:
@@ -553,6 +662,7 @@ class PydanticAIQueryIntelligence:
                 metrics.output_chars = output_char_len(result.output)
             claims = []
             for idx, item in enumerate(result.output.claims[:4], 1):
+                claim_profile = self._claim_profile_from_output(item.claim_profile, classification)
                 claims.append(
                     Claim(
                         claim_id=f"claim-{idx}",
@@ -566,10 +676,11 @@ class PydanticAIQueryIntelligence:
                         ] or extract_entities(item.claim_text),
                         time_scope=normalized_text(item.time_scope) if item.time_scope else extract_time_scope(item.claim_text),
                         search_queries=[q.strip() for q in (item.search_queries or []) if q.strip()],
+                        claim_profile=claim_profile,
                     )
                 )
             return claims or self._fallback_claims(classification)
-        except Exception:
+        except Exception as exc:
             log("  [dim yellow]→ fallback: single claim from query[/dim yellow]")
             return self._fallback_claims(classification)
 
@@ -628,28 +739,10 @@ class PydanticAIQueryIntelligence:
         def finalize(vr: VerificationResult) -> VerificationResult:
             return _post_adjust_verification(claim, passages, vr)
 
-        if is_news_digest_query(
-            claim.claim_text,
-            region_hint=extract_region_hint(claim.claim_text) or (claim.entity_set[0] if claim.entity_set else None),
-            freshness=bool(claim.needs_freshness or claim.time_scope),
-        ):
-            return finalize(heuristic_verifier(claim, passages))
         if not self._enabled:
-            return finalize(heuristic_verifier(claim, passages))
+            return finalize(_default_verification("LLM verifier unavailable."))
 
-        prompt_lines = []
-        for passage in passages[:8]:
-            prompt_lines.append(
-                f"[{passage.passage_id}] {passage.title} | {passage.url}\n"
-                f"Section: {passage.section}\n"
-                f"Text: {passage.text}"
-            )
-        prompt = (
-            "Classify the claim as supported, contradicted, or insufficient_evidence.\n"
-            "Return supporting_passages and contradicting_passages with short quotes.\n"
-            "Use missing_dimensions from time, entity, number, location, source, coverage.\n\n"
-            f"Claim: {claim.claim_text}\n\n" + "\n\n".join(prompt_lines)
-        )
+        prompt = _build_verifier_prompt(claim, passages, max_passages=8, max_chars=900)
         cached = self._verify_cache.get(prompt)
         if cached is not None:
             log(f"  [dim green]-> verify_claim cache hit ({len(prompt)} chars)[/dim green]")
@@ -709,8 +802,71 @@ class PydanticAIQueryIntelligence:
             self._verify_cache[prompt] = verification
             return verification
         except Exception:
-            log("  [dim yellow]→ fallback: heuristic verifier[/dim yellow]")
-            return finalize(heuristic_verifier(claim, passages))
+            log("  [dim yellow]-> verify_claim primary pass failed[/dim yellow]")
+            log("  [dim yellow]-> verify_claim primary pass failed[/dim yellow]")
+
+        rescue_prompt = _build_verifier_prompt(claim, passages, max_passages=4, max_chars=450)
+        rescue_cached = self._verify_cache.get(rescue_prompt)
+        if rescue_cached is not None:
+            log(f"  [dim green]-> verify_claim rescue cache hit ({len(rescue_prompt)} chars)[/dim green]")
+            return rescue_cached
+        try:
+            with log_llm_call(
+                log,
+                task="verify_claim_rescue",
+                model=self._settings.llm_model,
+                detail=f"{claim.claim_id}: {claim.claim_text}",
+                input_chars=len(rescue_prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.verify_claim_rescue", claim_id=claim.claim_id):
+                    result = self._verifier_agent.run_sync(
+                        rescue_prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_verify_claim_max_tokens(),
+                            temperature=0,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
+            output = result.output
+            passage_map = {passage.passage_id: passage for passage in passages}
+
+            def build_rescue_spans(items: list[_EvidenceQuote]) -> list[EvidenceSpan]:
+                spans = []
+                for item in items:
+                    passage = passage_map.get(item.passage_id)
+                    if passage is None:
+                        continue
+                    quote = normalized_text(item.quote) or passage.text[:220]
+                    spans.append(
+                        EvidenceSpan(
+                            passage_id=passage.passage_id,
+                            url=passage.url,
+                            title=passage.title,
+                            section=passage.section,
+                            text=quote,
+                        )
+                    )
+                return spans
+
+            verification = finalize(
+                VerificationResult(
+                    verdict=output.verdict,
+                    confidence=clamp(output.confidence),
+                    supporting_spans=build_rescue_spans(output.supporting_passages),
+                    contradicting_spans=build_rescue_spans(output.contradicting_passages),
+                    missing_dimensions=[
+                        normalized_text(item)
+                        for item in output.missing_dimensions
+                        if normalized_text(item)
+                    ],
+                    rationale=normalized_text(output.rationale),
+                )
+            )
+            self._verify_cache[rescue_prompt] = verification
+            return verification
+        except Exception as rescue_exc:
+            log(f"  [dim yellow]-> verify_claim rescue failed: {rescue_exc}[/dim yellow]")
+            return finalize(_default_verification("LLM verifier failed after retry."))
 
     def synthesize_answer(self, query: str, passages: list[Passage], log=None, intent: str = "synthesis") -> str:
         """Generate a direct answer for comparison/synthesis queries from collected passages.
@@ -805,38 +961,101 @@ class PydanticAIQueryIntelligence:
             log(f"  [dim yellow]→ synthesize_answer failed: {exc}[/dim yellow]")
             return ""
 
-    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
-        """SAFE-inspired: generate one targeted search query from verifier rationale.
-
-        Only fires on iter2+ when evidence was insufficient. Adds a single LLM-driven
-        variant conditioned on *why* the verifier said evidence was missing, rather
-        than relying solely on categorical missing_dimensions labels.
-        """
+    def refine_search_queries(
+        self,
+        claim: Claim,
+        classification: QueryClassification,
+        verification: VerificationResult,
+        gated_results: list[GatedSerpResult],
+        bundle: EvidenceBundle | None,
+        next_iteration: int,
+        existing_queries: set[str],
+        log=None,
+    ) -> list[str]:
         log = log or (lambda msg: None)
-        if not self._enabled or not rationale:
-            return None
+        if not self._enabled:
+            return []
+
+        evidence_lines: list[str] = []
+        for idx, result in enumerate(gated_results[:6], 1):
+            evidence_lines.append(
+                f"{idx}. {result.serp.title} | {result.serp.url} | domain={result.assessment.domain_type} | source_score={result.assessment.source_score:.2f}"
+            )
+        profile = claim.claim_profile
+        profile_lines = [
+            f"answer_shape={profile.answer_shape}" if profile else "answer_shape=fact",
+            f"primary_source_required={profile.primary_source_required}" if profile else "primary_source_required=False",
+            f"min_independent_sources={profile.min_independent_sources}" if profile else "min_independent_sources=1",
+            f"preferred_domain_types={','.join(profile.preferred_domain_types)}" if profile and profile.preferred_domain_types else "preferred_domain_types=",
+            f"required_dimensions={','.join(profile.required_dimensions)}" if profile and profile.required_dimensions else "required_dimensions=",
+            f"focus_terms={','.join(profile.focus_terms)}" if profile and profile.focus_terms else "focus_terms=",
+            f"strict_contract={profile.strict_contract}" if profile else "strict_contract=False",
+        ]
         prompt = (
-            f"Claim: {claim_text}\n"
-            f"Verifier concluded: {rationale}\n"
-            "What single search query would find the missing evidence?"
+            f"Claim: {claim.claim_text}\n"
+            f"Intent: {classification.intent}\n"
+            f"Iteration: {next_iteration}\n"
+            f"Needs freshness: {claim.needs_freshness}\n"
+            f"Time scope: {claim.time_scope or ''}\n"
+            "Claim contract:\n"
+            + "\n".join(profile_lines)
+            + "\n\nVerifier verdict: "
+            + verification.verdict
+            + f"\nMissing dimensions: {', '.join(verification.missing_dimensions) or 'none'}"
+            + f"\nRationale: {verification.rationale or 'none'}"
+            + f"\nExisting queries: {', '.join(sorted(existing_queries)) or 'none'}"
+            + "\nTop current evidence:\n"
+            + ("\n".join(evidence_lines) if evidence_lines else "none")
         )
         try:
             with log_llm_call(
                 log,
-                task="suggest_rationale_query",
+                task="refine_search_queries",
                 model=self._settings.llm_model,
-                detail=claim_text,
+                detail=claim.claim_text,
                 input_chars=len(prompt),
-            ):
-                model_settings = build_model_settings(self._settings, max_tokens=80, temperature=0)
-                result = self._refiner_agent.run_sync(prompt, model_settings=model_settings)
-            query = (result.output.query or "").strip().strip('"').strip("'")
-            if query:
-                log(f"  [dim]-> rationale_guided: {query}[/dim]")
-            return query or None
+            ) as metrics:
+                result = self._refiner_agent.run_sync(
+                    prompt,
+                    model_settings=self._model_settings(max_tokens=160, temperature=0),
+                )
+                metrics.output_chars = output_char_len(result.output)
+            queries: list[str] = []
+            seen = {query.casefold() for query in existing_queries}
+            for candidate in result.output.queries:
+                query_text = normalized_text(candidate)
+                if not query_text:
+                    continue
+                key = query_text.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                queries.append(query_text)
+                log(f"  [dim]-> llm_refined_query: {query_text}[/dim]")
+            return queries[:3]
         except Exception as exc:
-            log(f"  [dim]LLM SKIP suggest_rationale_query: {exc}[/dim]")
-            return None
+            log(f"  [dim yellow]-> refine_search_queries failed: {exc}[/dim yellow]")
+            return []
+
+    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
+        classification = QueryClassification(
+            query=claim_text,
+            normalized_query=claim_text,
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+        queries = self.refine_search_queries(
+            Claim(claim_id="claim-1", claim_text=claim_text, priority=1, needs_freshness=False),
+            classification,
+            VerificationResult(verdict="insufficient_evidence", rationale=rationale),
+            gated_results=[],
+            bundle=None,
+            next_iteration=2,
+            existing_queries=set(),
+            log=log,
+        )
+        return queries[0] if queries else None
 
     def _normalize_time_references(self, query: str, log=None) -> str:
         log = log or (lambda msg: None)
@@ -890,6 +1109,7 @@ class PydanticAIQueryIntelligence:
         classification: QueryClassification,
         search_queries: list[str] | None = None,
     ) -> list[Claim]:
+        answer_shape = "news_digest" if classification.intent == "news_digest" else "overview" if classification.intent == "synthesis" else "fact"
         return [
             Claim(
                 claim_id="claim-1",
@@ -899,8 +1119,46 @@ class PydanticAIQueryIntelligence:
                 entity_set=extract_entities(classification.normalized_query),
                 time_scope=classification.time_scope,
                 search_queries=search_queries or [],
+                claim_profile=ClaimProfile(
+                    answer_shape=answer_shape,
+                    primary_source_required=False,
+                    min_independent_sources=3 if classification.intent == "news_digest" else 2 if classification.intent == "synthesis" else 1,
+                    preferred_domain_types=["major_media", "official", "vendor"] if classification.intent == "news_digest" else ["official", "academic", "vendor", "major_media"],
+                    routing_bias="iterative_loop" if classification.intent in {"synthesis", "news_digest"} else None,
+                    required_dimensions=["time", "source"] if classification.intent == "news_digest" else [],
+                    focus_terms=[],
+                    allow_synthesis_without_primary=classification.intent != "factual",
+                    strict_contract=False,
+                ),
             )
         ]
+
+    @staticmethod
+    def _claim_profile_from_output(
+        output: _ClaimProfileOutput | None,
+        classification: QueryClassification,
+    ) -> ClaimProfile:
+        if output is None:
+            answer_shape = "news_digest" if classification.intent == "news_digest" else "overview" if classification.intent == "synthesis" else "fact"
+            return ClaimProfile(answer_shape=answer_shape)
+        preferred_domain_types = [
+            domain
+            for domain in output.preferred_domain_types
+            if domain in {"official", "academic", "vendor", "major_media", "forum", "unknown"}
+        ]
+        return ClaimProfile(
+            answer_shape=output.answer_shape,
+            primary_source_required=bool(output.primary_source_required),
+            min_independent_sources=max(1, int(output.min_independent_sources or 1)),
+            preferred_domain_types=preferred_domain_types or (
+                ["major_media", "official", "vendor"] if output.answer_shape == "news_digest" else ["official", "academic", "vendor", "major_media"]
+            ),
+            routing_bias=output.routing_bias,
+            required_dimensions=[normalized_text(value) for value in output.required_dimensions if normalized_text(value)],
+            focus_terms=[normalized_text(value) for value in output.focus_terms if normalized_text(value)],
+            allow_synthesis_without_primary=bool(output.allow_synthesis_without_primary),
+            strict_contract=bool(output.strict_contract),
+        )
 
     def _model_settings(self, *, max_tokens: int, temperature: float):
         return build_model_settings(

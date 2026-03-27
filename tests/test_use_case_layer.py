@@ -58,6 +58,19 @@ class _FakeIntelligence:
         self.synthesize_calls += 1
         return "Synthesized answer"
 
+    def refine_search_queries(
+        self,
+        claim,
+        classification,
+        verification,
+        gated_results,
+        bundle,
+        next_iteration,
+        existing_queries,
+        log=None,
+    ):
+        return []
+
 
 class _FakeSearchGateway:
     def __init__(self):
@@ -344,6 +357,16 @@ class _FakeSynthesisIntelligence(_FakeIntelligence):
                 priority=1,
                 needs_freshness=True,
                 entity_set=["MacBook Neo"],
+                claim_profile=ClaimProfile(
+                    answer_shape="product_specs",
+                    primary_source_required=True,
+                    min_independent_sources=2,
+                    preferred_domain_types=["official", "vendor", "major_media"],
+                    routing_bias="iterative_loop",
+                    required_dimensions=["source", "specs"],
+                    allow_synthesis_without_primary=False,
+                    strict_contract=True,
+                ),
             )
         ]
 

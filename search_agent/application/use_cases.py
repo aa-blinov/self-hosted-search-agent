@@ -21,6 +21,8 @@ from search_agent.application.contracts import (
     StepLibraryPort,
 )
 
+_OPEN_ENDED_ANSWER_SHAPES = {"product_specs", "overview", "comparison", "news_digest"}
+
 
 def _passage_domain_key(passage) -> str:
     host = (getattr(passage, "host", None) or "").casefold()
@@ -89,6 +91,25 @@ def _claim_run_allows_synthesis(claim_run: ClaimRun) -> bool:
     return True
 
 
+def _reconcile_classification_with_claims(classification, claims: list) -> object:
+    if not claims:
+        return classification
+    answer_shapes = {
+        claim.claim_profile.answer_shape
+        for claim in claims
+        if getattr(claim, "claim_profile", None) is not None
+    }
+    intent = classification.intent
+    if "news_digest" in answer_shapes:
+        intent = "news_digest"
+    elif answer_shapes & _OPEN_ENDED_ANSWER_SHAPES:
+        intent = "synthesis"
+    complexity = "multi_hop" if len(claims) > 1 else classification.complexity
+    if intent == classification.intent and complexity == classification.complexity:
+        return classification
+    return replace(classification, intent=intent, complexity=complexity)
+
+
 def _merge_gated_results(existing: list[GatedSerpResult], new_results: list[GatedSerpResult]) -> list[GatedSerpResult]:
     by_url: dict[str, GatedSerpResult] = {}
     for result in existing + new_results:
@@ -154,13 +175,7 @@ class SearchAgentUseCase:
             claims = self._intelligence.decompose_claims(classification, log=log)
             if tuning.DECOMPOSE_MAX_CLAIMS > 0:
                 claims = claims[:tuning.DECOMPOSE_MAX_CLAIMS]
-            claims = [
-                replace(
-                    claim,
-                    claim_profile=self._steps.infer_claim_profile(claim, classification),
-                )
-                for claim in claims
-            ]
+            classification = _reconcile_classification_with_claims(classification, claims)
             log(f"\n[bold]Agent Search[/bold] [dim]{len(claims)} claim(s)[/dim]")
 
             provider = get_settings().resolved_search_provider()
@@ -467,7 +482,7 @@ class SearchAgentUseCase:
             if self._steps.should_stop_claim_loop(claim, bundle, iteration):
                 break
 
-            next_variants = self._steps.refine_query_variants(
+            next_queries = self._intelligence.refine_search_queries(
                 claim,
                 classification,
                 verification,
@@ -475,6 +490,14 @@ class SearchAgentUseCase:
                 bundle,
                 iteration + 1,
                 existing_queries,
+                log=log,
+            )
+            if not next_queries:
+                next_variants = []
+                continue
+            next_variants = self._steps.build_query_variants(
+                replace(claim, search_queries=next_queries),
+                classification,
             )
 
         claim_run = ClaimRun(

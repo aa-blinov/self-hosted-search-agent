@@ -7,6 +7,8 @@ from search_agent.infrastructure.intelligence import (
     PydanticAIQueryIntelligence,
     _ClaimDecompositionOutput,
     _ClaimDraft,
+    _ClaimProfileOutput,
+    _IntentOutput,
     _NormalizedQueryOutput,
     _VerificationOutput,
     _EvidenceQuote,
@@ -20,7 +22,7 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="OpenAI revenue 2026-03-25"):
             with patch.object(service._normalize_agent, "run_sync") as normalize_call:
-                with patch.object(service, "_classify_intent_llm", return_value="factual"):
+                with patch.object(service, "_classify_intent_llm", return_value=_IntentOutput(intent="factual", complexity="single_hop")):
                     classification = service.classify_query("OpenAI revenue today")
 
         self.assertEqual(classification.normalized_query, "OpenAI revenue 2026-03-25")
@@ -31,7 +33,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
 
         with patch("search_agent.infrastructure.intelligence.normalize_relative_time_references", return_value="что 2026-03-25 было в Астане"):
-            with patch.object(service, "_classify_intent_llm", return_value="news_digest"):
+            with patch.object(service, "_classify_intent_llm", return_value=_IntentOutput(intent="news_digest", complexity="single_hop")):
                 classification = service.classify_query("что сегодня было в Астане")
 
         self.assertEqual(classification.intent, "news_digest")
@@ -67,6 +69,11 @@ class IntelligenceLayerTests(unittest.TestCase):
                             needs_freshness=False,
                             entity_set=["OpenAI"],
                             time_scope="2025",
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="exact_number",
+                                required_dimensions=["number"],
+                                focus_terms=["revenue", "2025"],
+                            ),
                         ),
                         _ClaimDraft(
                             claim_text="Microsoft revenue in 2025",
@@ -74,6 +81,11 @@ class IntelligenceLayerTests(unittest.TestCase):
                             needs_freshness=False,
                             entity_set=["Microsoft"],
                             time_scope="2025",
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="exact_number",
+                                required_dimensions=["number"],
+                                focus_terms=["revenue", "2025"],
+                            ),
                         ),
                     ]
                 )
@@ -86,6 +98,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(len(claims), 2)
         self.assertEqual(claims[0].entity_set, ["OpenAI"])
         self.assertEqual(claims[1].entity_set, ["Microsoft"])
+        self.assertEqual(claims[0].claim_profile.focus_terms, ["revenue", "2025"])
 
     def test_verify_claim_maps_structured_quotes_to_spans(self):
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
@@ -174,7 +187,7 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(verification.verdict, "supported")
         self.assertGreaterEqual(verification.confidence, 0.38)
 
-    def test_verify_claim_boosts_insufficient_when_official_python_docs(self) -> None:
+    def test_verify_claim_preserves_llm_insufficient_without_template_boost(self) -> None:
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(
             claim_id="claim-1",
@@ -215,11 +228,10 @@ class IntelligenceLayerTests(unittest.TestCase):
         with patch.object(service._verifier_agent, "run_sync", return_value=result):
             verification = service.verify_claim(claim, [passage])
 
-        self.assertEqual(verification.verdict, "supported")
-        self.assertGreaterEqual(verification.confidence, 0.46)
-        self.assertTrue(verification.supporting_spans)
+        self.assertEqual(verification.verdict, "insufficient_evidence")
+        self.assertEqual(verification.supporting_spans, [])
 
-    def test_verify_claim_boosts_insufficient_for_role_identity_question(self) -> None:
+    def test_verify_claim_uses_rescue_llm_pass_when_primary_fails(self) -> None:
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(
             claim_id="claim-1",
@@ -248,23 +260,23 @@ class IntelligenceLayerTests(unittest.TestCase):
             (),
             {
                 "output": _VerificationOutput(
-                    verdict="insufficient_evidence",
-                    confidence=0.2,
-                    supporting_passages=[],
-                    rationale="Need clearer entity attribution.",
+                    verdict="supported",
+                    confidence=0.72,
+                    supporting_passages=[_EvidenceQuote(passage_id="p-role", quote="Chief Executive Officer of Microsoft")],
+                    rationale="Official leadership page directly names the CEO.",
                 )
             },
         )()
 
-        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+        with patch.object(service._verifier_agent, "run_sync", side_effect=[RuntimeError("provider error"), result]):
             verification = service.verify_claim(claim, [passage])
 
         self.assertEqual(verification.verdict, "supported")
-        self.assertGreaterEqual(verification.confidence, 0.46)
+        self.assertGreaterEqual(verification.confidence, 0.72)
         self.assertTrue(verification.supporting_spans)
         self.assertIn("Chief Executive Officer of Microsoft", verification.supporting_spans[0].text)
 
-    def test_verify_claim_boosts_insufficient_when_python_release_page(self) -> None:
+    def test_verify_claim_returns_default_insufficient_after_double_failure(self) -> None:
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(
             claim_id="claim-1",
@@ -288,25 +300,11 @@ class IntelligenceLayerTests(unittest.TestCase):
             source_score=0.9,
             utility_score=0.3,
         )
-        result = type(
-            "Result",
-            (),
-            {
-                "output": _VerificationOutput(
-                    verdict="insufficient_evidence",
-                    confidence=0.2,
-                    supporting_passages=[],
-                    rationale="Need clearer quote.",
-                )
-            },
-        )()
-
-        with patch.object(service._verifier_agent, "run_sync", return_value=result):
+        with patch.object(service._verifier_agent, "run_sync", side_effect=[RuntimeError("provider error"), RuntimeError("provider error")]):
             verification = service.verify_claim(claim, [passage])
 
-        self.assertEqual(verification.verdict, "supported")
-        self.assertGreaterEqual(verification.confidence, 0.46)
-        self.assertTrue(verification.supporting_spans)
+        self.assertEqual(verification.verdict, "insufficient_evidence")
+        self.assertIn("after retry", verification.rationale)
 
     def test_synthesize_answer_news_digest_keeps_four_source_footer_entries(self) -> None:
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
