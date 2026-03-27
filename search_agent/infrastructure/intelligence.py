@@ -249,8 +249,10 @@ class PydanticAIQueryIntelligence:
             system_prompt=(
                 "Task 1 — classify intent (pick exactly one):\n"
                 "  factual: single verifiable fact (who/when/is-it-true/specific number or date).\n"
-                "  synthesis: explanation, comparison, how-to, overview, list of features/changes/differences.\n"
+                "  synthesis: list of specs/features/characteristics, explanation, comparison,\n"
+                "             how-to, overview, enumeration of changes or differences.\n"
                 "  news_digest: recent events or news feed.\n"
+                "  Rule: 'what are the X of Y' or 'what characteristics/features' → synthesis.\n"
                 "Task 2 — generate 3 to 5 short keyword search queries.\n"
                 "  Rules: keyword phrases only (no question words); match input language;\n"
                 "  add one English query when input is non-English; max 8 words each;\n"
