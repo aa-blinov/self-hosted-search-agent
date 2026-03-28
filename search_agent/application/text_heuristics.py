@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from search_agent.domain.models import Claim, EvidenceSpan, Passage, VerificationResult
+from search_agent.domain.models import Passage
 
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
@@ -377,95 +377,6 @@ def host_root(host: str) -> str:
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return host
-
-
-def heuristic_verifier(claim: Claim, passages: list[Passage]) -> VerificationResult:
-    if not passages:
-        return VerificationResult(
-            verdict="insufficient_evidence",
-            confidence=0.1,
-            missing_dimensions=["source"],
-            rationale="No passages were available for verification.",
-        )
-
-    strong = [passage for passage in passages if passage.utility_score >= 0.35]
-    region_hint = extract_region_hint(claim.claim_text) or (claim.entity_set[0] if claim.entity_set else None)
-    if is_news_digest_query(
-        claim.claim_text,
-        region_hint=region_hint,
-        freshness=bool(claim.needs_freshness or claim.time_scope),
-    ):
-        digest_support = [
-            passage
-            for passage in passages
-            if passage.utility_score >= 0.25
-            and (not region_hint or _soft_text_match(region_hint, f"{passage.title} {passage.text}"))
-            and _time_scope_matches_passage(claim.time_scope, passage)
-        ]
-        if len(digest_support) >= 2 and len({host_root(p.host) for p in digest_support[:4]}) >= 2:
-            supporting = [
-                EvidenceSpan(
-                    passage_id=passage.passage_id,
-                    url=passage.url,
-                    title=passage.title,
-                    section=passage.section,
-                    text=passage.text[:220],
-                )
-                for passage in digest_support[:4]
-            ]
-            return VerificationResult(
-                verdict="supported",
-                confidence=0.55,
-                supporting_spans=supporting,
-                rationale="Multiple independent reports align on the requested place/time scope.",
-            )
-
-    if len(strong) >= 2 and len({host_root(p.host) for p in strong[:3]}) >= 2:
-        supporting = [
-            EvidenceSpan(
-                passage_id=passage.passage_id,
-                url=passage.url,
-                title=passage.title,
-                section=passage.section,
-                text=passage.text[:220],
-            )
-            for passage in strong[:3]
-        ]
-        return VerificationResult(
-            verdict="supported",
-            confidence=0.6,
-            supporting_spans=supporting,
-            rationale="Multiple passages from independent sources align with the claim.",
-        )
-
-    missing: list[str] = []
-    if claim.time_scope and not any(claim.time_scope.casefold() in passage.text.casefold() for passage in passages):
-        missing.append("time")
-    if claim.entity_set and not any(
-        entity.casefold() in passage.text.casefold()
-        for entity in claim.entity_set
-        for passage in passages
-    ):
-        missing.append("entity")
-    if has_digit(claim.claim_text) and not any(has_digit(passage.text) for passage in passages):
-        missing.append("number")
-
-    return VerificationResult(
-        verdict="insufficient_evidence",
-        confidence=0.35,
-        supporting_spans=[
-            EvidenceSpan(
-                passage_id=passage.passage_id,
-                url=passage.url,
-                title=passage.title,
-                section=passage.section,
-                text=passage.text[:220],
-            )
-            for passage in strong[:2]
-        ],
-        missing_dimensions=missing or ["coverage"],
-        rationale="Evidence is partial or does not fully cover the claim scope.",
-    )
 
 
 def _iter_word_spans(text: str) -> list[_WordSpan]:

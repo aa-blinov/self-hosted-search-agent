@@ -2,8 +2,8 @@
 Unified routing of URL → fetch strategy for shallow payloads and article plaintext.
 
 Handlers are tried **in order**. First handler whose :meth:`supports` is true owns the URL;
-:meth:`fetch_shallow` may return ``None`` to fall through to the next handler (e.g. Wikipedia
-REST miss → generic HTML). Generic HTTP + trafilatura stays in :mod:`extractor`.
+:meth:`fetch_shallow` may return ``None`` to fall through to the next handler. Generic HTTP +
+trafilatura stays in :mod:`extractor`.
 """
 
 from __future__ import annotations
@@ -24,11 +24,6 @@ from search_agent.infrastructure.scholarly_sources import (
     parse_semanticscholar_paper_id,
     scholarly_plaintext,
     semantic_scholar_shallow_payload,
-)
-from search_agent.infrastructure.wikipedia_api import (
-    parse_wikipedia_article_url,
-    wikipedia_extract_plaintext,
-    wikipedia_shallow_payload,
 )
 from search_agent.settings import get_settings
 
@@ -187,36 +182,6 @@ class RedditSourceHandler:
             "schema_org": {},
             "content": summary,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class WikipediaSourceHandler:
-    """MediaWiki REST summary API — lead text, no HTML scrape."""
-
-    id: str = "wikipedia"
-
-    def supports(self, url: str) -> bool:
-        return parse_wikipedia_article_url(url) is not None
-
-    def fetch_shallow(
-        self,
-        url: str,
-        *,
-        max_chars: int,
-        timeout: float,
-        log: LogFn,
-    ) -> dict | None:
-        if not self.supports(url):
-            return None
-        return wikipedia_shallow_payload(url, max_chars=max_chars, timeout=timeout, log=log)
-
-    def supports_plaintext(self, url: str) -> bool:
-        return self.supports(url)
-
-    def fetch_plaintext(self, url: str, *, timeout: float) -> str | None:
-        if not self.supports_plaintext(url):
-            return None
-        return wikipedia_extract_plaintext(url, timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True)
