@@ -129,7 +129,7 @@ class ClaimPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(adjusted.confidence, 0.62)
         self.assertEqual(len(adjusted.supporting_spans), 2)
 
-    def test_post_adjust_verification_promotes_simple_fact_with_strong_multi_source_support(self) -> None:
+    def test_post_adjust_verification_keeps_simple_fact_insufficient_without_explicit_support(self) -> None:
         claim = Claim(
             claim_id="claim-1",
             claim_text="Is the IRS a U.S. government agency?",
@@ -186,9 +186,8 @@ class ClaimPolicyTests(unittest.TestCase):
 
         adjusted = post_adjust_verification(claim, passages, result)
 
-        self.assertEqual(adjusted.verdict, "supported")
-        self.assertGreaterEqual(adjusted.confidence, 0.66)
-        self.assertEqual(len(adjusted.supporting_spans), 2)
+        self.assertEqual(adjusted.verdict, "insufficient_evidence")
+        self.assertEqual(adjusted.supporting_spans, [])
 
     def test_should_stop_claim_loop_respects_strict_contract(self) -> None:
         claim = Claim(

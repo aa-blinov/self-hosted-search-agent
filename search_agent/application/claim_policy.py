@@ -10,7 +10,6 @@ from search_agent.domain.models import Claim, ClaimProfile, EvidenceBundle, Evid
 _LIST_LIKE_DIMENSIONS = {"feature_list", "improvements", "changes", "highlights", "options"}
 _RETRIEVAL_DRIVEN_SHAPES = {"product_specs", "overview", "comparison", "news_digest"}
 _OPEN_ENDED_STOP_SHAPES = {"overview", "comparison", "news_digest"}
-_SIMPLE_FACT_BLOCKED_DIMENSIONS = {"time", "date", "number", "location", "price", "source"}
 
 
 def claim_profile_lines(claim: Claim) -> list[str]:
@@ -99,35 +98,6 @@ def claim_focus_terms(claim: Claim) -> tuple[str, ...]:
         seen.add(key)
         ordered.append(term)
     return tuple(ordered)
-
-
-def _host_root(host: str) -> str:
-    parts = [part for part in (host or "").casefold().split(".") if part and part != "www"]
-    if len(parts) <= 2:
-        return ".".join(parts)
-    if parts[-2] in {"co", "com", "org", "net"} and len(parts[-1]) == 2:
-        return ".".join(parts[-3:])
-    return ".".join(parts[-2:])
-
-
-def _simple_fact_contract(profile: ClaimProfile | None) -> bool:
-    if profile is None or profile.answer_shape != "fact":
-        return False
-    return not any(
-        blocked in dimension.casefold()
-        for dimension in profile.required_dimensions
-        for blocked in _SIMPLE_FACT_BLOCKED_DIMENSIONS
-    )
-
-
-def _passage_support_floor(passage: Passage) -> float:
-    return max(passage.utility_score, passage.source_score)
-
-
-def _supporting_text(passage: Passage) -> str:
-    title = normalized_text(passage.title)
-    text = normalized_text((passage.text or "")[:260])
-    return f"{title} {text}".strip()
 
 
 def claim_contract_gaps(
@@ -256,56 +226,5 @@ def post_adjust_verification(claim: Claim, passages: list[Passage], result: Veri
                 confidence=max(result.confidence, 0.62),
                 supporting_spans=supporting,
                 missing_dimensions=[],
-            )
-    if (
-        result.verdict == "insufficient_evidence"
-        and _simple_fact_contract(profile)
-        and not claim.needs_freshness
-        and set(result.missing_dimensions or ()) <= {"source", "coverage"}
-        and not result.contradicting_spans
-        and result.confidence >= 0.55
-    ):
-        robust = sorted(
-            [
-                passage
-                for passage in passages
-                if _passage_support_floor(passage) >= 0.35
-            ],
-            key=lambda passage: (_passage_support_floor(passage), passage.source_score),
-            reverse=True,
-        )
-        selected: list[Passage] = []
-        seen_hosts: set[str] = set()
-        for passage in robust:
-            root = _host_root(passage.host)
-            if root and root in seen_hosts:
-                continue
-            selected.append(passage)
-            if root:
-                seen_hosts.add(root)
-            if len(selected) >= 2:
-                break
-        has_primary_like_source = any(passage.source_score >= 0.66 for passage in selected)
-        if len(selected) >= 2 and len(seen_hosts) >= 2 and has_primary_like_source:
-            supporting = [
-                EvidenceSpan(
-                    passage_id=passage.passage_id,
-                    url=passage.url,
-                    title=passage.title,
-                    section=passage.section,
-                    text=_supporting_text(passage),
-                )
-                for passage in selected[:2]
-            ]
-            rationale = (result.rationale or "").strip()
-            suffix = "Adjusted: simple factual classification is sufficiently supported by multiple robust passages."
-            merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
-            return replace(
-                result,
-                verdict="supported",
-                confidence=max(result.confidence, 0.66),
-                supporting_spans=supporting,
-                missing_dimensions=[],
-                rationale=merged_rationale,
             )
     return result
