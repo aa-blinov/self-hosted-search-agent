@@ -4,12 +4,10 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
-from urllib.parse import urlparse
 
 import logfire
 
 from search_agent import tuning
-from search_agent.application import policy_tuning
 from search_agent.infrastructure.caching_search_gateway import CachingBudgetSearchGateway
 from search_agent.settings import get_settings
 from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, GatedSerpResult, QueryVariant, RoutingDecision
@@ -21,159 +19,13 @@ from search_agent.application.contracts import (
     SearchGatewayPort,
     StepLibraryPort,
 )
-
-_OPEN_ENDED_ANSWER_SHAPES = {"product_specs", "overview", "comparison", "news_digest"}
-
-
-def _passage_domain_key(passage) -> str:
-    host = (getattr(passage, "host", None) or "").casefold()
-    if not host:
-        host = urlparse(getattr(passage, "url", "") or "").netloc.casefold()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
-
-
-def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> list:
-    if limit <= 0:
-        return []
-    max_per_url = (
-        policy_tuning.NEWS_DIGEST_REPEAT_PASSAGES_PER_URL
-        if intent == "news_digest"
-        else policy_tuning.DEFAULT_REPEAT_PASSAGES_PER_URL
-    )
-    max_per_domain = (
-        policy_tuning.NEWS_DIGEST_REPEAT_PASSAGES_PER_DOMAIN
-        if intent == "news_digest"
-        else policy_tuning.DEFAULT_REPEAT_PASSAGES_PER_DOMAIN
-    )
-    primary_url_limit = (
-        policy_tuning.NEWS_DIGEST_PRIMARY_PASSAGES_PER_URL
-        if intent == "news_digest"
-        else policy_tuning.DEFAULT_PRIMARY_PASSAGES_PER_URL
-    )
-    primary_domain_limit = (
-        policy_tuning.NEWS_DIGEST_PRIMARY_PASSAGES_PER_DOMAIN
-        if intent == "news_digest"
-        else policy_tuning.DEFAULT_PRIMARY_PASSAGES_PER_DOMAIN
-    )
-
-    selected: list = []
-    url_counts: dict[str, int] = {}
-    domain_counts: dict[str, int] = {}
-
-    for passage in passages:
-        url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
-        domain = _passage_domain_key(passage) or url
-        if url and url_counts.get(url, 0) >= primary_url_limit:
-            continue
-        if domain and domain_counts.get(domain, 0) >= primary_domain_limit:
-            continue
-        if url:
-            url_counts[url] = primary_url_limit
-        if domain:
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-        selected.append(passage)
-        if len(selected) >= limit:
-            return selected
-
-    for passage in passages:
-        url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
-        domain = _passage_domain_key(passage) or url
-        if url and url_counts.get(url, 0) >= max_per_url:
-            continue
-        if domain and domain_counts.get(domain, 0) >= max_per_domain:
-            continue
-        if url:
-            url_counts[url] = url_counts.get(url, 0) + 1
-        if domain:
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-        selected.append(passage)
-        if len(selected) >= limit:
-            break
-    return selected
-
-
-def _claim_run_allows_synthesis(claim_run: ClaimRun) -> bool:
-    bundle = claim_run.evidence_bundle
-    if bundle is None or bundle.verification is None:
-        return False
-    if bundle.verification.verdict != "supported":
-        profile = claim_run.claim.claim_profile
-        if profile is None:
-            return False
-        if profile.answer_shape == "news_digest":
-            fetched_urls = {
-                getattr(document, "canonical_url", None) or getattr(document, "url", None)
-                for document in claim_run.fetched_documents
-                if getattr(document, "canonical_url", None) or getattr(document, "url", None)
-            }
-            return bool(
-                bundle.considered_passages
-                and (
-                    bundle.independent_source_count >= policy_tuning.NEWS_DIGEST_MIN_SYNTHESIS_SOURCES
-                    or len(fetched_urls) >= policy_tuning.NEWS_DIGEST_MIN_FETCHED_URLS
-                )
-            )
-        if profile.strict_contract:
-            return bundle.contract_satisfied and bool(bundle.considered_passages)
-        return bool(profile.allow_synthesis_without_primary and bundle.considered_passages)
-    profile = claim_run.claim.claim_profile
-    if profile is None:
-        return True
-    if profile.strict_contract:
-        return bundle.contract_satisfied
-    if profile.primary_source_required and not profile.allow_synthesis_without_primary and not bundle.has_primary_source:
-        return False
-    return True
-
-
-def _reconcile_classification_with_claims(classification, claims: list) -> object:
-    if not claims:
-        return classification
-    answer_shapes = {
-        claim.claim_profile.answer_shape
-        for claim in claims
-        if getattr(claim, "claim_profile", None) is not None
-    }
-    intent = classification.intent
-    if "news_digest" in answer_shapes:
-        intent = "news_digest"
-    elif answer_shapes & _OPEN_ENDED_ANSWER_SHAPES:
-        intent = "synthesis"
-    complexity = "multi_hop" if len(claims) > 1 else classification.complexity
-    if intent == classification.intent and complexity == classification.complexity:
-        return classification
-    return replace(classification, intent=intent, complexity=complexity)
-
-
-def _merge_gated_results(existing: list[GatedSerpResult], new_results: list[GatedSerpResult]) -> list[GatedSerpResult]:
-    by_url: dict[str, GatedSerpResult] = {}
-    for result in existing + new_results:
-        key = result.serp.canonical_url or result.serp.url
-        current = by_url.get(key)
-        if current is None:
-            by_url[key] = result
-            continue
-        current_rank = (
-            current.assessment.primary_source_likelihood,
-            current.assessment.source_score,
-        )
-        next_rank = (
-            result.assessment.primary_source_likelihood,
-            result.assessment.source_score,
-        )
-        if next_rank > current_rank:
-            by_url[key] = result
-    merged = list(by_url.values())
-    merged.sort(
-        key=lambda result: (
-            result.assessment.primary_source_likelihood,
-            result.assessment.source_score,
-        ),
-        reverse=True,
-    )
-    return merged
+from search_agent.application.use_case_support import (
+    claim_run_allows_synthesis as _claim_run_allows_synthesis,
+    extend_audit as _extend_audit,
+    merge_gated_results as _merge_gated_results,
+    reconcile_classification_with_claims as _reconcile_classification_with_claims,
+    select_synthesis_passages as _select_synthesis_passages,
+)
 
 
 class SearchAgentUseCase:
@@ -260,7 +112,7 @@ class SearchAgentUseCase:
                             page_cache_lock=page_cache_lock,
                         )
                     claim_runs.append(claim_run)
-                    self._extend_audit(audit, claim_run, iterations_used)
+                    _extend_audit(audit, claim_run, iterations_used)
             else:
                 future_to_idx: dict[Future, int] = {}
                 with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -284,7 +136,7 @@ class SearchAgentUseCase:
                     assert row is not None
                     claim_run, iterations_used = row
                     claim_runs.append(claim_run)
-                    self._extend_audit(audit, claim_run, iterations_used)
+                    _extend_audit(audit, claim_run, iterations_used)
 
             report = AgentRunResult(
                 user_query=query,
@@ -366,6 +218,171 @@ class SearchAgentUseCase:
                 page_cache_lock=page_cache_lock,
             )
 
+    def _search_iteration_snapshots(
+        self,
+        next_variants,
+        profile,
+        search_gateway,
+        log,
+    ) -> list:
+        new_snapshots = []
+        with ThreadPoolExecutor(max_workers=min(len(next_variants), 6)) as serp_pool:
+            future_to_variant = {
+                serp_pool.submit(search_gateway.search_variant, variant.query_text, profile, log): variant
+                for variant in next_variants
+            }
+            for future in as_completed(future_to_variant):
+                variant = future_to_variant[future]
+                variant_snapshots = future.result()
+                new_snapshots.extend(
+                    self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots
+                )
+        return new_snapshots
+
+    def _route_iteration(
+        self,
+        claim,
+        classification,
+        gated_results,
+        bundle: EvidenceBundle | None,
+        iteration: int,
+        reported_routing_decision: RoutingDecision,
+    ) -> tuple[RoutingDecision, RoutingDecision]:
+        base_routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
+        if base_routing_decision.mode != "iterative_loop":
+            reported_routing_decision = base_routing_decision
+
+        routing_decision = base_routing_decision
+        profile_contract = claim.claim_profile
+        if (
+            profile_contract is not None
+            and profile_contract.answer_shape == "exact_number"
+            and profile_contract.strict_contract
+            and profile_contract.routing_bias == "iterative_loop"
+        ):
+            routing_decision = replace(
+                routing_decision,
+                mode="iterative_loop",
+                rationale=routing_decision.rationale + " | strict exact-number contract",
+            )
+        if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
+            routing_decision = replace(
+                routing_decision,
+                mode="iterative_loop",
+                rationale=routing_decision.rationale + " | synthesis requires broader retrieval",
+            )
+        if bundle and bundle.verification and bundle.verification.verdict != "supported":
+            if routing_decision.mode == "short_path":
+                routing_decision = replace(
+                    routing_decision,
+                    mode="targeted_retrieval",
+                    rationale=routing_decision.rationale + " | escalated after weak verification",
+                )
+            elif iteration > 1:
+                routing_decision = replace(
+                    routing_decision,
+                    mode="iterative_loop",
+                    rationale=routing_decision.rationale + " | iterative escalation",
+                )
+        return routing_decision, reported_routing_decision
+
+    def _fetch_iteration_documents(
+        self,
+        claim,
+        classification,
+        profile,
+        routing_decision,
+        gated_results,
+        *,
+        seen_urls,
+        seen_documents,
+        documents,
+        log,
+        iteration: int,
+        page_cache=None,
+        page_cache_lock=None,
+    ) -> list:
+        new_fetch_plans, new_documents = self._fetch_gateway.fetch_claim_documents(
+            claim,
+            gated_results,
+            profile,
+            routing_decision,
+            seen_urls=seen_urls,
+            log=log,
+            iteration=iteration,
+            page_cache=page_cache,
+            page_cache_lock=page_cache_lock,
+            intent=classification.intent,
+        )
+        for document in new_documents:
+            key = (document.url, document.fetch_depth, document.content_hash)
+            if key in seen_documents:
+                continue
+            seen_documents.add(key)
+            seen_urls.add(document.url)
+            documents.append(document)
+        return new_fetch_plans
+
+    def _collect_iteration_passages(self, claim, documents, log) -> list:
+        passage_documents = self._steps.documents_for_passage_extraction(documents)
+        passages = []
+        for document in passage_documents:
+            passages.extend(self._steps.split_into_passages(document))
+
+        cheap_filtered = self._steps.cheap_passage_filter(claim, passages)
+        final_passages = self._steps.utility_rerank_passages(claim, cheap_filtered)
+        log(
+            f"  [dim]passages: {len(passages)} total | "
+            f"{len(cheap_filtered)} after cheap filter | "
+            f"{len(final_passages)} after utility rerank[/dim]"
+        )
+        return final_passages
+
+    def _verify_iteration_bundle(
+        self,
+        claim,
+        final_passages,
+        all_gated_results,
+        log,
+    ) -> EvidenceBundle:
+        verification = self._intelligence.verify_claim(claim, final_passages, log=log)
+        bundle = self._steps.build_evidence_bundle(claim, final_passages, verification, all_gated_results)
+        log(
+            f"  [dim]verdict={verification.verdict} | "
+            f"confidence={verification.confidence:.2f} | "
+            f"independent_sources={bundle.independent_source_count}[/dim]"
+        )
+        return bundle
+
+    def _refine_iteration_variants(
+        self,
+        claim,
+        classification,
+        bundle: EvidenceBundle,
+        all_gated_results,
+        existing_queries,
+        iteration: int,
+        log,
+    ) -> list[QueryVariant]:
+        verification = bundle.verification
+        assert verification is not None
+        next_queries = self._intelligence.refine_search_queries(
+            claim,
+            classification,
+            verification,
+            all_gated_results,
+            bundle,
+            iteration + 1,
+            existing_queries,
+            log=log,
+        )
+        if not next_queries:
+            return []
+        return self._steps.build_query_variants(
+            replace(claim, search_queries=next_queries),
+            classification,
+        )
+
     def _run_claim(
         self,
         claim,
@@ -382,7 +399,6 @@ class SearchAgentUseCase:
 
         all_variants = []
         snapshots = []
-        gated_results = []
         all_gated_results: list[GatedSerpResult] = []
         fetch_plans = []
         documents = []
@@ -415,59 +431,25 @@ class SearchAgentUseCase:
                 existing_queries.add(variant.query_text.casefold())
             all_variants.extend(next_variants)
 
-            new_snapshots = []
-            with ThreadPoolExecutor(max_workers=min(len(next_variants), 6)) as serp_pool:
-                future_to_variant = {
-                    serp_pool.submit(search_gateway.search_variant, v.query_text, profile, log): v
-                    for v in next_variants
-                }
-                for future in as_completed(future_to_variant):
-                    variant = future_to_variant[future]
-                    variant_snapshots = future.result()
-                    new_snapshots.extend(
-                        self._steps.retag_snapshot(snapshot, variant) for snapshot in variant_snapshots
-                    )
-
+            new_snapshots = self._search_iteration_snapshots(
+                next_variants,
+                profile,
+                search_gateway,
+                log,
+            )
             snapshots.extend(new_snapshots)
 
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             all_gated_results = _merge_gated_results(all_gated_results, gated_results)
-            base_routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
-            if base_routing_decision.mode != "iterative_loop":
-                reported_routing_decision = base_routing_decision
-            routing_decision = base_routing_decision
-            profile_contract = claim.claim_profile
-            if (
-                profile_contract is not None
-                and profile_contract.answer_shape == "exact_number"
-                and profile_contract.strict_contract
-                and profile_contract.routing_bias == "iterative_loop"
-            ):
-                routing_decision = replace(
-                    routing_decision,
-                    mode="iterative_loop",
-                    rationale=routing_decision.rationale + " | strict exact-number contract",
-                )
-            if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
-                routing_decision = replace(
-                    routing_decision,
-                    mode="iterative_loop",
-                    rationale=routing_decision.rationale + " | synthesis requires broader retrieval",
-                )
-            if bundle and bundle.verification and bundle.verification.verdict != "supported":
-                if routing_decision.mode == "short_path":
-                    routing_decision = replace(
-                        routing_decision,
-                        mode="targeted_retrieval",
-                        rationale=routing_decision.rationale + " | escalated after weak verification",
-                    )
-                elif iteration > 1:
-                    routing_decision = replace(
-                        routing_decision,
-                        mode="iterative_loop",
-                        rationale=routing_decision.rationale + " | iterative escalation",
-                    )
+            routing_decision, reported_routing_decision = self._route_iteration(
+                claim,
+                classification,
+                gated_results,
+                bundle,
+                iteration,
+                reported_routing_decision,
+            )
 
             log(
                 f"  [dim]route={routing_decision.mode} | "
@@ -477,47 +459,32 @@ class SearchAgentUseCase:
             )
             log(f"  [dim]SERP gate kept {len(gated_results)} URLs[/dim]")
 
-            new_fetch_plans, new_documents = self._fetch_gateway.fetch_claim_documents(
+            fetch_plans.extend(
+                self._fetch_iteration_documents(
+                    claim,
+                    classification,
+                    profile,
+                    routing_decision,
+                    gated_results,
+                    seen_urls=seen_urls,
+                    seen_documents=seen_documents,
+                    documents=documents,
+                    log=log,
+                    iteration=iteration,
+                    page_cache=page_cache,
+                    page_cache_lock=page_cache_lock,
+                )
+            )
+
+            final_passages = self._collect_iteration_passages(claim, documents, log)
+            bundle = self._verify_iteration_bundle(
                 claim,
-                gated_results,
-                profile,
-                routing_decision,
-                seen_urls=seen_urls,
-                log=log,
-                iteration=iteration,
-                page_cache=page_cache,
-                page_cache_lock=page_cache_lock,
-                intent=classification.intent,
+                final_passages,
+                all_gated_results,
+                log,
             )
-            fetch_plans.extend(new_fetch_plans)
-            for document in new_documents:
-                key = (document.url, document.fetch_depth, document.content_hash)
-                if key in seen_documents:
-                    continue
-                seen_documents.add(key)
-                seen_urls.add(document.url)
-                documents.append(document)
-
-            passage_documents = self._steps.documents_for_passage_extraction(documents)
-            passages = []
-            for document in passage_documents:
-                passages.extend(self._steps.split_into_passages(document))
-
-            cheap_filtered = self._steps.cheap_passage_filter(claim, passages)
-            final_passages = self._steps.utility_rerank_passages(claim, cheap_filtered)
-            log(
-                f"  [dim]passages: {len(passages)} total | "
-                f"{len(cheap_filtered)} after cheap filter | "
-                f"{len(final_passages)} after utility rerank[/dim]"
-            )
-
-            verification = self._intelligence.verify_claim(claim, final_passages, log=log)
-            bundle = self._steps.build_evidence_bundle(claim, final_passages, verification, all_gated_results)
-            log(
-                f"  [dim]verdict={verification.verdict} | "
-                f"confidence={verification.confidence:.2f} | "
-                f"independent_sources={bundle.independent_source_count}[/dim]"
-            )
+            verification = bundle.verification
+            assert verification is not None
 
             if (
                 verification.verdict == "contradicted"
@@ -536,22 +503,14 @@ class SearchAgentUseCase:
             if self._steps.should_stop_claim_loop(claim, bundle, iteration):
                 break
 
-            next_queries = self._intelligence.refine_search_queries(
+            next_variants = self._refine_iteration_variants(
                 claim,
                 classification,
-                verification,
-                all_gated_results,
                 bundle,
-                iteration + 1,
+                all_gated_results,
                 existing_queries,
-                log=log,
-            )
-            if not next_queries:
-                next_variants = []
-                continue
-            next_variants = self._steps.build_query_variants(
-                replace(claim, search_queries=next_queries),
-                classification,
+                iteration,
+                log,
             )
 
         final_routing_decision = routing_decision
@@ -575,27 +534,3 @@ class SearchAgentUseCase:
             routing_decision=final_routing_decision,
         )
         return claim_run, iterations_used
-
-    @staticmethod
-    def _extend_audit(audit: AuditTrail, claim_run: ClaimRun, iterations_used: int) -> None:
-        claim = claim_run.claim
-        bundle = claim_run.evidence_bundle
-        audit.query_variants.extend(claim_run.query_variants)
-        audit.serp_snapshots.extend(claim_run.search_snapshots)
-        audit.selected_urls.extend([result.serp.url for result in claim_run.gated_results])
-        audit.crawl_events.extend(
-            {
-                "claim_id": claim.claim_id,
-                "url": document.url,
-                "fetched_at": document.extracted_at,
-                "content_hash": document.content_hash,
-                "fetch_depth": document.fetch_depth,
-            }
-            for document in claim_run.fetched_documents
-        )
-        audit.passage_ids.extend([passage.passage_id for passage in claim_run.passages])
-        audit.claim_to_passages[claim.claim_id] = [passage.passage_id for passage in claim_run.passages]
-        audit.claim_iterations[claim.claim_id] = iterations_used
-        if bundle and bundle.verification:
-            audit.verification_results[claim.claim_id] = bundle.verification
-            audit.final_verdicts[claim.claim_id] = bundle.verification.verdict
