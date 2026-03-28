@@ -1,0 +1,132 @@
+{
+  "classification": {
+    "query": "Is the IRS a U.S. government agency?",
+    "normalized_query": "Is the IRS a U.S. government agency?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Is the IRS a U.S. government agency?",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["IRS", "Internal Revenue Service"],
+      "search_queries": ["IRS official definition U.S. government agency Treasury Department"],
+      "claim_profile": {
+        "answer_shape": "fact",
+        "primary_source_required": true,
+        "min_independent_sources": 2,
+        "preferred_domain_types": ["official"]
+      }
+    }
+  ],
+  "search": {
+    "IRS official definition U.S. government agency Treasury Department": [
+      {
+        "query": "IRS official definition U.S. government agency Treasury Department",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-irs-1",
+            "title": "Internal Revenue Service",
+            "url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "snippet": "The Internal Revenue Service is a bureau of the Department of the Treasury.",
+            "canonical_url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "host": "www.usa.gov",
+            "position": 1
+          },
+          {
+            "result_id": "r-irs-2",
+            "title": "Treasury Bureaus",
+            "url": "https://home.treasury.gov/about/bureaus",
+            "snippet": "The Internal Revenue Service is one of the bureaus within the U.S. Department of the Treasury.",
+            "canonical_url": "https://home.treasury.gov/about/bureaus",
+            "host": "home.treasury.gov",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "reason": "official agency directory",
+            "source_score": 0.96
+          },
+          {
+            "depth": "deep",
+            "url": "https://home.treasury.gov/about/bureaus",
+            "reason": "official treasury bureaus page",
+            "source_score": 0.97
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-irs-usa",
+            "url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "canonical_url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "host": "www.usa.gov",
+            "title": "Internal Revenue Service",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-irs-usa-hash",
+            "content": "The Internal Revenue Service is a bureau of the Department of the Treasury and is part of the U.S. federal government.",
+            "fetch_depth": "deep",
+            "source_score": 0.96
+          },
+          {
+            "doc_id": "doc-irs-treasury",
+            "url": "https://home.treasury.gov/about/bureaus",
+            "canonical_url": "https://home.treasury.gov/about/bureaus",
+            "host": "home.treasury.gov",
+            "title": "Treasury Bureaus",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-irs-treasury-hash",
+            "content": "The Internal Revenue Service is one of the bureaus within the U.S. Department of the Treasury.",
+            "fetch_depth": "deep",
+            "source_score": 0.97
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "supported",
+        "confidence": 0.95,
+        "supporting_spans": [
+          {
+            "passage_id": "doc-irs-usa:0:0",
+            "url": "https://www.usa.gov/agencies/internal-revenue-service",
+            "title": "Internal Revenue Service",
+            "section": "Intro",
+            "text": "The Internal Revenue Service is a bureau of the Department of the Treasury and is part of the U.S. federal government."
+          },
+          {
+            "passage_id": "doc-irs-treasury:0:0",
+            "url": "https://home.treasury.gov/about/bureaus",
+            "title": "Treasury Bureaus",
+            "section": "Intro",
+            "text": "The Internal Revenue Service is one of the bureaus within the U.S. Department of the Treasury."
+          }
+        ],
+        "rationale": "Two official government sources identify the IRS as a Treasury bureau."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}

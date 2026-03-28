@@ -1,0 +1,152 @@
+{
+  "classification": {
+    "query": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+    "normalized_query": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Satya Nadella", "Microsoft"],
+      "search_queries": ["Satya Nadella named CEO Microsoft date"],
+      "claim_profile": {
+        "answer_shape": "exact_number",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop",
+        "required_dimensions": ["exact_measurement"],
+        "focus_terms": ["room temperature"],
+        "strict_contract": true
+      }
+    }
+  ],
+  "search": {
+    "Satya Nadella named CEO Microsoft date": [
+      {
+        "query": "Satya Nadella named CEO Microsoft date",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-rt-1",
+            "title": "Satya Nadella",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "snippet": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014.",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "position": 1
+          },
+          {
+            "result_id": "r-rt-2",
+            "title": "Microsoft Announces Nadella As CEO",
+            "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "snippet": "Coverage of Microsoft's announcement of Satya Nadella as CEO.",
+            "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "host": "www.npr.org",
+            "position": 2
+          }
+        ]
+      }
+    ],
+    "Satya Nadella CEO appointment event details": [
+      {
+        "query": "Satya Nadella CEO appointment event details",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:01+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-rt-3",
+            "title": "Microsoft Announces Nadella As CEO",
+            "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "snippet": "Coverage of Microsoft's announcement of Satya Nadella as CEO.",
+            "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "host": "www.npr.org",
+            "position": 1
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "reason": "official profile",
+            "source_score": 0.96
+          },
+          {
+            "depth": "deep",
+            "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "reason": "secondary event coverage",
+            "source_score": 0.84
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-rt-ms",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "title": "Satya Nadella",
+            "author": null,
+            "published_at": "2014-02-04T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-rt-ms-hash",
+            "content": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014. The announcement describes his background and role.",
+            "fetch_depth": "deep",
+            "source_score": 0.96
+          },
+          {
+            "doc_id": "doc-rt-npr",
+            "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+            "host": "www.npr.org",
+            "title": "Microsoft Announces Nadella As CEO",
+            "author": null,
+            "published_at": "2014-02-04T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-rt-npr-hash",
+            "content": "NPR reported that Microsoft announced Satya Nadella as chief executive officer after a long search. The report does not mention any room temperature.",
+            "fetch_depth": "deep",
+            "source_score": 0.84
+          }
+        ]
+      },
+      "2": {
+        "plans": [],
+        "documents": []
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "insufficient_evidence",
+        "confidence": 0.95,
+        "missing_dimensions": ["exact_measurement"],
+        "rationale": "The sources describe the event but do not state any exact room temperature."
+      },
+      "2": {
+        "verdict": "insufficient_evidence",
+        "confidence": 0.95,
+        "missing_dimensions": ["exact_measurement"],
+        "rationale": "A second pass still does not surface any exact room temperature."
+      }
+    }
+  },
+  "refine": {
+    "claim-1": {
+      "2": ["Satya Nadella CEO appointment event details"]
+    }
+  },
+  "synthesize": {}
+}

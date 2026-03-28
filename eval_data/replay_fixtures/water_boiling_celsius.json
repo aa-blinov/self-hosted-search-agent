@@ -1,0 +1,123 @@
+{
+  "classification": {
+    "query": "At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+    "normalized_query": "At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "boiling point of water in Celsius at standard atmospheric pressure",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["water"],
+      "search_queries": ["boiling point of water Celsius standard atmospheric pressure"],
+      "claim_profile": {
+        "answer_shape": "exact_number",
+        "min_independent_sources": 1
+      }
+    }
+  ],
+  "search": {
+    "boiling point of water Celsius standard atmospheric pressure": [
+      {
+        "query": "boiling point of water Celsius standard atmospheric pressure",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-water-1",
+            "title": "Boiling point of water",
+            "url": "https://www.britannica.com/science/boiling-point",
+            "snippet": "At standard atmospheric pressure, water boils at 100 degrees Celsius.",
+            "canonical_url": "https://www.britannica.com/science/boiling-point",
+            "host": "www.britannica.com",
+            "position": 1
+          },
+          {
+            "result_id": "r-water-2",
+            "title": "Boiling point",
+            "url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "snippet": "Water reaches its boiling point at 100 C under one atmosphere of pressure.",
+            "canonical_url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "host": "hyperphysics.phy-astr.gsu.edu",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://www.britannica.com/science/boiling-point",
+            "reason": "reference explanation",
+            "source_score": 0.84
+          },
+          {
+            "depth": "deep",
+            "url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "reason": "physics reference",
+            "source_score": 0.88
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-water-brit",
+            "url": "https://www.britannica.com/science/boiling-point",
+            "canonical_url": "https://www.britannica.com/science/boiling-point",
+            "host": "www.britannica.com",
+            "title": "Boiling point",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-water-brit-hash",
+            "content": "At standard atmospheric pressure, pure water boils at 100 degrees Celsius.",
+            "fetch_depth": "deep",
+            "source_score": 0.84
+          },
+          {
+            "doc_id": "doc-water-hyper",
+            "url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "canonical_url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "host": "hyperphysics.phy-astr.gsu.edu",
+            "title": "Vapor pressure and boiling",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-water-hyper-hash",
+            "content": "Water reaches a boiling point of 100 C at one atmosphere of pressure.",
+            "fetch_depth": "deep",
+            "source_score": 0.88
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "supported",
+        "confidence": 0.95,
+        "supporting_spans": [
+          {
+            "passage_id": "doc-water-hyper:0:0",
+            "url": "https://hyperphysics.phy-astr.gsu.edu/hbase/Kinetic/vappre.html",
+            "title": "Vapor pressure and boiling",
+            "section": "Intro",
+            "text": "Water reaches a boiling point of 100 C at one atmosphere of pressure."
+          }
+        ],
+        "rationale": "Multiple references state that water boils at 100 C under standard atmospheric pressure."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}

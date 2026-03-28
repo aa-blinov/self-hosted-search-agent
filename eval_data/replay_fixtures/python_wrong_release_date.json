@@ -1,0 +1,130 @@
+{
+  "classification": {
+    "query": "Was Python 3.13.0 released on October 1, 2024?",
+    "normalized_query": "Was Python 3.13.0 released on October 1, 2024?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Was Python 3.13.0 released on October 1, 2024?",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Python 3.13.0", "Python"],
+      "search_queries": ["Python 3.13.0 release date"],
+      "claim_profile": {
+        "answer_shape": "exact_date",
+        "min_independent_sources": 2
+      }
+    }
+  ],
+  "search": {
+    "Python 3.13.0 release date": [
+      {
+        "query": "Python 3.13.0 release date",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-py-c-1",
+            "title": "Python 3.13.0",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "snippet": "Release date: October 7, 2024.",
+            "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+            "host": "www.python.org",
+            "position": 1
+          },
+          {
+            "result_id": "r-py-c-2",
+            "title": "Python 3.13 Release Notes",
+            "url": "https://versionlog.com/python/3.13/",
+            "snippet": "Python 3.13.0 was released on October 7, 2024.",
+            "canonical_url": "https://versionlog.com/python/3.13/",
+            "host": "versionlog.com",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "reason": "official release page",
+            "source_score": 0.97
+          },
+          {
+            "depth": "deep",
+            "url": "https://versionlog.com/python/3.13/",
+            "reason": "secondary corroboration",
+            "source_score": 0.75
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-py-conflict-release",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+            "host": "www.python.org",
+            "title": "Python 3.13.0",
+            "author": null,
+            "published_at": "2024-10-07T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-py-conflict-release-hash",
+            "content": "Python 3.13.0 final release date: October 7, 2024.",
+            "fetch_depth": "deep",
+            "source_score": 0.97
+          },
+          {
+            "doc_id": "doc-py-conflict-versionlog",
+            "url": "https://versionlog.com/python/3.13/",
+            "canonical_url": "https://versionlog.com/python/3.13/",
+            "host": "versionlog.com",
+            "title": "Python 3.13 Release Notes",
+            "author": null,
+            "published_at": "2024-10-08T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-py-conflict-versionlog-hash",
+            "content": "Python 3.13.0 was released on October 7, 2024, so an October 1 date is incorrect.",
+            "fetch_depth": "deep",
+            "source_score": 0.75
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "contradicted",
+        "confidence": 0.95,
+        "contradicting_spans": [
+          {
+            "passage_id": "doc-py-conflict-release:0:0",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "title": "Python 3.13.0",
+            "section": "Intro",
+            "text": "Python 3.13.0 final release date: October 7, 2024."
+          },
+          {
+            "passage_id": "doc-py-conflict-versionlog:0:0",
+            "url": "https://versionlog.com/python/3.13/",
+            "title": "Python 3.13 Release Notes",
+            "section": "Intro",
+            "text": "Python 3.13.0 was released on October 7, 2024, so an October 1 date is incorrect."
+          }
+        ],
+        "rationale": "The official release page and an independent release log both contradict the October 1 date."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}

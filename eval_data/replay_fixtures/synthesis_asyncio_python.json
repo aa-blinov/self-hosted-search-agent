@@ -1,0 +1,135 @@
+{
+  "classification": {
+    "query": "Как работает asyncio в Python?",
+    "normalized_query": "Как работает asyncio в Python?",
+    "intent": "synthesis",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Как работает asyncio в Python",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["asyncio", "Python"],
+      "search_queries": ["asyncio Python how it works"],
+      "claim_profile": {
+        "answer_shape": "overview",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop",
+        "focus_terms": ["event loop", "coroutines", "await"],
+        "allow_synthesis_without_primary": true
+      }
+    }
+  ],
+  "search": {
+    "asyncio Python how it works": [
+      {
+        "query": "asyncio Python how it works",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-async-1",
+            "title": "A Conceptual Overview of asyncio",
+            "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "snippet": "The event loop runs tasks cooperatively, suspending coroutines when they await.",
+            "canonical_url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "host": "docs.python.org",
+            "position": 1
+          },
+          {
+            "result_id": "r-async-2",
+            "title": "Async IO in Python",
+            "url": "https://realpython.com/async-io-python/",
+            "snippet": "Asyncio uses an event loop, coroutines, and await points for cooperative multitasking.",
+            "canonical_url": "https://realpython.com/async-io-python/",
+            "host": "realpython.com",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "reason": "official conceptual overview",
+            "source_score": 0.98
+          },
+          {
+            "depth": "deep",
+            "url": "https://realpython.com/async-io-python/",
+            "reason": "secondary explanation",
+            "source_score": 0.85
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-async-docs",
+            "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "canonical_url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "host": "docs.python.org",
+            "title": "A Conceptual Overview of asyncio",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-async-docs-hash",
+            "content": "Asyncio centers around an event loop that runs one task at a time and switches when a coroutine reaches await. Coroutines cooperate by yielding control explicitly, which lets the loop schedule other tasks while waiting on I/O. The loop keeps queues of ready callbacks and watches file descriptors or timers so work resumes when awaited operations complete.",
+            "fetch_depth": "deep",
+            "source_score": 0.98
+          },
+          {
+            "doc_id": "doc-async-rp",
+            "url": "https://realpython.com/async-io-python/",
+            "canonical_url": "https://realpython.com/async-io-python/",
+            "host": "realpython.com",
+            "title": "Async IO in Python",
+            "author": "Real Python",
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-async-rp-hash",
+            "content": "In asyncio, coroutines describe units of work, await suspends the current coroutine, and the event loop resumes tasks when their awaited operations complete. This produces cooperative concurrency without creating a thread per task and makes large numbers of I/O-bound tasks manageable.",
+            "fetch_depth": "deep",
+            "source_score": 0.85
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "supported",
+        "confidence": 0.9,
+        "supporting_spans": [
+          {
+            "passage_id": "doc-async-docs:0:0",
+            "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+            "title": "A Conceptual Overview of asyncio",
+            "section": "Intro",
+            "text": "Asyncio centers around an event loop that runs one task at a time and switches when a coroutine reaches await."
+          },
+          {
+            "passage_id": "doc-async-rp:0:0",
+            "url": "https://realpython.com/async-io-python/",
+            "title": "Async IO in Python",
+            "section": "Intro",
+            "text": "In asyncio, coroutines describe units of work, await suspends the current coroutine, and the event loop resumes tasks when their awaited operations complete."
+          }
+        ],
+        "rationale": "The official docs and a secondary tutorial agree on the core mechanism."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {
+    "synthesis": "Ответ\n- В основе asyncio лежит event loop: цикл событий исполняет готовые задачи, следит за таймерами и I/O и переключает выполнение тогда, когда корутина доходит до await. Это означает, что параллелизм здесь кооперативный, а не вытесняющий: задача сама отдаёт управление, когда ей нужно подождать сеть, сокет, таймер или другой awaitable. [1][2]\n- Корутины в asyncio описывают шаги асинхронной работы, а await служит точкой добровольной остановки. Когда корутина делает await, event loop может продвинуть другие задачи, у которых уже есть готовая работа. За счёт этого большое количество I/O-bound операций можно обслуживать внутри одного потока без отдельного thread на каждую задачу. [1][2]\n- Практически это значит, что asyncio особенно хорошо подходит для сетевых клиентов, серверов, очередей задач и интеграций, где основная задержка приходит не от CPU, а от ожидания внешних ресурсов. Вместо блокировки потока программа продолжает двигать вперёд другие корутины, а затем возвращается к исходной задаче, когда событие завершения уже произошло. [1][2]\n- Ограничение модели тоже важно: asyncio не ускоряет CPU-bound код само по себе. Его сильная сторона именно в том, что event loop эффективно распределяет время между множеством ожидающих операций и даёт предсказуемую модель кооперативной конкурентности поверх await, tasks и callbacks. [1][2]\n\nSources\n[1] A Conceptual Overview of asyncio - https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html\n[2] Async IO in Python - https://realpython.com/async-io-python/"
+  }
+}

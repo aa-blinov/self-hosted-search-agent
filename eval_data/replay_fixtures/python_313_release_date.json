@@ -1,0 +1,124 @@
+{
+  "classification": {
+    "query": "When was Python 3.13.0 released?",
+    "normalized_query": "When was Python 3.13.0 released?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Python 3.13.0 release date",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Python 3.13.0", "Python"],
+      "search_queries": ["Python 3.13.0 release date"],
+      "claim_profile": {
+        "answer_shape": "exact_date",
+        "primary_source_required": true,
+        "min_independent_sources": 1
+      }
+    }
+  ],
+  "search": {
+    "Python 3.13.0 release date": [
+      {
+        "query": "Python 3.13.0 release date",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-py-r-1",
+            "title": "Python 3.13.0",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "snippet": "Python 3.13.0 final release date: October 7, 2024.",
+            "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+            "host": "www.python.org",
+            "position": 1
+          },
+          {
+            "result_id": "r-py-r-2",
+            "title": "Python 3.13.0 (final) released",
+            "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+            "snippet": "Python 3.13.0 was released on October 7, 2024.",
+            "canonical_url": "https://blog.python.org/2024/10/python-3130-final-released/",
+            "host": "blog.python.org",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "reason": "official release page",
+            "source_score": 0.97
+          },
+          {
+            "depth": "deep",
+            "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+            "reason": "official announcement",
+            "source_score": 0.95
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-py-release",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+            "host": "www.python.org",
+            "title": "Python 3.13.0",
+            "author": null,
+            "published_at": "2024-10-07T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-py-release-hash",
+            "content": "Python 3.13.0 final release date: October 7, 2024. Python 3.13.0 is the first final release in the 3.13 series.",
+            "fetch_depth": "deep",
+            "source_score": 0.97
+          },
+          {
+            "doc_id": "doc-py-blog",
+            "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+            "canonical_url": "https://blog.python.org/2024/10/python-3130-final-released/",
+            "host": "blog.python.org",
+            "title": "Python 3.13.0 (final) released",
+            "author": "Python Release Team",
+            "published_at": "2024-10-07T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-py-blog-hash",
+            "content": "Python 3.13.0 is now available. The final release was published on October 7, 2024.",
+            "fetch_depth": "deep",
+            "source_score": 0.95
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "supported",
+        "confidence": 0.95,
+        "supporting_spans": [
+          {
+            "passage_id": "doc-py-release:0:0",
+            "url": "https://www.python.org/downloads/release/python-3130/",
+            "title": "Python 3.13.0",
+            "section": "Intro",
+            "text": "Python 3.13.0 final release date: October 7, 2024."
+          }
+        ],
+        "rationale": "The official Python release page states that Python 3.13.0 was released on October 7, 2024."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}

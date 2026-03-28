@@ -241,6 +241,13 @@ def load_replay_cases(path: str | Path) -> list[ReplayEvaluationCase]:
 
     cases: list[ReplayEvaluationCase] = []
     for item in items:
+        replay_raw = item.get("replay")
+        fixture_path = item.get("fixture_path")
+        if replay_raw is None and fixture_path:
+            fixture_file = (source.parent / fixture_path).resolve()
+            replay_raw = json.loads(fixture_file.read_text(encoding="utf-8"))
+        if replay_raw is None:
+            raise KeyError(f"Replay case {item.get('case_id')} is missing replay or fixture_path")
         evaluation = EvaluationCase(
             case_id=item["case_id"],
             split=item["split"],
@@ -253,7 +260,7 @@ def load_replay_cases(path: str | Path) -> list[ReplayEvaluationCase]:
         cases.append(
             ReplayEvaluationCase(
                 evaluation=evaluation,
-                fixture=_load_replay_fixture(item["replay"]),
+                fixture=_load_replay_fixture(replay_raw),
             )
         )
     return cases

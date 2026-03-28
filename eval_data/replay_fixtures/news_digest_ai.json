@@ -1,0 +1,181 @@
+{
+  "classification": {
+    "query": "What are the latest developments in artificial intelligence this week?",
+    "normalized_query": "What are the latest developments in artificial intelligence from 2024-05-20 to 2024-05-26?",
+    "intent": "news_digest",
+    "complexity": "single_hop",
+    "needs_freshness": true,
+    "time_scope": "2024-05-20"
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "latest developments in artificial intelligence from 2024-05-20 to 2024-05-26",
+      "priority": 1,
+      "needs_freshness": true,
+      "entity_set": ["artificial intelligence"],
+      "time_scope": "2024-05-20",
+      "search_queries": ["artificial intelligence developments May 2024"],
+      "claim_profile": {
+        "answer_shape": "news_digest",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop"
+      }
+    }
+  ],
+  "search": {
+    "artificial intelligence developments May 2024": [
+      {
+        "query": "artificial intelligence developments May 2024",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-ai-1",
+            "title": "OpenAI announces GPT-4o",
+            "url": "https://openai.com/index/hello-gpt-4o/",
+            "snippet": "OpenAI introduced GPT-4o and highlighted multimodal improvements.",
+            "canonical_url": "https://openai.com/index/hello-gpt-4o/",
+            "host": "openai.com",
+            "position": 1,
+            "published_at": "2024-05-13T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-ai-2",
+            "title": "Google unveils AI updates at I/O",
+            "url": "https://blog.google/technology/ai/google-io-2024-ai-updates/",
+            "snippet": "Google detailed Gemini updates and new AI features across products.",
+            "canonical_url": "https://blog.google/technology/ai/google-io-2024-ai-updates/",
+            "host": "blog.google",
+            "position": 2,
+            "published_at": "2024-05-14T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-ai-3",
+            "title": "Anthropic releases Claude Team and enterprise updates",
+            "url": "https://www.anthropic.com/news/team-plan-and-enterprise-updates",
+            "snippet": "Anthropic expanded Claude Team and enterprise features.",
+            "canonical_url": "https://www.anthropic.com/news/team-plan-and-enterprise-updates",
+            "host": "www.anthropic.com",
+            "position": 3,
+            "published_at": "2024-05-21T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-ai-4",
+            "title": "Microsoft Build 2024 AI announcements",
+            "url": "https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/",
+            "snippet": "Microsoft announced Copilot and Azure AI updates at Build 2024.",
+            "canonical_url": "https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/",
+            "host": "blogs.microsoft.com",
+            "position": 4,
+            "published_at": "2024-05-21T00:00:00+00:00"
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://openai.com/index/hello-gpt-4o/",
+            "reason": "source 1",
+            "source_score": 0.95
+          },
+          {
+            "depth": "deep",
+            "url": "https://blog.google/technology/ai/google-io-2024-ai-updates/",
+            "reason": "source 2",
+            "source_score": 0.94
+          },
+          {
+            "depth": "deep",
+            "url": "https://www.anthropic.com/news/team-plan-and-enterprise-updates",
+            "reason": "source 3",
+            "source_score": 0.92
+          },
+          {
+            "depth": "deep",
+            "url": "https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/",
+            "reason": "source 4",
+            "source_score": 0.93
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-ai-openai",
+            "url": "https://openai.com/index/hello-gpt-4o/",
+            "canonical_url": "https://openai.com/index/hello-gpt-4o/",
+            "host": "openai.com",
+            "title": "Hello GPT-4o",
+            "author": null,
+            "published_at": "2024-05-13T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ai-openai-hash",
+            "content": "OpenAI introduced GPT-4o, a multimodal model with lower latency and broader realtime interaction capabilities.",
+            "fetch_depth": "deep",
+            "source_score": 0.95
+          },
+          {
+            "doc_id": "doc-ai-google",
+            "url": "https://blog.google/technology/ai/google-io-2024-ai-updates/",
+            "canonical_url": "https://blog.google/technology/ai/google-io-2024-ai-updates/",
+            "host": "blog.google",
+            "title": "Google I/O 2024 AI updates",
+            "author": null,
+            "published_at": "2024-05-14T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ai-google-hash",
+            "content": "Google presented Gemini updates, search features, and new AI integrations across Workspace and Android.",
+            "fetch_depth": "deep",
+            "source_score": 0.94
+          },
+          {
+            "doc_id": "doc-ai-anthropic",
+            "url": "https://www.anthropic.com/news/team-plan-and-enterprise-updates",
+            "canonical_url": "https://www.anthropic.com/news/team-plan-and-enterprise-updates",
+            "host": "www.anthropic.com",
+            "title": "Anthropic enterprise updates",
+            "author": null,
+            "published_at": "2024-05-21T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ai-anthropic-hash",
+            "content": "Anthropic expanded Claude Team and enterprise controls, emphasizing collaboration and governance features.",
+            "fetch_depth": "deep",
+            "source_score": 0.92
+          },
+          {
+            "doc_id": "doc-ai-microsoft",
+            "url": "https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/",
+            "canonical_url": "https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/",
+            "host": "blogs.microsoft.com",
+            "title": "Build 2024 AI announcements",
+            "author": null,
+            "published_at": "2024-05-21T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ai-microsoft-hash",
+            "content": "Microsoft highlighted Copilot, Azure AI, and developer platform announcements at Build 2024.",
+            "fetch_depth": "deep",
+            "source_score": 0.93
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "insufficient_evidence",
+        "confidence": 0.85,
+        "rationale": "A news digest needs synthesis across multiple recent items rather than a single claim verdict."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {
+    "news_digest": "Answer\n- OpenAI's major development for the week was the rollout of GPT-4o, which pushed multimodal interaction closer to realtime usage and set the tone for the rest of the market's announcements. [1]\n- Google responded with a broad product push at I/O 2024, tying Gemini improvements to search, Workspace, and Android rather than framing AI as a single standalone release. [2]\n- Anthropic's updates were more enterprise-focused: the company emphasized Claude Team and governance-oriented features, showing that commercial AI competition was also moving toward collaboration and controls, not only raw model demos. [3]\n- Microsoft used Build 2024 to connect AI announcements to developer workflows, Copilot, and Azure, reinforcing that platform distribution and tooling were becoming just as important as headline model capability. [4]\n\nSources\n[1] Hello GPT-4o - https://openai.com/index/hello-gpt-4o/\n[2] Google I/O 2024 AI updates - https://blog.google/technology/ai/google-io-2024-ai-updates/\n[3] Anthropic enterprise updates - https://www.anthropic.com/news/team-plan-and-enterprise-updates\n[4] Build 2024 AI announcements - https://blogs.microsoft.com/blog/2024/05/21/build-2024-ai-announcements/"
+  }
+}

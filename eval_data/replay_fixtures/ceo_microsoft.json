@@ -1,0 +1,131 @@
+{
+  "classification": {
+    "query": "Who is the CEO of Microsoft?",
+    "normalized_query": "Who is the CEO of Microsoft?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Who is the CEO of Microsoft?",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Microsoft"],
+      "search_queries": ["Microsoft CEO"],
+      "claim_profile": {
+        "answer_shape": "fact",
+        "primary_source_required": true,
+        "min_independent_sources": 2
+      }
+    }
+  ],
+  "search": {
+    "Microsoft CEO": [
+      {
+        "query": "Microsoft CEO",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-ms-1",
+            "title": "Satya Nadella leadership profile",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "snippet": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft.",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "position": 1
+          },
+          {
+            "result_id": "r-ms-2",
+            "title": "Satya Nadella - Wikipedia",
+            "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "snippet": "Satya Nadella has served as chairman and chief executive officer of Microsoft since 2014.",
+            "canonical_url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "host": "en.wikipedia.org",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "reason": "official leadership page",
+            "source_score": 0.98
+          },
+          {
+            "depth": "deep",
+            "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "reason": "secondary corroboration",
+            "source_score": 0.82
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-ms",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "title": "Satya Nadella",
+            "author": null,
+            "published_at": "2026-03-20T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ms-hash",
+            "content": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft. He became CEO on February 4, 2014.",
+            "fetch_depth": "deep",
+            "source_score": 0.98
+          },
+          {
+            "doc_id": "doc-ms-wiki",
+            "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "canonical_url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "host": "en.wikipedia.org",
+            "title": "Satya Nadella",
+            "author": null,
+            "published_at": null,
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-ms-wiki-hash",
+            "content": "Satya Nadella has served as chairman and chief executive officer of Microsoft since February 2014.",
+            "fetch_depth": "deep",
+            "source_score": 0.82
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "supported",
+        "confidence": 0.95,
+        "supporting_spans": [
+          {
+            "passage_id": "doc-ms:0:0",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "title": "Satya Nadella",
+            "section": "Intro",
+            "text": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft."
+          },
+          {
+            "passage_id": "doc-ms-wiki:0:0",
+            "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+            "title": "Satya Nadella",
+            "section": "Intro",
+            "text": "Satya Nadella has served as chairman and chief executive officer of Microsoft since February 2014."
+          }
+        ],
+        "rationale": "Official Microsoft and Wikipedia agree on the role."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}
