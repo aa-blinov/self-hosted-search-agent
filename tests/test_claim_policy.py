@@ -189,6 +189,68 @@ class ClaimPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted.verdict, "insufficient_evidence")
         self.assertEqual(adjusted.supporting_spans, [])
 
+    def test_post_adjust_verification_promotes_official_relationship_fact_with_explicit_structure_cues(self) -> None:
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Is the IRS a U.S. government agency?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["Internal Revenue Service", "IRS"],
+            claim_profile=ClaimProfile(
+                answer_shape="fact",
+                primary_source_required=True,
+                min_independent_sources=2,
+                preferred_domain_types=["official"],
+                required_dimensions=["institutional_affiliation", "parent_department"],
+                focus_terms=["organizational status", "parent department"],
+                strict_contract=True,
+            ),
+        )
+        passages = [
+            Passage(
+                passage_id="p1",
+                url="https://home.treasury.gov/about/bureaus",
+                canonical_url="https://home.treasury.gov/about/bureaus",
+                host="home.treasury.gov",
+                title="Bureaus",
+                section="Treasury",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p1",
+                text="The Internal Revenue Service (IRS) is the largest of Treasury's bureaus.",
+                source_score=0.70,
+                utility_score=0.18,
+            ),
+            Passage(
+                passage_id="p2",
+                url="https://www.usa.gov/agencies/internal-revenue-service",
+                canonical_url="https://www.usa.gov/agencies/internal-revenue-service",
+                host="www.usa.gov",
+                title="Internal Revenue Service (IRS)",
+                section="Agency",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p2",
+                text="The Internal Revenue Service (IRS) is a bureau of the Department of the Treasury.",
+                source_score=0.69,
+                utility_score=0.19,
+            ),
+        ]
+        result = VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=0.41,
+            missing_dimensions=["institutional_affiliation", "parent_department"],
+            rationale="Need a slightly clearer official corroboration.",
+        )
+
+        adjusted = post_adjust_verification(claim, passages, result)
+
+        self.assertEqual(adjusted.verdict, "supported")
+        self.assertGreaterEqual(adjusted.confidence, 0.72)
+        self.assertEqual(len(adjusted.supporting_spans), 2)
+
     def test_should_stop_claim_loop_respects_strict_contract(self) -> None:
         claim = Claim(
             claim_id="claim-1",

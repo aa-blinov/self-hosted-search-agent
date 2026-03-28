@@ -128,7 +128,7 @@ def _answer_source_urls(answer: str) -> list[str]:
         if not stripped.startswith("["):
             continue
         if "http://" in stripped:
-            urls.append(stripped.rsplit("http://", 1)[1].strip())
+            urls.append("http://" + stripped.rsplit("http://", 1)[1].strip())
         elif "https://" in stripped:
             urls.append("https://" + stripped.rsplit("https://", 1)[1].strip())
     return urls

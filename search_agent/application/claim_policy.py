@@ -11,6 +11,36 @@ from search_agent.domain.models import Claim, ClaimProfile, EvidenceBundle, Evid
 _LIST_LIKE_DIMENSIONS = {"feature_list", "improvements", "changes", "highlights", "options"}
 _RETRIEVAL_DRIVEN_SHAPES = {"product_specs", "overview", "comparison", "news_digest"}
 _OPEN_ENDED_STOP_SHAPES = {"overview", "comparison", "news_digest"}
+_RELATIONSHIP_CONTRACT_MARKERS = {
+    "affiliation",
+    "agency",
+    "bureau",
+    "classification",
+    "component",
+    "department",
+    "entity_status",
+    "government",
+    "institutional",
+    "membership",
+    "organizational",
+    "parent",
+    "status",
+}
+_RELATIONSHIP_TEXT_CUES = (
+    " agency ",
+    " bureau ",
+    " bureaus ",
+    " department ",
+    " component ",
+    " administration ",
+    " ministry ",
+    " treasury ",
+    " member of ",
+    " part of ",
+    " within ",
+)
+_OFFICIAL_HOST_SUFFIXES = (".gov", ".mil", ".gouv")
+_OFFICIAL_HOST_EXACT = {"europa.eu", "who.int"}
 
 
 def claim_profile_lines(claim: Claim) -> list[str]:
@@ -101,6 +131,98 @@ def claim_focus_terms(claim: Claim) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _host_root(host: str) -> str:
+    lowered = (host or "").casefold()
+    if lowered.startswith("www."):
+        lowered = lowered[4:]
+    parts = lowered.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return lowered
+
+
+def _is_official_host(host: str) -> bool:
+    lowered = (host or "").casefold()
+    if lowered.startswith("www."):
+        lowered = lowered[4:]
+    if lowered in _OFFICIAL_HOST_EXACT:
+        return True
+    return any(lowered.endswith(suffix) for suffix in _OFFICIAL_HOST_SUFFIXES)
+
+
+def _is_relationship_fact_contract(profile: ClaimProfile | None) -> bool:
+    if profile is None:
+        return False
+    if profile.answer_shape != "fact" or not profile.strict_contract or not profile.primary_source_required:
+        return False
+    contract_text = " ".join(profile.required_dimensions + profile.focus_terms).casefold()
+    return any(marker in contract_text for marker in _RELATIONSHIP_CONTRACT_MARKERS)
+
+
+def _relationship_cue_score(claim: Claim, passage: Passage) -> float:
+    haystack = f" {normalized_text(f'{passage.title} {passage.text[:320]}').casefold()} "
+    score = 0.0
+    if any(cue in haystack for cue in _RELATIONSHIP_TEXT_CUES):
+        score += 1.0
+    if any(entity.casefold() in haystack for entity in claim.entity_set if entity):
+        score += 0.5
+    if _is_official_host(passage.host):
+        score += 0.5
+    return score
+
+
+def _official_relationship_rescue(
+    claim: Claim,
+    passages: list[Passage],
+    result: VerificationResult,
+) -> VerificationResult | None:
+    profile = claim.claim_profile
+    if result.verdict != "insufficient_evidence" or not _is_relationship_fact_contract(profile):
+        return None
+
+    robust = [
+        passage
+        for passage in passages
+        if passage.source_score >= policy_tuning.OFFICIAL_RELATIONSHIP_SOURCE_THRESHOLD
+    ]
+    if len({_host_root(passage.host) for passage in robust if passage.host}) < policy_tuning.OFFICIAL_RELATIONSHIP_MIN_UNIQUE_HOSTS:
+        return None
+
+    official = [passage for passage in robust if _is_official_host(passage.host)]
+    if not official:
+        return None
+
+    explicit = [
+        passage
+        for passage in robust
+        if _relationship_cue_score(claim, passage) >= policy_tuning.OFFICIAL_RELATIONSHIP_CUE_SCORE_THRESHOLD
+    ]
+    if not explicit:
+        return None
+
+    selected = explicit[: policy_tuning.OFFICIAL_RELATIONSHIP_SUPPORTING_PASSAGE_COUNT]
+    supporting = [
+        EvidenceSpan(
+            passage_id=passage.passage_id,
+            url=passage.url,
+            title=passage.title,
+            section=passage.section,
+            text=normalized_text(passage.text[:policy_tuning.OFFICIAL_RELATIONSHIP_SUPPORTING_SPAN_CHARS]),
+        )
+        for passage in selected
+    ]
+    rationale = (result.rationale or "").strip()
+    suffix = "Adjusted: multiple official passages explicitly support the institutional relationship."
+    return replace(
+        result,
+        verdict="supported",
+        confidence=max(result.confidence, policy_tuning.OFFICIAL_RELATIONSHIP_PROMOTED_CONFIDENCE_FLOOR),
+        supporting_spans=supporting,
+        missing_dimensions=[],
+        rationale=f"{rationale} {suffix}".strip() if rationale else suffix,
+    )
+
+
 def claim_contract_gaps(
     claim: Claim,
     verification: VerificationResult | None = None,
@@ -185,6 +307,9 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
 
 
 def post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
+    rescued = _official_relationship_rescue(claim, passages, result)
+    if rescued is not None:
+        return rescued
     if result.verdict == "supported" and result.confidence < policy_tuning.SUPPORTED_CONFIDENCE_FLOOR_THRESHOLD:
         return replace(result, confidence=max(result.confidence, policy_tuning.SUPPORTED_CONFIDENCE_FLOOR_VALUE))
     profile = claim.claim_profile
