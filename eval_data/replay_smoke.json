@@ -1,0 +1,605 @@
+[
+  {
+    "case_id": "replay-ceo-microsoft",
+    "split": "factual_single-hop",
+    "query": "Who is the CEO of Microsoft?",
+    "profile": "web",
+    "expected_claims": [
+      {
+        "match": "CEO of Microsoft",
+        "expected_verdict": "supported",
+        "requires_primary_source": true,
+        "expected_route": ["targeted_retrieval", "short_path"],
+        "min_independent_sources": 2
+      }
+    ],
+    "replay": {
+      "classification": {
+        "query": "Who is the CEO of Microsoft?",
+        "normalized_query": "Who is the CEO of Microsoft?",
+        "intent": "factual",
+        "complexity": "single_hop",
+        "needs_freshness": false
+      },
+      "claims": [
+        {
+          "claim_id": "claim-1",
+          "claim_text": "Who is the CEO of Microsoft?",
+          "priority": 1,
+          "needs_freshness": false,
+          "entity_set": ["Microsoft"],
+          "search_queries": ["Microsoft CEO"],
+          "claim_profile": {
+            "answer_shape": "fact",
+            "primary_source_required": true,
+            "min_independent_sources": 2
+          }
+        }
+      ],
+      "search": {
+        "Microsoft CEO": [
+          {
+            "query": "Microsoft CEO",
+            "suggestions": [],
+            "retrieved_at": "2026-03-28T00:00:00+00:00",
+            "profile_name": "web",
+            "results": [
+              {
+                "result_id": "r-ms-1",
+                "title": "Satya Nadella leadership profile",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "snippet": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft.",
+                "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "host": "news.microsoft.com",
+                "position": 1
+              },
+              {
+                "result_id": "r-ms-2",
+                "title": "Satya Nadella - Wikipedia",
+                "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "snippet": "Satya Nadella has served as chairman and chief executive officer of Microsoft since 2014.",
+                "canonical_url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "host": "en.wikipedia.org",
+                "position": 2
+              }
+            ]
+          }
+        ]
+      },
+      "fetch": {
+        "claim-1": {
+          "1": {
+            "plans": [
+              {
+                "depth": "deep",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "reason": "official leadership page",
+                "source_score": 0.98
+              },
+              {
+                "depth": "deep",
+                "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "reason": "secondary corroboration",
+                "source_score": 0.82
+              }
+            ],
+            "documents": [
+              {
+                "doc_id": "doc-ms",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "host": "news.microsoft.com",
+                "title": "Satya Nadella",
+                "author": null,
+                "published_at": "2026-03-20T00:00:00+00:00",
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-ms-hash",
+                "content": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft. He became CEO on February 4, 2014.",
+                "fetch_depth": "deep",
+                "source_score": 0.98
+              },
+              {
+                "doc_id": "doc-ms-wiki",
+                "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "canonical_url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "host": "en.wikipedia.org",
+                "title": "Satya Nadella",
+                "author": null,
+                "published_at": null,
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-ms-wiki-hash",
+                "content": "Satya Nadella has served as chairman and chief executive officer of Microsoft since February 2014.",
+                "fetch_depth": "deep",
+                "source_score": 0.82
+              }
+            ]
+          }
+        }
+      },
+      "verify": {
+        "claim-1": {
+          "1": {
+            "verdict": "supported",
+            "confidence": 0.95,
+            "supporting_spans": [
+              {
+                "passage_id": "doc-ms:0:0",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "title": "Satya Nadella",
+                "section": "Intro",
+                "text": "Satya Nadella is Chairman and Chief Executive Officer of Microsoft."
+              },
+              {
+                "passage_id": "doc-ms-wiki:0:0",
+                "url": "https://en.wikipedia.org/wiki/Satya_Nadella",
+                "title": "Satya Nadella",
+                "section": "Intro",
+                "text": "Satya Nadella has served as chairman and chief executive officer of Microsoft since February 2014."
+              }
+            ],
+            "rationale": "Official Microsoft and Wikipedia agree on the role."
+          }
+        }
+      },
+      "refine": {},
+      "synthesize": {}
+    }
+  },
+  {
+    "case_id": "replay-python-conflict",
+    "split": "contradiction",
+    "query": "Was Python 3.13.0 released on October 1, 2024?",
+    "profile": "web",
+    "expected_claims": [
+      {
+        "match": "released on October 1, 2024",
+        "expected_verdict": "contradicted",
+        "expected_route": ["short_path", "targeted_retrieval"]
+      }
+    ],
+    "replay": {
+      "classification": {
+        "query": "Was Python 3.13.0 released on October 1, 2024?",
+        "normalized_query": "Was Python 3.13.0 released on October 1, 2024?",
+        "intent": "factual",
+        "complexity": "single_hop",
+        "needs_freshness": false
+      },
+      "claims": [
+        {
+          "claim_id": "claim-1",
+          "claim_text": "Was Python 3.13.0 released on October 1, 2024?",
+          "priority": 1,
+          "needs_freshness": false,
+          "entity_set": ["Python 3.13.0", "Python"],
+          "search_queries": ["Python 3.13.0 release date"],
+          "claim_profile": {
+            "answer_shape": "exact_date",
+            "min_independent_sources": 2
+          }
+        }
+      ],
+      "search": {
+        "Python 3.13.0 release date": [
+          {
+            "query": "Python 3.13.0 release date",
+            "suggestions": [],
+            "retrieved_at": "2026-03-28T00:00:00+00:00",
+            "profile_name": "web",
+            "results": [
+              {
+                "result_id": "r-py-1",
+                "title": "Python 3.13.0",
+                "url": "https://www.python.org/downloads/release/python-3130/",
+                "snippet": "Release date: October 7, 2024.",
+                "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+                "host": "www.python.org",
+                "position": 1
+              },
+              {
+                "result_id": "r-py-2",
+                "title": "Python 3.13.0 (final) released",
+                "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "snippet": "Python 3.13.0 final released on October 7, 2024.",
+                "canonical_url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "host": "blog.python.org",
+                "position": 2
+              }
+            ]
+          }
+        ]
+      },
+      "fetch": {
+        "claim-1": {
+          "1": {
+            "plans": [
+              {
+                "depth": "deep",
+                "url": "https://www.python.org/downloads/release/python-3130/",
+                "reason": "official release page",
+                "source_score": 0.97
+              },
+              {
+                "depth": "deep",
+                "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "reason": "official announcement",
+                "source_score": 0.95
+              }
+            ],
+            "documents": [
+              {
+                "doc_id": "doc-py-release",
+                "url": "https://www.python.org/downloads/release/python-3130/",
+                "canonical_url": "https://www.python.org/downloads/release/python-3130/",
+                "host": "www.python.org",
+                "title": "Python 3.13.0",
+                "author": null,
+                "published_at": "2024-10-07T00:00:00+00:00",
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-py-release-hash",
+                "content": "Python 3.13.0 final release date: October 7, 2024.",
+                "fetch_depth": "deep",
+                "source_score": 0.97
+              },
+              {
+                "doc_id": "doc-py-blog",
+                "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "canonical_url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "host": "blog.python.org",
+                "title": "Python 3.13.0 (final) released",
+                "author": "Python Release Team",
+                "published_at": "2024-10-07T00:00:00+00:00",
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-py-blog-hash",
+                "content": "Python 3.13.0 final released on October 7, 2024, not on October 1, 2024.",
+                "fetch_depth": "deep",
+                "source_score": 0.95
+              }
+            ]
+          }
+        }
+      },
+      "verify": {
+        "claim-1": {
+          "1": {
+            "verdict": "contradicted",
+            "confidence": 0.95,
+            "contradicting_spans": [
+              {
+                "passage_id": "doc-py-release:0:0",
+                "url": "https://www.python.org/downloads/release/python-3130/",
+                "title": "Python 3.13.0",
+                "section": "Intro",
+                "text": "Python 3.13.0 final release date: October 7, 2024."
+              },
+              {
+                "passage_id": "doc-py-blog:0:0",
+                "url": "https://blog.python.org/2024/10/python-3130-final-released/",
+                "title": "Python 3.13.0 (final) released",
+                "section": "Intro",
+                "text": "Python 3.13.0 final released on October 7, 2024, not on October 1, 2024."
+              }
+            ],
+            "rationale": "Official Python sources contradict the October 1 date."
+          }
+        }
+      },
+      "refine": {},
+      "synthesize": {}
+    }
+  },
+  {
+    "case_id": "replay-nadella-room-temperature",
+    "split": "insufficient_detail",
+    "query": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+    "profile": "web",
+    "expected_claims": [
+      {
+        "match": "room temperature",
+        "expected_verdict": "insufficient_evidence",
+        "expected_route": "iterative_loop"
+      }
+    ],
+    "replay": {
+      "classification": {
+        "query": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+        "normalized_query": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+        "intent": "factual",
+        "complexity": "single_hop",
+        "needs_freshness": false
+      },
+      "claims": [
+        {
+          "claim_id": "claim-1",
+          "claim_text": "What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+          "priority": 1,
+          "needs_freshness": false,
+          "entity_set": ["Satya Nadella", "Microsoft"],
+          "search_queries": ["Satya Nadella named CEO Microsoft date"],
+          "claim_profile": {
+            "answer_shape": "exact_number",
+            "min_independent_sources": 2,
+            "routing_bias": "iterative_loop",
+            "required_dimensions": ["exact_measurement"],
+            "focus_terms": ["room temperature"],
+            "strict_contract": true
+          }
+        }
+      ],
+      "search": {
+        "Satya Nadella named CEO Microsoft date": [
+          {
+            "query": "Satya Nadella named CEO Microsoft date",
+            "suggestions": [],
+            "retrieved_at": "2026-03-28T00:00:00+00:00",
+            "profile_name": "web",
+            "results": [
+              {
+                "result_id": "r-rt-1",
+                "title": "Satya Nadella",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "snippet": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014.",
+                "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "host": "news.microsoft.com",
+                "position": 1
+              },
+              {
+                "result_id": "r-rt-2",
+                "title": "Microsoft Announces Nadella As CEO",
+                "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "snippet": "Coverage of Microsoft's announcement of Satya Nadella as CEO.",
+                "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "host": "www.npr.org",
+                "position": 2
+              }
+            ]
+          }
+        ],
+        "Satya Nadella CEO appointment event details": [
+          {
+            "query": "Satya Nadella CEO appointment event details",
+            "suggestions": [],
+            "retrieved_at": "2026-03-28T00:00:01+00:00",
+            "profile_name": "web",
+            "results": [
+              {
+                "result_id": "r-rt-3",
+                "title": "Microsoft Announces Nadella As CEO",
+                "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "snippet": "Coverage of Microsoft's announcement of Satya Nadella as CEO.",
+                "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "host": "www.npr.org",
+                "position": 1
+              }
+            ]
+          }
+        ]
+      },
+      "fetch": {
+        "claim-1": {
+          "1": {
+            "plans": [
+              {
+                "depth": "deep",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "reason": "official profile",
+                "source_score": 0.96
+              },
+              {
+                "depth": "deep",
+                "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "reason": "secondary event coverage",
+                "source_score": 0.84
+              }
+            ],
+            "documents": [
+              {
+                "doc_id": "doc-rt-ms",
+                "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+                "host": "news.microsoft.com",
+                "title": "Satya Nadella",
+                "author": null,
+                "published_at": "2014-02-04T00:00:00+00:00",
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-rt-ms-hash",
+                "content": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014. The announcement describes his background and role.",
+                "fetch_depth": "deep",
+                "source_score": 0.96
+              },
+              {
+                "doc_id": "doc-rt-npr",
+                "url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "canonical_url": "https://www.npr.org/2014/02/04/271558147/microsoft-announces-nadella-as-ceo",
+                "host": "www.npr.org",
+                "title": "Microsoft Announces Nadella As CEO",
+                "author": null,
+                "published_at": "2014-02-04T00:00:00+00:00",
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-rt-npr-hash",
+                "content": "NPR reported that Microsoft announced Satya Nadella as chief executive officer after a long search. The report does not mention any room temperature.",
+                "fetch_depth": "deep",
+                "source_score": 0.84
+              }
+            ]
+          },
+          "2": {
+            "plans": [],
+            "documents": []
+          }
+        }
+      },
+      "verify": {
+        "claim-1": {
+          "1": {
+            "verdict": "insufficient_evidence",
+            "confidence": 0.95,
+            "missing_dimensions": ["exact_measurement"],
+            "rationale": "The sources describe the event but do not state any exact room temperature."
+          },
+          "2": {
+            "verdict": "insufficient_evidence",
+            "confidence": 0.95,
+            "missing_dimensions": ["exact_measurement"],
+            "rationale": "A second pass still does not surface any exact room temperature."
+          }
+        }
+      },
+      "refine": {
+        "claim-1": {
+          "2": ["Satya Nadella CEO appointment event details"]
+        }
+      },
+      "synthesize": {}
+    }
+  },
+  {
+    "case_id": "replay-asyncio-synthesis",
+    "split": "synthesis_mechanism",
+    "query": "Как работает asyncio в Python?",
+    "profile": "web",
+    "expected_claims": [
+      {
+        "match": "Как работает asyncio",
+        "expected_verdict": "supported",
+        "expected_route": "iterative_loop"
+      }
+    ],
+    "min_answer_chars": 400,
+    "replay": {
+      "classification": {
+        "query": "Как работает asyncio в Python?",
+        "normalized_query": "Как работает asyncio в Python?",
+        "intent": "synthesis",
+        "complexity": "single_hop",
+        "needs_freshness": false
+      },
+      "claims": [
+        {
+          "claim_id": "claim-1",
+          "claim_text": "Как работает asyncio в Python",
+          "priority": 1,
+          "needs_freshness": false,
+          "entity_set": ["asyncio", "Python"],
+          "search_queries": ["asyncio Python how it works"],
+          "claim_profile": {
+            "answer_shape": "overview",
+            "min_independent_sources": 2,
+            "routing_bias": "iterative_loop",
+            "focus_terms": ["event loop", "coroutines", "await"],
+            "allow_synthesis_without_primary": true
+          }
+        }
+      ],
+      "search": {
+        "asyncio Python how it works": [
+          {
+            "query": "asyncio Python how it works",
+            "suggestions": [],
+            "retrieved_at": "2026-03-28T00:00:00+00:00",
+            "profile_name": "web",
+            "results": [
+              {
+                "result_id": "r-async-1",
+                "title": "A Conceptual Overview of asyncio",
+                "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "snippet": "The event loop runs tasks cooperatively, suspending coroutines when they await.",
+                "canonical_url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "host": "docs.python.org",
+                "position": 1
+              },
+              {
+                "result_id": "r-async-2",
+                "title": "Async IO in Python",
+                "url": "https://realpython.com/async-io-python/",
+                "snippet": "Asyncio uses an event loop, coroutines, and await points for cooperative multitasking.",
+                "canonical_url": "https://realpython.com/async-io-python/",
+                "host": "realpython.com",
+                "position": 2
+              }
+            ]
+          }
+        ]
+      },
+      "fetch": {
+        "claim-1": {
+          "1": {
+            "plans": [
+              {
+                "depth": "deep",
+                "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "reason": "official conceptual overview",
+                "source_score": 0.98
+              },
+              {
+                "depth": "deep",
+                "url": "https://realpython.com/async-io-python/",
+                "reason": "secondary explanation",
+                "source_score": 0.85
+              }
+            ],
+            "documents": [
+              {
+                "doc_id": "doc-async-docs",
+                "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "canonical_url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "host": "docs.python.org",
+                "title": "A Conceptual Overview of asyncio",
+                "author": null,
+                "published_at": null,
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-async-docs-hash",
+                "content": "Asyncio centers around an event loop that runs one task at a time and switches when a coroutine reaches await. Coroutines cooperate by yielding control explicitly, which lets the loop schedule other tasks while waiting on I/O.",
+                "fetch_depth": "deep",
+                "source_score": 0.98
+              },
+              {
+                "doc_id": "doc-async-rp",
+                "url": "https://realpython.com/async-io-python/",
+                "canonical_url": "https://realpython.com/async-io-python/",
+                "host": "realpython.com",
+                "title": "Async IO in Python",
+                "author": "Real Python",
+                "published_at": null,
+                "extracted_at": "2026-03-28T00:00:00+00:00",
+                "content_hash": "doc-async-rp-hash",
+                "content": "In asyncio, coroutines describe units of work, await suspends the current coroutine, and the event loop resumes tasks when their awaited operations complete. This produces cooperative concurrency without creating a thread per task.",
+                "fetch_depth": "deep",
+                "source_score": 0.85
+              }
+            ]
+          }
+        }
+      },
+      "verify": {
+        "claim-1": {
+          "1": {
+            "verdict": "supported",
+            "confidence": 0.9,
+            "supporting_spans": [
+              {
+                "passage_id": "doc-async-docs:0:0",
+                "url": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html",
+                "title": "A Conceptual Overview of asyncio",
+                "section": "Intro",
+                "text": "Asyncio centers around an event loop that runs one task at a time and switches when a coroutine reaches await."
+              },
+              {
+                "passage_id": "doc-async-rp:0:0",
+                "url": "https://realpython.com/async-io-python/",
+                "title": "Async IO in Python",
+                "section": "Intro",
+                "text": "In asyncio, coroutines describe units of work, await suspends the current coroutine, and the event loop resumes tasks when their awaited operations complete."
+              }
+            ],
+            "rationale": "The official docs and a secondary tutorial agree on the core mechanism."
+          }
+        }
+      },
+      "refine": {},
+      "synthesize": {
+        "synthesis": "Ответ\n- asyncio работает вокруг event loop: цикл событий исполняет задачи по очереди и переключается между ними, когда корутина доходит до await. [1][2]\n- Корутины описывают единицы работы, а await явно отдаёт управление циклу событий, чтобы тот мог запустить другие задачи, пока текущая ждёт I/O. [1][2]\n- За счёт этого asyncio даёт кооперативную конкурентность: много задач могут продвигаться вперёд без отдельного потока на каждую задачу. [1][2]\n\nSources\n[1] A Conceptual Overview of asyncio - https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html\n[2] Async IO in Python - https://realpython.com/async-io-python/"
+      }
+    }
+  }
+]
