@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date
 from typing import Literal
 
@@ -20,7 +19,10 @@ from search_agent.domain.models import (
     QueryClassification,
     VerificationResult,
 )
-
+from search_agent.application.claim_policy import (
+    claim_profile_lines as _claim_profile_lines,
+    post_adjust_verification as _post_adjust_verification,
+)
 from search_agent.application.text_heuristics import (
     clamp,
     extract_entities,
@@ -109,42 +111,6 @@ def _default_verification(reason: str) -> VerificationResult:
     )
 
 
-def _claim_profile_lines(claim: Claim) -> list[str]:
-    profile = claim.claim_profile
-    if profile is None:
-        return [
-            "answer_shape=fact",
-            "primary_source_required=False",
-            "min_independent_sources=1",
-            "preferred_domain_types=",
-            "required_dimensions=",
-            "focus_terms=",
-            "strict_contract=False",
-        ]
-    return [
-        f"answer_shape={profile.answer_shape}",
-        f"primary_source_required={profile.primary_source_required}",
-        f"min_independent_sources={profile.min_independent_sources}",
-        f"preferred_domain_types={','.join(profile.preferred_domain_types)}",
-        f"required_dimensions={','.join(profile.required_dimensions)}",
-        f"focus_terms={','.join(profile.focus_terms)}",
-        f"strict_contract={profile.strict_contract}",
-    ]
-
-
-def _is_list_like_contract(profile: ClaimProfile | None) -> bool:
-    if profile is None:
-        return False
-    if profile.answer_shape == "comparison":
-        return True
-    if profile.answer_shape != "overview":
-        return False
-    dimension_keys = {value.casefold() for value in profile.required_dimensions}
-    if not dimension_keys and len(profile.focus_terms) >= 2:
-        return True
-    return bool(dimension_keys & {"feature_list", "improvements", "changes", "highlights", "options"})
-
-
 def _preserve_original_factual_claim(classification: QueryClassification, claim_text: str) -> str:
     if classification.intent != "factual":
         return claim_text
@@ -184,61 +150,6 @@ def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passage
         + "\n\nPassages:\n\n"
         + "\n\n".join(prompt_lines)
     )
-
-
-def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
-    if result.verdict == "supported" and result.confidence < 0.05:
-        return replace(result, confidence=max(result.confidence, 0.38))
-    profile = claim.claim_profile
-    if result.verdict == "supported" and profile is not None and not profile.strict_contract and _is_list_like_contract(profile):
-        rationale = (result.rationale or "").strip()
-        suffix = "Adjusted: open-ended contract stays claim-level insufficient_evidence until synthesis."
-        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
-        return replace(
-            result,
-            verdict="insufficient_evidence",
-            confidence=min(result.confidence, 0.62),
-            supporting_spans=[],
-            missing_dimensions=result.missing_dimensions or ["coverage"],
-            rationale=merged_rationale,
-        )
-    if (
-        result.verdict == "insufficient_evidence"
-        and profile is not None
-        and not profile.strict_contract
-        and profile.answer_shape == "overview"
-    ):
-        if _is_list_like_contract(profile):
-            return result
-        robust = [
-            passage
-            for passage in passages
-            if passage.utility_score >= 0.2 or passage.source_score >= 0.7
-        ]
-        unique_hosts = {
-            (passage.host or "").casefold().removeprefix("www.")
-            for passage in robust
-            if passage.host
-        }
-        if len(robust) >= 2 and len(unique_hosts) >= 1:
-            supporting = [
-                EvidenceSpan(
-                    passage_id=passage.passage_id,
-                    url=passage.url,
-                    title=passage.title,
-                    section=passage.section,
-                    text=normalized_text(passage.text[:220]),
-                )
-                for passage in robust[:2]
-            ]
-            return replace(
-                result,
-                verdict="supported",
-                confidence=max(result.confidence, 0.62),
-                supporting_spans=supporting,
-                missing_dimensions=[],
-            )
-    return result
 
 
 class _NormalizedQueryOutput(BaseModel):
@@ -1148,19 +1059,28 @@ class PydanticAIQueryIntelligence:
             if "number" not in required_dimensions:
                 required_dimensions.append("number")
             lower_dimensions = [value.casefold() for value in required_dimensions]
-            if any("event" in value or "context" in value for value in lower_dimensions):
+            event_like_number = any(
+                marker in value
+                for value in lower_dimensions
+                for marker in ("event", "context", "time")
+            )
+            if event_like_number:
                 min_independent_sources = max(2, min_independent_sources)
                 routing_bias = "iterative_loop"
                 strict_contract = True
-            elif "source" in required_dimensions and len(required_dimensions) >= 2:
+            elif not primary_source_required and not event_like_number:
+                min_independent_sources = 1
+                routing_bias = None
+                strict_contract = False
+            elif "source" in lower_dimensions and len(required_dimensions) >= 2:
                 routing_bias = "iterative_loop"
                 strict_contract = True
-            elif "time" not in required_dimensions:
+            elif "time" not in lower_dimensions:
                 min_independent_sources = 1
                 routing_bias = None
                 strict_contract = False
             else:
-                strict_contract = strict_contract or "number" in required_dimensions
+                strict_contract = strict_contract or "number" in lower_dimensions
 
         return ClaimProfile(
             answer_shape=answer_shape,

@@ -340,6 +340,53 @@ class _FakeContradictionSteps(_FakeSteps):
         return False
 
 
+class _FakeIterativeEscalationIntelligence(_FakeIntelligence):
+    def verify_claim(self, claim, passages, log=None):
+        self.verify_calls += 1
+        if self.verify_calls == 1:
+            return VerificationResult(
+                verdict="insufficient_evidence",
+                confidence=0.45,
+                missing_dimensions=["coverage"],
+                rationale="Need another corroborating source.",
+            )
+        return VerificationResult(
+            verdict="supported",
+            confidence=0.95,
+            supporting_spans=[],
+            rationale="Enough corroboration after the second pass.",
+        )
+
+    def refine_search_queries(
+        self,
+        claim,
+        classification,
+        verification,
+        gated_results,
+        bundle,
+        next_iteration,
+        existing_queries,
+        log=None,
+    ):
+        if verification.verdict != "supported":
+            return [f"{claim.claim_text} official"]
+        return []
+
+
+class _FakeIterativeEscalationSteps(_FakeSteps):
+    def route_claim_retrieval(self, claim, gated_results):
+        return RoutingDecision(
+            mode="targeted_retrieval",
+            certainty=0.88,
+            consistency=0.72,
+            evidence_sufficiency=0.84,
+            rationale="focused retrieval remains sufficient",
+        )
+
+    def should_stop_claim_loop(self, claim, bundle, iteration):
+        return bundle.verification is not None and bundle.verification.verdict == "supported"
+
+
 class _FakeSynthesisIntelligence(_FakeIntelligence):
     def classify_query(self, query: str, log=None):
         return QueryClassification(
@@ -714,6 +761,23 @@ class UseCaseLayerTests(unittest.TestCase):
         self.assertEqual(search_gateway.queries[0], ("Who is the CEO of Microsoft?", "web"))
         self.assertEqual(intelligence.verify_calls, 1)
         self.assertEqual(receipt_writer.calls[0][1], "receipts")
+
+    def test_use_case_reports_best_non_iterative_route_after_successful_escalation(self):
+        use_case = SearchAgentUseCase(
+            intelligence=_FakeIterativeEscalationIntelligence(),
+            search_gateway=_FakeSearchGateway(),
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=_FakeReceiptWriter(),
+            steps=_FakeIterativeEscalationSteps(),
+        )
+
+        report = use_case.run(
+            "Who is the CEO of Microsoft?",
+            get_profile("web"),
+            receipts_dir=None,
+        )
+
+        self.assertEqual(report.claims[0].routing_decision.mode, "targeted_retrieval")
 
     def test_use_case_stops_after_strong_contradiction_without_second_iteration(self):
         receipt_writer = _FakeReceiptWriter()

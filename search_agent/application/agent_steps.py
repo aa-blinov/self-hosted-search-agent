@@ -27,6 +27,19 @@ from search_agent.domain.models import (
 )
 from search_agent.domain.source_priors import lookup_source_prior
 from search_agent import tuning
+from search_agent.application.claim_policy import (
+    answer_type as _policy_answer_type,
+    claim_answer_shape as _policy_claim_answer_shape,
+    claim_contract_gaps as _policy_claim_contract_gaps,
+    claim_focus_terms as _policy_claim_focus_terms,
+    claim_min_independent_sources as _policy_claim_min_independent_sources,
+    claim_requires_primary_source as _policy_claim_requires_primary_source,
+    exact_detail_guardrail_claim as _policy_exact_detail_guardrail_claim,
+    is_news_digest_claim as _policy_is_news_digest_claim,
+    publish_supported_claim as _policy_publish_supported_claim,
+    retrieval_contract_can_drive_synthesis as _policy_retrieval_contract_can_drive_synthesis,
+    should_stop_claim_loop as _policy_should_stop_claim_loop,
+)
 from search_agent.application.text_heuristics import (
     compact_text as _shared_compact_text,
     contains_date_like as _shared_contains_date_like,
@@ -162,9 +175,7 @@ def infer_claim_profile(claim: Claim, classification: QueryClassification) -> Cl
 
 
 def _claim_answer_shape(claim: Claim) -> str:
-    if claim.claim_profile is not None:
-        return claim.claim_profile.answer_shape
-    return "fact"
+    return _policy_claim_answer_shape(claim)
 
 
 def _preferred_domain_bonus(claim: Claim, domain_type: DomainType) -> float:
@@ -674,13 +685,7 @@ def gate_serp_results(
 
 
 def _answer_type(claim: Claim) -> str:
-    profile = claim.claim_profile
-    if profile is not None:
-        if profile.answer_shape == "exact_date":
-            return "time"
-        if profile.answer_shape == "exact_number":
-            return "number"
-    return "fact"
+    return _policy_answer_type(claim)
 
 
 def _extract_answer_candidates(claim: Claim, text: str) -> list[str]:
@@ -1254,25 +1259,17 @@ def _claim_contract_gaps(
     has_primary_source: bool,
     freshness_ok: bool,
 ) -> list[str]:
-    gaps: list[str] = []
-    if _claim_requires_primary_source(claim) and not has_primary_source:
-        gaps.append("primary_source")
-
-    min_sources = _claim_min_independent_sources(claim)
-    if independent_source_count < min_sources:
-        gaps.append("independent_sources")
-
-    if claim.needs_freshness and not freshness_ok:
-        gaps.append("freshness")
-
-    return gaps
+    return _policy_claim_contract_gaps(
+        claim,
+        verification,
+        independent_source_count=independent_source_count,
+        has_primary_source=has_primary_source,
+        freshness_ok=freshness_ok,
+    )
 
 
 def _retrieval_contract_can_drive_synthesis(claim: Claim) -> bool:
-    profile = claim.claim_profile
-    if profile is None:
-        return False
-    return profile.answer_shape in {"product_specs", "overview", "comparison", "news_digest"}
+    return _policy_retrieval_contract_can_drive_synthesis(claim)
 
 
 def _primary_domain_types_for_claim(claim: Claim) -> set[DomainType]:
@@ -1389,18 +1386,7 @@ def refine_query_variants(
 
 
 def _claim_focus_terms(claim: Claim) -> tuple[str, ...]:
-    profile = claim.claim_profile
-    if profile is None:
-        return ()
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for term in profile.focus_terms:
-        key = _compact_text(term)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        ordered.append(term)
-    return tuple(ordered)
+    return _policy_claim_focus_terms(claim)
 
 
 def _focus_term_overlap(claim: Claim, text: str) -> float:
@@ -1427,24 +1413,19 @@ def _focus_term_overlap(claim: Claim, text: str) -> float:
 
 
 def _claim_requires_primary_source(claim: Claim) -> bool:
-    return bool(claim.claim_profile and claim.claim_profile.primary_source_required)
+    return _policy_claim_requires_primary_source(claim)
 
 
 def _claim_min_independent_sources(claim: Claim) -> int:
-    if claim.claim_profile is not None:
-        return max(1, claim.claim_profile.min_independent_sources)
-    return 1
+    return _policy_claim_min_independent_sources(claim)
 
 
 def _exact_detail_guardrail_claim(claim: Claim) -> bool:
-    profile = claim.claim_profile
-    if profile is None:
-        return False
-    return profile.answer_shape == "exact_number" and profile.strict_contract and "number" in profile.required_dimensions
+    return _policy_exact_detail_guardrail_claim(claim)
 
 
 def _is_news_digest_claim(claim: Claim) -> bool:
-    return bool(claim.claim_profile and claim.claim_profile.answer_shape == "news_digest")
+    return _policy_is_news_digest_claim(claim)
 
 
 def _dimension_coverage_score(claim: Claim, text: str) -> float:
@@ -1534,6 +1515,8 @@ def route_claim_retrieval(
     elif answer_type == "number" and certainty >= number_targeted_threshold and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
         mode = "targeted_retrieval"
     elif answer_type == "time" and certainty >= 0.45 and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
+        mode = "targeted_retrieval"
+    elif not open_ended and certainty >= 0.5 and consistency >= 0.5 and evidence_sufficiency >= 0.5:
         mode = "targeted_retrieval"
     elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
         mode = "targeted_retrieval"
@@ -1653,39 +1636,7 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
 
 
 def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int) -> bool:
-    verification = bundle.verification
-    if verification is None:
-        return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-    primary_sensitive = _claim_requires_primary_source(claim)
-    min_sources = _claim_min_independent_sources(claim)
-    profile = claim.claim_profile
-    answer_shape = profile.answer_shape if profile is not None else "fact"
-    open_ended = answer_shape in {"overview", "comparison", "news_digest"}
-
-    if verification.verdict == "supported":
-        if bundle.contract_satisfied:
-            return True
-        if claim.needs_freshness and not bundle.freshness_ok:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if profile is not None and profile.strict_contract:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if primary_sensitive and not bundle.has_primary_source:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if bundle.independent_source_count >= min_sources and (not primary_sensitive or bundle.has_primary_source):
-            return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= min_sources and not primary_sensitive:
-            return True
-
-    if verification.verdict == "insufficient_evidence" and profile is not None and profile.strict_contract:
-        if bundle.contract_satisfied and bundle.considered_passages:
-            return True
-        if _exact_detail_guardrail_claim(claim) and verification.confidence >= 0.9 and bundle.independent_source_count >= 2:
-            return True
-
-    if open_ended and bundle.considered_passages:
-        return True
-
-    return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
+    return _policy_should_stop_claim_loop(claim, bundle, iteration)
 
 
 def _truncate_compose_line(text: str, max_chars: int) -> str:
@@ -1768,6 +1719,25 @@ def _format_citations(url_to_index: dict[str, int], passages: list[Passage]) -> 
         if idx is not None and idx not in seen:
             seen.append(idx)
     return "".join(f"[{idx}]" for idx in seen)
+
+
+def _extract_citation_indices(text: str) -> set[int]:
+    cited: set[int] = set()
+    content = text or ""
+    index = 0
+    while index < len(content):
+        if content[index] != "[":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(content) and content[end].isdigit():
+            end += 1
+        if end > index + 1 and end < len(content) and content[end] == "]":
+            cited.add(int(content[index + 1:end]))
+            index = end + 1
+            continue
+        index += 1
+    return cited
 
 
 def _digest_sentence(passage: Passage) -> str:
@@ -2100,12 +2070,7 @@ def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_cou
 
 
 def _publish_supported_claim(claim: Claim, bundle: EvidenceBundle) -> bool:
-    profile = claim.claim_profile
-    if profile is None:
-        return True
-    if profile.strict_contract and not bundle.contract_satisfied:
-        return False
-    return True
+    return _policy_publish_supported_claim(claim, bundle)
 
 
 def _contract_gap_text(claim: Claim, bundle: EvidenceBundle, *, cyrillic: bool = False) -> str:
@@ -2270,10 +2235,16 @@ def compose_answer(report: AgentRunResult) -> str:
         lines.append(lb["insufficient"])
         lines.extend(gap_lines)
 
+    used_source_indices = set()
+    for line in supported_lines + caveat_lines:
+        used_source_indices.update(_extract_citation_indices(line))
+
     if indexed_sources:
         lines.append("")
         lines.append(lb["sources"])
         for idx, title, url in indexed_sources:
+            if used_source_indices and idx not in used_source_indices:
+                continue
             lines.append(f"[{idx}] {title} - {url}")
 
     return "\n".join(lines)

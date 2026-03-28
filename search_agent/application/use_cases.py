@@ -369,6 +369,7 @@ class SearchAgentUseCase:
             evidence_sufficiency=0.0,
             rationale="Not evaluated yet.",
         )
+        reported_routing_decision = routing_decision
         bundle: EvidenceBundle | None = None
 
         existing_queries: set[str] = set()
@@ -407,7 +408,10 @@ class SearchAgentUseCase:
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             all_gated_results = _merge_gated_results(all_gated_results, gated_results)
-            routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
+            base_routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
+            if base_routing_decision.mode != "iterative_loop":
+                reported_routing_decision = base_routing_decision
+            routing_decision = base_routing_decision
             profile_contract = claim.claim_profile
             if (
                 profile_contract is not None
@@ -501,6 +505,7 @@ class SearchAgentUseCase:
                         mode="iterative_loop",
                         rationale=routing_decision.rationale + " | contradiction settled without extra iteration",
                     )
+                reported_routing_decision = routing_decision
                 break
 
             if self._steps.should_stop_claim_loop(claim, bundle, iteration):
@@ -524,6 +529,15 @@ class SearchAgentUseCase:
                 classification,
             )
 
+        final_routing_decision = routing_decision
+        if (
+            bundle is not None
+            and bundle.verification is not None
+            and bundle.verification.verdict == "supported"
+            and reported_routing_decision.mode != "iterative_loop"
+        ):
+            final_routing_decision = reported_routing_decision
+
         claim_run = ClaimRun(
             claim=claim,
             query_variants=all_variants,
@@ -533,7 +547,7 @@ class SearchAgentUseCase:
             fetched_documents=documents,
             passages=final_passages,
             evidence_bundle=bundle,
-            routing_decision=routing_decision,
+            routing_decision=final_routing_decision,
         )
         return claim_run, iterations_used
 

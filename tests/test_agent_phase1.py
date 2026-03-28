@@ -270,6 +270,97 @@ class AgentPhase1Tests(unittest.TestCase):
         self.assertIn("The Moon is made of cheese.: insufficient evidence", answer)
         self.assertIn("Sources", answer)
 
+    def test_compose_answer_only_lists_sources_that_are_cited(self):
+        supporting_passages = [
+            Passage(
+                passage_id="p1",
+                url="https://example.com/source-1",
+                canonical_url="https://example.com/source-1",
+                host="example.com",
+                title="Source 1",
+                section="Main",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p1",
+                text="OpenAI announced GPT-4.1 in March 2026.",
+                source_score=0.95,
+                utility_score=0.9,
+            ),
+            Passage(
+                passage_id="p2",
+                url="https://example.org/source-2",
+                canonical_url="https://example.org/source-2",
+                host="example.org",
+                title="Source 2",
+                section="Main",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p2",
+                text="OpenAI announced GPT-4.1 in March 2026.",
+                source_score=0.9,
+                utility_score=0.8,
+            ),
+            Passage(
+                passage_id="p3",
+                url="https://example.net/source-3",
+                canonical_url="https://example.net/source-3",
+                host="example.net",
+                title="Source 3",
+                section="Main",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p3",
+                text="Additional corroboration.",
+                source_score=0.88,
+                utility_score=0.7,
+            ),
+        ]
+        bundle = EvidenceBundle(
+            claim_id="claim-1",
+            claim_text="OpenAI announced GPT-4.1 in March 2026.",
+            supporting_passages=supporting_passages,
+            considered_passages=supporting_passages,
+            independent_source_count=3,
+            has_primary_source=True,
+            freshness_ok=True,
+            verification=VerificationResult(
+                verdict="supported",
+                confidence=0.95,
+                supporting_spans=[],
+            ),
+        )
+        report = AgentRunResult(
+            user_query="What did OpenAI announce?",
+            classification=QueryClassification(
+                query="What did OpenAI announce?",
+                normalized_query="What did OpenAI announce?",
+                intent="factual",
+                complexity="single_hop",
+                needs_freshness=False,
+            ),
+            claims=[
+                ClaimRun(
+                    claim=Claim(
+                        claim_id="claim-1",
+                        claim_text="OpenAI announced GPT-4.1 in March 2026.",
+                        priority=1,
+                        needs_freshness=False,
+                    ),
+                    evidence_bundle=bundle,
+                )
+            ],
+            answer="",
+        )
+
+        answer = compose_answer(report)
+
+        self.assertIn("[1] Source 1 - https://example.com/source-1", answer)
+        self.assertIn("[2] Source 2 - https://example.org/source-2", answer)
+        self.assertNotIn("[3] Source 3 - https://example.net/source-3", answer)
+
     def test_serp_gate_prefers_entity_matched_official_host(self):
         claim = Claim(
             claim_id="claim-1",
@@ -951,6 +1042,64 @@ class AgentPhase1Tests(unittest.TestCase):
         decision = route_claim_retrieval(claim, gated)
 
         self.assertIn(decision.mode, {"short_path", "targeted_retrieval"})
+
+    def test_route_consensus_fact_claim_can_stay_targeted_without_exact_number_profile(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            priority=1,
+            needs_freshness=False,
+        )
+        gated = [
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r1",
+                    query_variant_id="v1",
+                    title="What is the boiling point of water in Celsius?",
+                    url="https://example.com/boiling-point",
+                    snippet="At standard atmospheric pressure, water boils at 100 degrees Celsius.",
+                    canonical_url="https://example.com/boiling-point",
+                    host="example.com",
+                    position=1,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="unknown",
+                    source_prior=0.2,
+                    primary_source_likelihood=0.2,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.8,
+                    semantic_match_score=0.9,
+                    source_score=0.7,
+                ),
+            ),
+            GatedSerpResult(
+                serp=SerpResult(
+                    result_id="r2",
+                    query_variant_id="v1",
+                    title="Boiling point of water at 1 atm",
+                    url="https://example.org/boiling-water",
+                    snippet="The boiling point of water is 100 C at 1 atm pressure.",
+                    canonical_url="https://example.org/boiling-water",
+                    host="example.org",
+                    position=2,
+                ),
+                assessment=SourceAssessment(
+                    domain_type="unknown",
+                    source_prior=0.2,
+                    primary_source_likelihood=0.2,
+                    freshness_score=0.4,
+                    seo_spam_risk=0.0,
+                    entity_match_score=0.75,
+                    semantic_match_score=0.85,
+                    source_score=0.7,
+                ),
+            ),
+        ]
+
+        decision = route_claim_retrieval(claim, gated)
+
+        self.assertEqual(decision.mode, "targeted_retrieval")
 
     def test_route_release_date_query_can_stay_targeted_from_release_source_cues(self):
         claim = Claim(

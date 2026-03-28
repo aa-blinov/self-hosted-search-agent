@@ -219,6 +219,33 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(profile.routing_bias, "iterative_loop")
         self.assertTrue(profile.strict_contract)
 
+    def test_claim_profile_relaxes_simple_exact_number_contracts(self) -> None:
+        classification = QueryClassification(
+            query="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            normalized_query="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="exact_number",
+                primary_source_required=False,
+                min_independent_sources=2,
+                routing_bias="iterative_loop",
+                required_dimensions=["number", "source"],
+                strict_contract=True,
+                focus_terms=["boiling point", "Celsius"],
+            ),
+            classification,
+        )
+
+        self.assertEqual(profile.answer_shape, "exact_number")
+        self.assertEqual(profile.min_independent_sources, 1)
+        self.assertIsNone(profile.routing_bias)
+        self.assertFalse(profile.strict_contract)
+
     def test_claim_profile_relaxes_simple_exact_date_contracts(self) -> None:
         classification = QueryClassification(
             query="When was Python 3.13.0 released?",
