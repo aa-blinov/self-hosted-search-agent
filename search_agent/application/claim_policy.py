@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from search_agent import tuning
+from search_agent.application import policy_tuning
 from search_agent.application.text_heuristics import compact_text, normalized_text
 from search_agent.domain.models import Claim, ClaimProfile, EvidenceBundle, EvidenceSpan, Passage, VerificationResult
 
@@ -18,7 +19,7 @@ def claim_profile_lines(claim: Claim) -> list[str]:
         return [
             "answer_shape=fact",
             "primary_source_required=False",
-            "min_independent_sources=1",
+            f"min_independent_sources={policy_tuning.DEFAULT_FACT_MIN_INDEPENDENT_SOURCES}",
             "preferred_domain_types=",
             "required_dimensions=",
             "focus_terms=",
@@ -60,8 +61,8 @@ def claim_requires_primary_source(claim: Claim) -> bool:
 
 def claim_min_independent_sources(claim: Claim) -> int:
     if claim.claim_profile is not None:
-        return max(1, claim.claim_profile.min_independent_sources)
-    return 1
+        return max(policy_tuning.DEFAULT_FACT_MIN_INDEPENDENT_SOURCES, claim.claim_profile.min_independent_sources)
+    return policy_tuning.DEFAULT_FACT_MIN_INDEPENDENT_SOURCES
 
 
 def exact_detail_guardrail_claim(claim: Claim) -> bool:
@@ -160,13 +161,21 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
             return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
         if bundle.independent_source_count >= min_sources and (not primary_sensitive or bundle.has_primary_source):
             return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= min_sources and not primary_sensitive:
+        if (
+            verification.confidence >= policy_tuning.SUPPORTED_STOP_CONFIDENCE
+            and bundle.independent_source_count >= min_sources
+            and not primary_sensitive
+        ):
             return True
 
     if verification.verdict == "insufficient_evidence" and profile is not None and profile.strict_contract:
         if bundle.contract_satisfied and bundle.considered_passages:
             return True
-        if exact_detail_guardrail_claim(claim) and verification.confidence >= 0.9 and bundle.independent_source_count >= 2:
+        if (
+            exact_detail_guardrail_claim(claim)
+            and verification.confidence >= policy_tuning.STRICT_EXACT_DETAIL_STOP_CONFIDENCE
+            and bundle.independent_source_count >= policy_tuning.STRICT_EXACT_DETAIL_STOP_MIN_SOURCES
+        ):
             return True
 
     if open_ended and bundle.considered_passages:
@@ -176,8 +185,8 @@ def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int)
 
 
 def post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
-    if result.verdict == "supported" and result.confidence < 0.05:
-        return replace(result, confidence=max(result.confidence, 0.38))
+    if result.verdict == "supported" and result.confidence < policy_tuning.SUPPORTED_CONFIDENCE_FLOOR_THRESHOLD:
+        return replace(result, confidence=max(result.confidence, policy_tuning.SUPPORTED_CONFIDENCE_FLOOR_VALUE))
     profile = claim.claim_profile
     if result.verdict == "supported" and profile is not None and not profile.strict_contract and is_list_like_contract(profile):
         rationale = (result.rationale or "").strip()
@@ -186,7 +195,7 @@ def post_adjust_verification(claim: Claim, passages: list[Passage], result: Veri
         return replace(
             result,
             verdict="insufficient_evidence",
-            confidence=min(result.confidence, 0.62),
+            confidence=min(result.confidence, policy_tuning.OPEN_ENDED_DEMOTION_CONFIDENCE_CAP),
             supporting_spans=[],
             missing_dimensions=result.missing_dimensions or ["coverage"],
             rationale=merged_rationale,
@@ -202,28 +211,34 @@ def post_adjust_verification(claim: Claim, passages: list[Passage], result: Veri
         robust = [
             passage
             for passage in passages
-            if passage.utility_score >= 0.2 or passage.source_score >= 0.7
+            if (
+                passage.utility_score >= policy_tuning.OVERVIEW_ROBUST_PASSAGE_UTILITY_THRESHOLD
+                or passage.source_score >= policy_tuning.OVERVIEW_ROBUST_PASSAGE_SOURCE_THRESHOLD
+            )
         ]
         unique_hosts = {
             (passage.host or "").casefold().removeprefix("www.")
             for passage in robust
             if passage.host
         }
-        if len(robust) >= 2 and len(unique_hosts) >= 1:
+        if (
+            len(robust) >= policy_tuning.OVERVIEW_SUPPORTING_PASSAGE_COUNT
+            and len(unique_hosts) >= policy_tuning.OVERVIEW_SUPPORTING_MIN_UNIQUE_HOSTS
+        ):
             supporting = [
                 EvidenceSpan(
                     passage_id=passage.passage_id,
                     url=passage.url,
                     title=passage.title,
                     section=passage.section,
-                    text=normalized_text(passage.text[:220]),
+                    text=normalized_text(passage.text[:policy_tuning.OVERVIEW_SUPPORTING_SPAN_CHARS]),
                 )
-                for passage in robust[:2]
+                for passage in robust[:policy_tuning.OVERVIEW_SUPPORTING_PASSAGE_COUNT]
             ]
             return replace(
                 result,
                 verdict="supported",
-                confidence=max(result.confidence, 0.62),
+                confidence=max(result.confidence, policy_tuning.OVERVIEW_PROMOTED_CONFIDENCE_FLOOR),
                 supporting_spans=supporting,
                 missing_dimensions=[],
             )

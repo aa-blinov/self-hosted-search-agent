@@ -27,6 +27,7 @@ from search_agent.domain.models import (
 )
 from search_agent.domain.source_priors import lookup_source_prior
 from search_agent import tuning
+from search_agent.application import policy_tuning
 from search_agent.application.claim_policy import (
     answer_type as _policy_answer_type,
     claim_answer_shape as _policy_claim_answer_shape,
@@ -168,10 +169,21 @@ def infer_claim_profile(claim: Claim, classification: QueryClassification) -> Cl
     if claim.claim_profile is not None:
         return claim.claim_profile
     if classification.intent == "news_digest":
-        return ClaimProfile(answer_shape="news_digest", min_independent_sources=3, routing_bias="iterative_loop")
+        return ClaimProfile(
+            answer_shape="news_digest",
+            min_independent_sources=policy_tuning.DEFAULT_NEWS_DIGEST_MIN_INDEPENDENT_SOURCES,
+            routing_bias="iterative_loop",
+        )
     if classification.intent == "synthesis":
-        return ClaimProfile(answer_shape="overview", min_independent_sources=2, routing_bias="iterative_loop")
-    return ClaimProfile(answer_shape="fact", min_independent_sources=1)
+        return ClaimProfile(
+            answer_shape="overview",
+            min_independent_sources=policy_tuning.DEFAULT_OVERVIEW_MIN_INDEPENDENT_SOURCES,
+            routing_bias="iterative_loop",
+        )
+    return ClaimProfile(
+        answer_shape="fact",
+        min_independent_sources=policy_tuning.DEFAULT_FACT_MIN_INDEPENDENT_SOURCES,
+    )
 
 
 def _claim_answer_shape(claim: Claim) -> str:
@@ -182,7 +194,7 @@ def _preferred_domain_bonus(claim: Claim, domain_type: DomainType) -> float:
     profile = claim.claim_profile
     if profile is None or not profile.preferred_domain_types:
         return 0.0
-    return 0.08 if domain_type in profile.preferred_domain_types else 0.0
+    return policy_tuning.PREFERRED_DOMAIN_TYPE_BONUS if domain_type in profile.preferred_domain_types else 0.0
 
 
 def _product_specs_result_bonus(claim: Claim, title: str, snippet: str, url: str) -> float:
@@ -552,37 +564,30 @@ def _spam_risk(result) -> float:
     prior = lookup_source_prior(host)
     risk = 0.0
     if host.endswith(".top") or host.endswith(".best"):
-        risk += 0.6
+        risk += policy_tuning.SPAM_SUFFIX_PENALTY
     if any(cue in text for cue in _SPAM_CUES):
-        risk += 0.25
+        risk += policy_tuning.SPAM_CUE_PENALTY
     if text.count("|") >= 2 or text.count(" - ") >= 3:
-        risk += 0.2
+        risk += policy_tuning.SPAM_TITLE_SEPARATOR_PENALTY
     if len(_tokenize(result.title)) > 14:
-        risk += 0.1
+        risk += policy_tuning.SPAM_LONG_TITLE_PENALTY
     if _domain_type(host) in {"official", "academic"}:
-        risk -= 0.2
+        risk -= policy_tuning.SPAM_AUTHORITATIVE_DOMAIN_DISCOUNT
     risk += prior.spam_penalty
     return _clamp(risk)
 
 
 def _primary_source_likelihood(claim: Claim, result, domain_type: DomainType) -> float:
     prior = lookup_source_prior(result.host)
-    base = {
-        "official": 0.9,
-        "academic": 0.85,
-        "vendor": 0.7,
-        "major_media": 0.45,
-        "forum": 0.15,
-        "unknown": 0.4,
-    }[domain_type]
+    base = policy_tuning.PRIMARY_SOURCE_BASE_BY_DOMAIN_TYPE[domain_type]
     text = f"{result.title} {result.snippet} {result.url}".casefold()
     if any(cue in text for cue in _PRIMARY_SOURCE_CUES):
-        base += 0.1
-    base += 0.18 * _entity_host_match_score(claim, result.host)
+        base += policy_tuning.PRIMARY_SOURCE_CUE_BOOST
+    base += policy_tuning.PRIMARY_SOURCE_ENTITY_HOST_MATCH_WEIGHT * _entity_host_match_score(claim, result.host)
     if any(path_cue in text for path_cue in ("/announcement/", "/press", "/release", "/releases/", "/downloads/release/", "/whatsnew/")):
-        base += 0.08
+        base += policy_tuning.PRIMARY_SOURCE_PATH_CUE_BOOST
     if domain_type == "forum":
-        base -= 0.12
+        base -= policy_tuning.PRIMARY_SOURCE_FORUM_PENALTY
     base += prior.primary_boost
     return _clamp(base)
 
@@ -598,14 +603,7 @@ def gate_serp_results(
         for result in snapshot.results:
             domain_type = _effective_domain_type(claim, result.host)
             prior = lookup_source_prior(result.host)
-            domain_prior = {
-                "official": 1.0,
-                "academic": 0.95,
-                "vendor": 0.75,
-                "major_media": 0.7,
-                "forum": 0.3,
-                "unknown": 0.5,
-            }[domain_type]
+            domain_prior = policy_tuning.SERP_DOMAIN_PRIOR_BY_TYPE[domain_type]
             semantic_match = _semantic_overlap(claim.claim_text, f"{result.title} {result.snippet}")
             entity_match = _entity_overlap(claim.entity_set, f"{result.title} {result.snippet}")
             host_entity_match = _entity_host_match_score(claim, result.host)
@@ -616,17 +614,17 @@ def gate_serp_results(
             preferred_domain_bonus = _preferred_domain_bonus(claim, domain_type)
             product_bonus = _product_specs_result_bonus(claim, result.title, result.snippet, result.url)
             source_score = _clamp(
-                0.22 * domain_prior
-                + 0.22 * primary
-                + 0.12 * freshness
-                + 0.16 * entity_match
-                + 0.12 * semantic_match
-                + 0.06 * host_entity_match
-                + 0.10 * time_alignment
+                policy_tuning.SERP_DOMAIN_PRIOR_WEIGHT * domain_prior
+                + policy_tuning.SERP_PRIMARY_WEIGHT * primary
+                + policy_tuning.SERP_FRESHNESS_WEIGHT * freshness
+                + policy_tuning.SERP_ENTITY_MATCH_WEIGHT * entity_match
+                + policy_tuning.SERP_SEMANTIC_MATCH_WEIGHT * semantic_match
+                + policy_tuning.SERP_HOST_ENTITY_WEIGHT * host_entity_match
+                + policy_tuning.SERP_TIME_ALIGNMENT_WEIGHT * time_alignment
                 + preferred_domain_bonus
                 + product_bonus
                 + prior.source_prior
-                - 0.25 * spam
+                - policy_tuning.SERP_SPAM_PENALTY_WEIGHT * spam
             )
             reasons = [
                 f"domain={domain_type}",
@@ -807,19 +805,12 @@ def _routing_limits(profile, decision: RoutingDecision, iteration: int = 1) -> t
 def _verification_source_bonus(claim: Claim, *, host: str, title: str, url: str) -> float:
     domain_type = _effective_domain_type(claim, host)
     prior = lookup_source_prior(host)
-    bonus = {
-        "official": 0.38,
-        "academic": 0.34,
-        "vendor": 0.18,
-        "major_media": 0.08,
-        "forum": -0.20,
-        "unknown": 0.0,
-    }[domain_type]
+    bonus = policy_tuning.VERIFICATION_BONUS_BY_DOMAIN_TYPE[domain_type]
     lowered = f"{title} {url}".casefold()
     if any(cue in lowered for cue in ("announcement", "press", "release", "released", "downloads/release", "whatsnew", "/blog/")):
-        bonus += 0.14
+        bonus += policy_tuning.VERIFICATION_RELEASE_CUE_BOOST
     if any(cue in lowered for cue in ("hacker news", "reddit", "forum", "comment")):
-        bonus -= 0.12
+        bonus -= policy_tuning.VERIFICATION_FORUM_CUE_PENALTY
     bonus += prior.verification_bonus
     return bonus
 
@@ -839,12 +830,13 @@ def score_shallow_document_for_claim(claim: Claim, document: FetchedDocument) ->
         title=document.title,
         url=document.url,
     )
+    weights = policy_tuning.SHALLOW_DOCUMENT_SCORE_WEIGHTS
     return _clamp(
-        0.30 * _semantic_overlap(claim.claim_text, overview)
-        + 0.22 * _entity_overlap(claim.entity_set, overview)
-        + 0.18 * _dimension_coverage_score(claim, overview)
-        + 0.18 * document.source_score
-        + 0.12 * max(source_bonus, 0.0)
+        weights["semantic_overlap"] * _semantic_overlap(claim.claim_text, overview)
+        + weights["entity_overlap"] * _entity_overlap(claim.entity_set, overview)
+        + weights["dimension_coverage"] * _dimension_coverage_score(claim, overview)
+        + weights["source_score"] * document.source_score
+        + weights["source_bonus"] * max(source_bonus, 0.0)
     )
 
 
@@ -1433,21 +1425,26 @@ def _dimension_coverage_score(claim: Claim, text: str) -> float:
     score = 0.0
     answer_type = _answer_type(claim)
     focus_overlap = _focus_term_overlap(claim, text)
+    weights = policy_tuning.DIMENSION_COVERAGE
     if answer_type == "time" and _contains_date_like(text):
-        score += 0.35
-        score += 0.20 * focus_overlap
+        score += weights["time_base"]
+        score += weights["time_focus_weight"] * focus_overlap
     elif answer_type == "number":
         if _shared_extract_numbers(text):
-            score += 0.35 if focus_overlap > 0.25 or not _claim_focus_terms(claim) else 0.05
-        score += 0.25 * focus_overlap
+            score += (
+                weights["number_base_with_focus"]
+                if focus_overlap > weights["number_focus_overlap_threshold"] or not _claim_focus_terms(claim)
+                else weights["number_base_without_focus"]
+            )
+        score += weights["number_focus_weight"] * focus_overlap
     elif focus_overlap > 0.0:
-        score += 0.35 * focus_overlap
+        score += weights["generic_focus_weight"] * focus_overlap
     if claim.time_scope and claim.time_scope.casefold() in lowered:
-        score += 0.15
+        score += weights["time_scope_boost"]
     if answer_type == "person" and _contains_person_span(text):
-        score += 0.2
+        score += weights["person_boost"]
     if answer_type == "location" and _contains_location_span(text):
-        score += 0.2
+        score += weights["location_boost"]
     return _clamp(score)
 
 
@@ -1455,7 +1452,8 @@ def route_claim_retrieval(
     claim: Claim,
     gated_results: list[GatedSerpResult],
 ) -> RoutingDecision:
-    top_results = gated_results[:5]
+    routing = policy_tuning.ROUTING
+    top_results = gated_results[:routing["top_results_limit"]]
     if not top_results:
         return RoutingDecision(
             mode="iterative_loop",
@@ -1488,15 +1486,34 @@ def route_claim_retrieval(
 
     evidence_sufficiency = 0.0
     combined_top_text = " ".join(f"{result.serp.title} {result.serp.snippet}" for result in top_results)
-    evidence_sufficiency += min(0.45, 0.11 * sum(result.assessment.source_score >= 0.6 for result in gated_results[:8]))
-    evidence_sufficiency += 0.2 if any(result.assessment.primary_source_likelihood >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 if any(result.assessment.entity_match_score >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 if any(result.assessment.semantic_match_score >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 * max_detail_coverage
-    evidence_sufficiency += 0.12 * _focus_term_overlap(claim, combined_top_text)
+    evidence_sufficiency += min(
+        routing["evidence_score_cap"],
+        routing["evidence_source_weight"]
+        * sum(
+            result.assessment.source_score >= routing["evidence_source_threshold"]
+            for result in gated_results[:routing["gated_results_support_window"]]
+        ),
+    )
+    evidence_sufficiency += (
+        routing["evidence_primary_boost"]
+        if any(result.assessment.primary_source_likelihood >= routing["evidence_primary_threshold"] for result in top_results)
+        else 0.0
+    )
+    evidence_sufficiency += (
+        routing["evidence_entity_boost"]
+        if any(result.assessment.entity_match_score >= routing["evidence_entity_threshold"] for result in top_results)
+        else 0.0
+    )
+    evidence_sufficiency += (
+        routing["evidence_semantic_boost"]
+        if any(result.assessment.semantic_match_score >= routing["evidence_semantic_threshold"] for result in top_results)
+        else 0.0
+    )
+    evidence_sufficiency += routing["evidence_detail_weight"] * max_detail_coverage
+    evidence_sufficiency += routing["evidence_focus_weight"] * _focus_term_overlap(claim, combined_top_text)
     evidence_sufficiency = _clamp(evidence_sufficiency)
     certainty = _clamp(certainty)
-    consistency = _clamp(max(consistency, dimension_alignment * 0.6))
+    consistency = _clamp(max(consistency, dimension_alignment * routing["consistency_dimension_weight"]))
 
     profile = claim.claim_profile
     answer_shape = profile.answer_shape if profile is not None else "fact"
@@ -1504,21 +1521,54 @@ def route_claim_retrieval(
     open_ended = answer_shape in {"product_specs", "overview", "comparison", "news_digest"}
     exact_detail_request = _exact_detail_guardrail_claim(claim)
     answer_type = _answer_type(claim)
-    number_targeted_threshold = 0.4 if profile is not None and profile.answer_shape == "exact_number" and not profile.strict_contract else 0.45
+    number_targeted_threshold = (
+        routing["exact_number_targeted_threshold"]
+        if profile is not None and profile.answer_shape == "exact_number" and not profile.strict_contract
+        else routing["default_number_targeted_threshold"]
+    )
 
-    if exact_detail_request and (max_detail_coverage < 0.45 or _focus_term_overlap(claim, combined_top_text) < 0.6):
+    if (
+        exact_detail_request
+        and (
+            max_detail_coverage < routing["exact_detail_min_coverage"]
+            or _focus_term_overlap(claim, combined_top_text) < routing["exact_detail_min_focus_overlap"]
+        )
+    ):
         mode = "iterative_loop"
     elif routing_bias == "iterative_loop":
         mode = "iterative_loop"
-    elif not open_ended and certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
+    elif (
+        not open_ended
+        and certainty >= routing["short_path_certainty"]
+        and consistency >= routing["short_path_consistency"]
+        and evidence_sufficiency >= routing["short_path_sufficiency"]
+    ):
         mode = "short_path"
-    elif answer_type == "number" and certainty >= number_targeted_threshold and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
+    elif (
+        answer_type == "number"
+        and certainty >= number_targeted_threshold
+        and max_detail_coverage >= routing["targeted_number_min_coverage"]
+        and evidence_sufficiency >= routing["targeted_number_min_sufficiency"]
+    ):
         mode = "targeted_retrieval"
-    elif answer_type == "time" and certainty >= 0.45 and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
+    elif (
+        answer_type == "time"
+        and certainty >= routing["targeted_time_certainty"]
+        and max_detail_coverage >= routing["targeted_number_min_coverage"]
+        and evidence_sufficiency >= routing["targeted_number_min_sufficiency"]
+    ):
         mode = "targeted_retrieval"
-    elif not open_ended and certainty >= 0.5 and consistency >= 0.5 and evidence_sufficiency >= 0.5:
+    elif (
+        not open_ended
+        and certainty >= routing["targeted_default_certainty"]
+        and consistency >= routing["targeted_default_consistency"]
+        and evidence_sufficiency >= routing["targeted_default_sufficiency"]
+    ):
         mode = "targeted_retrieval"
-    elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
+    elif (
+        certainty >= routing["targeted_fallback_certainty"]
+        and evidence_sufficiency >= routing["targeted_fallback_sufficiency"]
+    ):
         mode = "targeted_retrieval"
     else:
         mode = "iterative_loop"
@@ -1550,32 +1600,35 @@ def cheap_passage_score(claim: Claim, passage: Passage) -> float:
         haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
         region_match = _entity_overlap([region], haystack) if region else entity_overlap
         time_match = _news_digest_time_match(claim, passage)
+        weights = policy_tuning.CHEAP_PASSAGE_NEWS_WEIGHTS
         return _clamp(
-            0.18 * overlap
-            + 0.28 * region_match
-            + 0.22 * time_match
-            + 0.16 * focus_overlap
-            + 0.16 * passage.source_score
+            weights["overlap"] * overlap
+            + weights["region_match"] * region_match
+            + weights["time_match"] * time_match
+            + weights["focus_overlap"] * focus_overlap
+            + weights["source_score"] * passage.source_score
         )
 
     if _claim_answer_shape(claim) == "product_specs":
         preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+        weights = policy_tuning.CHEAP_PASSAGE_PRODUCT_WEIGHTS
         return _clamp(
-            0.28 * overlap
-            + 0.20 * entity_overlap
-            + 0.16 * dimension_overlap
-            + 0.16 * focus_overlap
-            + 0.10 * passage.source_score
-            + 0.10 * preferred_bonus
+            weights["overlap"] * overlap
+            + weights["entity_overlap"] * entity_overlap
+            + weights["dimension_overlap"] * dimension_overlap
+            + weights["focus_overlap"] * focus_overlap
+            + weights["source_score"] * passage.source_score
+            + weights["preferred_bonus"] * preferred_bonus
         )
 
+    weights = policy_tuning.CHEAP_PASSAGE_DEFAULT_WEIGHTS
     return _clamp(
-        0.30 * overlap
-        + 0.22 * entity_overlap
-        + 0.18 * dimension_overlap
-        + 0.15 * focus_overlap
-        + 0.07 * number_overlap
-        + 0.08 * passage.source_score
+        weights["overlap"] * overlap
+        + weights["entity_overlap"] * entity_overlap
+        + weights["dimension_overlap"] * dimension_overlap
+        + weights["focus_overlap"] * focus_overlap
+        + weights["number_overlap"] * number_overlap
+        + weights["source_score"] * passage.source_score
     )
 
 
@@ -1593,45 +1646,48 @@ def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
         haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
         region_match = _entity_overlap([region], haystack) if region else _entity_overlap(claim.entity_set, haystack)
         time_match = _news_digest_time_match(claim, passage)
+        weights = policy_tuning.UTILITY_NEWS_WEIGHTS
         return _clamp(
-            0.24 * cheap_passage_score(claim, passage)
-            + 0.24 * region_match
-            + 0.18 * time_match
-            + 0.16 * focus_overlap
-            + 0.10 * max(source_bonus, 0.0)
-            + 0.08 * passage.source_score
+            weights["cheap_score"] * cheap_passage_score(claim, passage)
+            + weights["region_match"] * region_match
+            + weights["time_match"] * time_match
+            + weights["focus_overlap"] * focus_overlap
+            + weights["source_bonus"] * max(source_bonus, 0.0)
+            + weights["source_score"] * passage.source_score
         )
 
     if _claim_answer_shape(claim) == "product_specs":
         preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+        weights = policy_tuning.UTILITY_PRODUCT_WEIGHTS
         return _clamp(
-            0.36 * cheap_passage_score(claim, passage)
-            + 0.18 * focus_overlap
-            + 0.16 * preferred_bonus
-            + 0.18 * max(source_bonus, 0.0)
-            + 0.12 * passage.source_score
+            weights["cheap_score"] * cheap_passage_score(claim, passage)
+            + weights["focus_overlap"] * focus_overlap
+            + weights["preferred_bonus"] * preferred_bonus
+            + weights["source_bonus"] * max(source_bonus, 0.0)
+            + weights["source_score"] * passage.source_score
         )
 
     directness = 0.0
     answer_type = _answer_type(claim)
     if answer_type == "time" and _contains_date_like(passage.text):
-        directness += 0.3
+        directness += policy_tuning.DIRECTNESS_TIME_BOOST
     elif answer_type == "number" and _shared_extract_numbers(passage.text):
-        directness += 0.3
+        directness += policy_tuning.DIRECTNESS_NUMBER_BOOST
     elif answer_type == "person" and _contains_person_span(passage.text):
-        directness += 0.2
+        directness += policy_tuning.DIRECTNESS_PERSON_BOOST
     elif answer_type == "location" and _contains_location_span(passage.text):
-        directness += 0.2
+        directness += policy_tuning.DIRECTNESS_LOCATION_BOOST
 
-    contradiction_signal = 0.15 if _contains_negation_cue(passage.text.casefold()) else 0.0
+    contradiction_signal = policy_tuning.CONTRADICTION_SIGNAL_BOOST if _contains_negation_cue(passage.text.casefold()) else 0.0
+    weights = policy_tuning.UTILITY_DEFAULT_WEIGHTS
     return _clamp(
-        0.30 * cheap_passage_score(claim, passage)
-        + 0.20 * _dimension_coverage_score(claim, passage.text)
-        + 0.15 * focus_overlap
-        + 0.15 * directness
-        + 0.12 * max(source_bonus, 0.0)
-        + 0.08 * passage.source_score
-        + 0.05 * contradiction_signal
+        weights["cheap_score"] * cheap_passage_score(claim, passage)
+        + weights["dimension_coverage"] * _dimension_coverage_score(claim, passage.text)
+        + weights["focus_overlap"] * focus_overlap
+        + weights["directness"] * directness
+        + weights["source_bonus"] * max(source_bonus, 0.0)
+        + weights["source_score"] * passage.source_score
+        + weights["contradiction_signal"] * contradiction_signal
     )
 
 
@@ -1770,15 +1826,16 @@ def _aligned_news_digest_passages(run: ClaimRun) -> list[Passage]:
         region_match = _entity_overlap([region], lead) if region else 0.0
         time_match = _news_digest_time_match(run.claim, passage)
         local_bonus = _local_news_host_bonus(passage.host)
-        if region and region_match < 0.25:
+        if region and region_match < policy_tuning.NEWS_SELECTION["min_region_match"]:
             continue
         if run.claim.time_scope and time_match <= 0.0:
             continue
+        weights = policy_tuning.NEWS_SELECTION
         score = (
-            0.42 * region_match
-            + 0.25 * time_match
-            + 0.15 * local_bonus
-            + 0.18 * max(passage.utility_score, passage.source_score)
+            weights["region_weight"] * region_match
+            + weights["time_weight"] * time_match
+            + weights["local_bonus_weight"] * local_bonus
+            + weights["utility_or_source_weight"] * max(passage.utility_score, passage.source_score)
         )
         scored.append((score, passage))
 
@@ -1859,18 +1916,19 @@ def _time_specificity_score(text: str) -> float:
 
 
 def _answer_sentence_score(claim: Claim, sentence: str) -> float:
-    score = _semantic_overlap(claim.claim_text, sentence) + 0.15 * _entity_overlap(claim.entity_set, sentence)
+    weights = policy_tuning.ANSWER_SENTENCE
+    score = _semantic_overlap(claim.claim_text, sentence) + weights["entity_weight"] * _entity_overlap(claim.entity_set, sentence)
     answer_type = _answer_type(claim)
     if answer_type == "time":
-        score += 0.65 * _time_specificity_score(sentence)
+        score += weights["time_specificity_weight"] * _time_specificity_score(sentence)
     elif answer_type == "number" and _shared_extract_numbers(sentence):
-        score += 0.35
+        score += weights["number_boost"]
     elif answer_type == "person" and _contains_person_span(sentence):
-        score += 0.2
+        score += weights["person_boost"]
     elif answer_type == "location" and _contains_location_span(sentence):
-        score += 0.2
+        score += weights["location_boost"]
     if claim.time_scope and claim.time_scope.casefold() in sentence.casefold():
-        score += 0.1
+        score += weights["time_scope_boost"]
     return score
 
 
@@ -1942,12 +2000,13 @@ def _bundle_support_passages(
 
     def support_score(passage: Passage) -> float:
         lead = f"{passage.title} {passage.text[:320]} {passage.url}"
+        weights = policy_tuning.SUPPORT_SELECTION_WEIGHTS
         score = (
-            0.36 * _semantic_overlap(claim.claim_text, lead)
-            + 0.16 * _entity_overlap(claim.entity_set, lead)
-            + 0.16 * _dimension_coverage_score(claim, lead)
-            + 0.16 * max(passage.utility_score, passage.source_score)
-            + 0.10 * max(
+            weights["semantic_overlap"] * _semantic_overlap(claim.claim_text, lead)
+            + weights["entity_overlap"] * _entity_overlap(claim.entity_set, lead)
+            + weights["dimension_coverage"] * _dimension_coverage_score(claim, lead)
+            + weights["utility_or_source"] * max(passage.utility_score, passage.source_score)
+            + weights["verification_bonus"] * max(
                 _verification_source_bonus(
                     claim,
                     host=passage.host,
@@ -1956,10 +2015,13 @@ def _bundle_support_passages(
                 ),
                 0.0,
             )
-            + 0.06 * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+            + weights["preferred_bonus"] * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
         )
         if _claim_answer_shape(claim) == "product_specs":
-            score += 0.14 * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+            score += (
+                policy_tuning.SUPPORT_SELECTION_PRODUCT_PREFERRED_BONUS
+                * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+            )
         return score
 
     for passage in sorted(
@@ -2021,11 +2083,12 @@ def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_cou
 
     def support_score(passage: Passage) -> float:
         lead = f"{passage.title} {passage.text[:320]} {passage.url}"
+        weights = policy_tuning.SUPPORT_SCORE_WEIGHTS
         score = (
-            0.45 * _semantic_overlap(claim.claim_text, lead)
-            + 0.20 * _entity_overlap(claim.entity_set, lead)
-            + 0.20 * _dimension_coverage_score(claim, lead)
-            + 0.08 * max(
+            weights["semantic_overlap"] * _semantic_overlap(claim.claim_text, lead)
+            + weights["entity_overlap"] * _entity_overlap(claim.entity_set, lead)
+            + weights["dimension_coverage"] * _dimension_coverage_score(claim, lead)
+            + weights["verification_bonus"] * max(
                 _verification_source_bonus(
                     claim,
                     host=passage.host,
@@ -2034,11 +2097,12 @@ def _supporting_answer_passages(claim: Claim, bundle: EvidenceBundle, *, max_cou
                 ),
                 0.0,
             )
-            + 0.07 * max(passage.utility_score, passage.source_score)
+            + weights["utility_or_source"] * max(passage.utility_score, passage.source_score)
         )
         if _claim_answer_shape(claim) == "product_specs":
             score += (
-                0.18 * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
+                policy_tuning.SUPPORT_SCORE_PRODUCT_PREFERRED_BONUS
+                * _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
             )
         return score
 

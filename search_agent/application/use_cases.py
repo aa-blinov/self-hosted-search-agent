@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import logfire
 
 from search_agent import tuning
+from search_agent.application import policy_tuning
 from search_agent.infrastructure.caching_search_gateway import CachingBudgetSearchGateway
 from search_agent.settings import get_settings
 from search_agent.domain.models import AgentRunResult, AuditTrail, ClaimRun, EvidenceBundle, GatedSerpResult, QueryVariant, RoutingDecision
@@ -36,8 +37,26 @@ def _passage_domain_key(passage) -> str:
 def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> list:
     if limit <= 0:
         return []
-    max_per_url = 1 if intent == "news_digest" else 2
-    max_per_domain = 1 if intent == "news_digest" else 999
+    max_per_url = (
+        policy_tuning.NEWS_DIGEST_REPEAT_PASSAGES_PER_URL
+        if intent == "news_digest"
+        else policy_tuning.DEFAULT_REPEAT_PASSAGES_PER_URL
+    )
+    max_per_domain = (
+        policy_tuning.NEWS_DIGEST_REPEAT_PASSAGES_PER_DOMAIN
+        if intent == "news_digest"
+        else policy_tuning.DEFAULT_REPEAT_PASSAGES_PER_DOMAIN
+    )
+    primary_url_limit = (
+        policy_tuning.NEWS_DIGEST_PRIMARY_PASSAGES_PER_URL
+        if intent == "news_digest"
+        else policy_tuning.DEFAULT_PRIMARY_PASSAGES_PER_URL
+    )
+    primary_domain_limit = (
+        policy_tuning.NEWS_DIGEST_PRIMARY_PASSAGES_PER_DOMAIN
+        if intent == "news_digest"
+        else policy_tuning.DEFAULT_PRIMARY_PASSAGES_PER_DOMAIN
+    )
 
     selected: list = []
     url_counts: dict[str, int] = {}
@@ -46,12 +65,12 @@ def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> li
     for passage in passages:
         url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
         domain = _passage_domain_key(passage) or url
-        if url and url_counts.get(url, 0) > 0:
+        if url and url_counts.get(url, 0) >= primary_url_limit:
             continue
-        if domain and domain_counts.get(domain, 0) >= max_per_domain:
+        if domain and domain_counts.get(domain, 0) >= primary_domain_limit:
             continue
         if url:
-            url_counts[url] = 1
+            url_counts[url] = primary_url_limit
         if domain:
             domain_counts[domain] = domain_counts.get(domain, 0) + 1
         selected.append(passage)
@@ -89,7 +108,13 @@ def _claim_run_allows_synthesis(claim_run: ClaimRun) -> bool:
                 for document in claim_run.fetched_documents
                 if getattr(document, "canonical_url", None) or getattr(document, "url", None)
             }
-            return bool(bundle.considered_passages and (bundle.independent_source_count >= 2 or len(fetched_urls) >= 2))
+            return bool(
+                bundle.considered_passages
+                and (
+                    bundle.independent_source_count >= policy_tuning.NEWS_DIGEST_MIN_SYNTHESIS_SOURCES
+                    or len(fetched_urls) >= policy_tuning.NEWS_DIGEST_MIN_FETCHED_URLS
+                )
+            )
         if profile.strict_contract:
             return bundle.contract_satisfied and bool(bundle.considered_passages)
         return bool(profile.allow_synthesis_without_primary and bundle.considered_passages)
