@@ -1,0 +1,181 @@
+{
+  "classification": {
+    "query": "What are the latest news on the Iran conflict?",
+    "normalized_query": "What are the latest news on the Iran conflict from 2026-03-20 to 2026-03-27?",
+    "intent": "news_digest",
+    "complexity": "single_hop",
+    "needs_freshness": true,
+    "time_scope": "2026-03-20"
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "latest news on the Iran conflict from 2026-03-20 to 2026-03-27",
+      "priority": 1,
+      "needs_freshness": true,
+      "entity_set": ["Iran conflict"],
+      "time_scope": "2026-03-20",
+      "search_queries": ["Iran conflict latest news March 2026"],
+      "claim_profile": {
+        "answer_shape": "news_digest",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop"
+      }
+    }
+  ],
+  "search": {
+    "Iran conflict latest news March 2026": [
+      {
+        "query": "Iran conflict latest news March 2026",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-iran-1",
+            "title": "Iran conflict live updates",
+            "url": "https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/",
+            "snippet": "Reuters reports new regional military moves and diplomatic reactions.",
+            "canonical_url": "https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/",
+            "host": "www.reuters.com",
+            "position": 1,
+            "published_at": "2026-03-25T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-iran-2",
+            "title": "AP coverage of Iran conflict escalation",
+            "url": "https://apnews.com/article/iran-conflict-escalation-march-2026",
+            "snippet": "AP covers new strikes, casualties, and government statements.",
+            "canonical_url": "https://apnews.com/article/iran-conflict-escalation-march-2026",
+            "host": "apnews.com",
+            "position": 2,
+            "published_at": "2026-03-24T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-iran-3",
+            "title": "BBC summary of the Iran conflict",
+            "url": "https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026",
+            "snippet": "BBC summarizes the latest exchanges and the diplomatic backdrop.",
+            "canonical_url": "https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026",
+            "host": "www.bbc.com",
+            "position": 3,
+            "published_at": "2026-03-25T00:00:00+00:00"
+          },
+          {
+            "result_id": "r-iran-4",
+            "title": "Al Jazeera reports on Iran conflict diplomacy",
+            "url": "https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes",
+            "snippet": "Al Jazeera focuses on regional diplomacy and the effect of the latest strikes.",
+            "canonical_url": "https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes",
+            "host": "www.aljazeera.com",
+            "position": 4,
+            "published_at": "2026-03-26T00:00:00+00:00"
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/",
+            "reason": "source 1",
+            "source_score": 0.95
+          },
+          {
+            "depth": "deep",
+            "url": "https://apnews.com/article/iran-conflict-escalation-march-2026",
+            "reason": "source 2",
+            "source_score": 0.94
+          },
+          {
+            "depth": "deep",
+            "url": "https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026",
+            "reason": "source 3",
+            "source_score": 0.93
+          },
+          {
+            "depth": "deep",
+            "url": "https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes",
+            "reason": "source 4",
+            "source_score": 0.92
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-iran-reuters",
+            "url": "https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/",
+            "canonical_url": "https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/",
+            "host": "www.reuters.com",
+            "title": "Iran conflict live updates",
+            "author": null,
+            "published_at": "2026-03-25T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-iran-reuters-hash",
+            "content": "Reuters reports renewed cross-border strikes, heightened regional military alert status, and urgent diplomatic outreach by multiple governments trying to prevent broader escalation.",
+            "fetch_depth": "deep",
+            "source_score": 0.95
+          },
+          {
+            "doc_id": "doc-iran-ap",
+            "url": "https://apnews.com/article/iran-conflict-escalation-march-2026",
+            "canonical_url": "https://apnews.com/article/iran-conflict-escalation-march-2026",
+            "host": "apnews.com",
+            "title": "AP coverage of Iran conflict escalation",
+            "author": null,
+            "published_at": "2026-03-24T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-iran-ap-hash",
+            "content": "AP focuses on casualty reports, infrastructure damage, and competing official statements about responsibility for the latest round of attacks.",
+            "fetch_depth": "deep",
+            "source_score": 0.94
+          },
+          {
+            "doc_id": "doc-iran-bbc",
+            "url": "https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026",
+            "canonical_url": "https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026",
+            "host": "www.bbc.com",
+            "title": "BBC summary of the Iran conflict",
+            "author": null,
+            "published_at": "2026-03-25T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-iran-bbc-hash",
+            "content": "BBC summarizes the military exchanges alongside diplomatic pressure from Western and regional governments that want to contain the confrontation.",
+            "fetch_depth": "deep",
+            "source_score": 0.93
+          },
+          {
+            "doc_id": "doc-iran-aj",
+            "url": "https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes",
+            "canonical_url": "https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes",
+            "host": "www.aljazeera.com",
+            "title": "Al Jazeera reports on Iran conflict diplomacy",
+            "author": null,
+            "published_at": "2026-03-26T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-iran-aj-hash",
+            "content": "Al Jazeera emphasizes the diplomatic track, domestic political messaging, and the risk that the current exchange of strikes could spill into a broader regional crisis.",
+            "fetch_depth": "deep",
+            "source_score": 0.92
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "insufficient_evidence",
+        "confidence": 0.85,
+        "rationale": "A news digest requires multi-source synthesis across several recent updates rather than a single claim verdict."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {
+    "news_digest": "Answer\n- Reuters frames the latest phase of the Iran conflict around renewed strikes and the risk of a wider regional escalation, with governments moving quickly to open diplomatic channels while also preparing for additional military action if the situation worsens. [1]\n- AP's reporting adds the operational picture: casualty counts, damage assessments, and public claims from the involved parties are still moving, which means the factual picture is developing in parallel with the military and political response. [2]\n- BBC's summary emphasizes that the current moment is not only about battlefield activity but also about whether outside powers and regional actors can prevent the exchange from becoming a longer and more destabilizing confrontation. [3]\n- Al Jazeera highlights the diplomatic dimension and domestic political messaging, suggesting that leaders are trying to balance deterrence, public signaling, and pressure for de-escalation at the same time. [4]\n\nSources\n[1] Iran conflict live updates - https://www.reuters.com/world/middle-east/iran-conflict-live-updates-2026-03-25/\n[2] AP coverage of Iran conflict escalation - https://apnews.com/article/iran-conflict-escalation-march-2026\n[3] BBC summary of the Iran conflict - https://www.bbc.com/news/world-middle-east-iran-conflict-march-2026\n[4] Al Jazeera reports on Iran conflict diplomacy - https://www.aljazeera.com/news/2026/3/26/iran-conflict-diplomacy-and-strikes"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "classification": {
+    "query": "Was Satya Nadella named CEO of Microsoft in 2015?",
+    "normalized_query": "Was Satya Nadella named CEO of Microsoft in 2015?",
+    "intent": "factual",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "Satya Nadella was named CEO of Microsoft in 2015",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Satya Nadella", "Microsoft"],
+      "search_queries": ["Satya Nadella named CEO Microsoft 2015"],
+      "claim_profile": {
+        "answer_shape": "exact_date",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop"
+      }
+    }
+  ],
+  "search": {
+    "Satya Nadella named CEO Microsoft 2015": [
+      {
+        "query": "Satya Nadella named CEO Microsoft 2015",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-nadella-1",
+            "title": "Satya Nadella",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "snippet": "Satya Nadella became CEO of Microsoft on February 4, 2014.",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "position": 1
+          },
+          {
+            "result_id": "r-nadella-2",
+            "title": "Satya Nadella named Microsoft CEO",
+            "url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "snippet": "Microsoft named Satya Nadella chief executive in February 2014.",
+            "canonical_url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "host": "www.theguardian.com",
+            "position": 2
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "reason": "official biography",
+            "source_score": 0.96
+          },
+          {
+            "depth": "deep",
+            "url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "reason": "independent reporting",
+            "source_score": 0.87
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-nadella-ms",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "canonical_url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "host": "news.microsoft.com",
+            "title": "Satya Nadella",
+            "author": null,
+            "published_at": "2014-02-04T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-nadella-ms-hash",
+            "content": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014.",
+            "fetch_depth": "deep",
+            "source_score": 0.96
+          },
+          {
+            "doc_id": "doc-nadella-guardian",
+            "url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "canonical_url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "host": "www.theguardian.com",
+            "title": "Satya Nadella named Microsoft CEO",
+            "author": null,
+            "published_at": "2014-02-04T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-nadella-guardian-hash",
+            "content": "Microsoft named Satya Nadella as chief executive officer in February 2014 after a lengthy search.",
+            "fetch_depth": "deep",
+            "source_score": 0.87
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "contradicted",
+        "confidence": 0.95,
+        "contradicting_spans": [
+          {
+            "passage_id": "doc-nadella-ms:0:0",
+            "url": "https://news.microsoft.com/source/exec/satya-nadella/",
+            "title": "Satya Nadella",
+            "section": "Intro",
+            "text": "Satya Nadella became chief executive officer of Microsoft on February 4, 2014."
+          },
+          {
+            "passage_id": "doc-nadella-guardian:0:0",
+            "url": "https://www.theguardian.com/technology/2014/feb/04/microsoft-satya-nadella-chief-executive",
+            "title": "Satya Nadella named Microsoft CEO",
+            "section": "Intro",
+            "text": "Microsoft named Satya Nadella as chief executive officer in February 2014 after a lengthy search."
+          }
+        ],
+        "rationale": "Both official and independent sources show the appointment happened in 2014, not 2015."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {}
+}

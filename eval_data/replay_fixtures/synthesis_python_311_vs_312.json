@@ -1,0 +1,149 @@
+{
+  "classification": {
+    "query": "What are the main differences between Python 3.11 and 3.12?",
+    "normalized_query": "What are the main differences between Python 3.11 and 3.12?",
+    "intent": "synthesis",
+    "complexity": "single_hop",
+    "needs_freshness": false
+  },
+  "claims": [
+    {
+      "claim_id": "claim-1",
+      "claim_text": "What are the main differences between Python 3.11 and Python 3.12?",
+      "priority": 1,
+      "needs_freshness": false,
+      "entity_set": ["Python 3.11", "Python 3.12"],
+      "search_queries": ["Python 3.11 vs 3.12 differences"],
+      "claim_profile": {
+        "answer_shape": "comparison",
+        "min_independent_sources": 2,
+        "routing_bias": "iterative_loop",
+        "focus_terms": ["differences", "migration", "new features"],
+        "allow_synthesis_without_primary": true
+      }
+    }
+  ],
+  "search": {
+    "Python 3.11 vs 3.12 differences": [
+      {
+        "query": "Python 3.11 vs 3.12 differences",
+        "suggestions": [],
+        "retrieved_at": "2026-03-28T00:00:00+00:00",
+        "profile_name": "web",
+        "results": [
+          {
+            "result_id": "r-pycmp-1",
+            "title": "What’s New In Python 3.12",
+            "url": "https://docs.python.org/3/whatsnew/3.12.html",
+            "snippet": "The official 3.12 changelog describes removals, changes, and new capabilities relative to 3.11.",
+            "canonical_url": "https://docs.python.org/3/whatsnew/3.12.html",
+            "host": "docs.python.org",
+            "position": 1
+          },
+          {
+            "result_id": "r-pycmp-2",
+            "title": "Python 3.12 migration and Python 3.11 by default",
+            "url": "https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/",
+            "snippet": "Conda-forge summarized migration and packaging considerations between 3.11 and 3.12.",
+            "canonical_url": "https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/",
+            "host": "conda-forge.org",
+            "position": 2
+          },
+          {
+            "result_id": "r-pycmp-3",
+            "title": "Upgrading Python from 3.11 to 3.12 notes",
+            "url": "https://micro.webology.dev/2024/03/04/updating-python-from.html",
+            "snippet": "Upgrade notes highlight dependency and runtime differences.",
+            "canonical_url": "https://micro.webology.dev/2024/03/04/updating-python-from.html",
+            "host": "micro.webology.dev",
+            "position": 3
+          }
+        ]
+      }
+    ]
+  },
+  "fetch": {
+    "claim-1": {
+      "1": {
+        "plans": [
+          {
+            "depth": "deep",
+            "url": "https://docs.python.org/3/whatsnew/3.12.html",
+            "reason": "official changelog",
+            "source_score": 0.98
+          },
+          {
+            "depth": "deep",
+            "url": "https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/",
+            "reason": "packaging migration notes",
+            "source_score": 0.82
+          },
+          {
+            "depth": "deep",
+            "url": "https://micro.webology.dev/2024/03/04/updating-python-from.html",
+            "reason": "practical upgrade notes",
+            "source_score": 0.76
+          }
+        ],
+        "documents": [
+          {
+            "doc_id": "doc-pycmp-docs",
+            "url": "https://docs.python.org/3/whatsnew/3.12.html",
+            "canonical_url": "https://docs.python.org/3/whatsnew/3.12.html",
+            "host": "docs.python.org",
+            "title": "What’s New In Python 3.12",
+            "author": null,
+            "published_at": "2023-10-02T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-pycmp-docs-hash",
+            "content": "Python 3.12 removes distutils, changes error reporting, continues performance improvements, and updates the standard library compared to Python 3.11.",
+            "fetch_depth": "deep",
+            "source_score": 0.98
+          },
+          {
+            "doc_id": "doc-pycmp-conda",
+            "url": "https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/",
+            "canonical_url": "https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/",
+            "host": "conda-forge.org",
+            "title": "Python 3.12 migration and Python 3.11 by default",
+            "author": null,
+            "published_at": "2023-09-25T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-pycmp-conda-hash",
+            "content": "Migration from Python 3.11 to 3.12 affects binary compatibility, packaging workflows, and dependency readiness across the ecosystem.",
+            "fetch_depth": "deep",
+            "source_score": 0.82
+          },
+          {
+            "doc_id": "doc-pycmp-webology",
+            "url": "https://micro.webology.dev/2024/03/04/updating-python-from.html",
+            "canonical_url": "https://micro.webology.dev/2024/03/04/updating-python-from.html",
+            "host": "micro.webology.dev",
+            "title": "Upgrading Python from 3.11 to 3.12 notes",
+            "author": null,
+            "published_at": "2024-03-04T00:00:00+00:00",
+            "extracted_at": "2026-03-28T00:00:00+00:00",
+            "content_hash": "doc-pycmp-webology-hash",
+            "content": "Practical upgrade notes emphasize checking dependencies, testing frameworks, and adjusting project environments when moving from 3.11 to 3.12.",
+            "fetch_depth": "deep",
+            "source_score": 0.76
+          }
+        ]
+      }
+    }
+  },
+  "verify": {
+    "claim-1": {
+      "1": {
+        "verdict": "insufficient_evidence",
+        "confidence": 0.9,
+        "missing_dimensions": ["comparison_completeness"],
+        "rationale": "The passages are enough to synthesize a useful comparison but do not support one exhaustive claim-level answer."
+      }
+    }
+  },
+  "refine": {},
+  "synthesize": {
+    "synthesis": "Based on the retrieved material, the biggest shift from Python 3.11 to Python 3.12 is not a single headline feature but a bundle of language, packaging, and ecosystem changes that affect both runtime behavior and upgrade work. Python 3.12 is the newer stable release and the official changelog frames it as a release with continued interpreter work, removals, and standard-library changes that developers need to absorb when moving forward. [1]\n\nOne concrete difference is deprecation and cleanup pressure. The 3.12 cycle removes `distutils`, which matters because many older packaging flows and build setups implicitly relied on it. That means the jump from 3.11 to 3.12 is partly about updating tooling assumptions, not only about gaining new syntax or marginal performance wins. [1][2]\n\nAnother difference is upgrade friction across the ecosystem. The conda-forge migration note highlights ABI, build, and dependency readiness concerns, which is a practical distinction between \"running 3.11 today\" and \"standardizing on 3.12\" in a real project. In other words, 3.12 is newer and often preferable, but it also requires dependency validation and packaging work that many 3.11 environments had already stabilized. [2][3]\n\nThe developer experience also changes around diagnostics, interpreter behavior, and standard-library evolution. The official 3.12 material describes a mixture of runtime improvements and library-level updates, while the practical upgrade notes emphasize testing and dependency checks during migration. So the most useful summary is that 3.12 moves the platform forward, but the cost of adopting it is higher than a pure patch-level upgrade from 3.11 because tooling, packaging, and some APIs need attention. [1][2][3]\n\nSources\n[1] What’s New In Python 3.12 - https://docs.python.org/3/whatsnew/3.12.html\n[2] Python 3.12 migration and Python 3.11 by default - https://conda-forge.org/news/2023/09/25/python-312-migration-and-python-311-by-default/\n[3] Upgrading Python from 3.11 to 3.12 notes - https://micro.webology.dev/2024/03/04/updating-python-from.html"
+  }
+}

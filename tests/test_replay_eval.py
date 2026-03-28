@@ -14,7 +14,7 @@ class ReplayEvalTests(unittest.TestCase):
     def test_load_replay_cases_supports_fixture_paths(self):
         cases = load_replay_cases("eval_data/replay_control.jsonl")
 
-        self.assertEqual(len(cases), 8)
+        self.assertEqual(len(cases), 12)
         self.assertEqual(cases[0].evaluation.case_id, "ceo-microsoft")
         self.assertEqual(cases[-1].evaluation.case_id, "news-digest-ai")
 
