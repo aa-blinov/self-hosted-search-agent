@@ -24,6 +24,7 @@ from search_agent.domain.models import (
 from search_agent.application.text_heuristics import (
     clamp,
     extract_entities,
+    extract_numbers,
     extract_region_hint,
     extract_time_scope,
     needs_freshness,
@@ -56,185 +57,43 @@ def _extract_citation_indices(answer: str) -> list[int]:
     return sorted(cited)
 
 
-def _claim_sounds_python_related(claim_text: str) -> bool:
-    t = (claim_text or "").lower()
-    return any(
-        x in t
-        for x in (
-            "python",
-            "питон",
-            "pep ",
-            "stdlib",
-            "syntax",
-            "синтакс",
-            "library",
-            "библиотек",
-            "3.9",
-            "3.10",
-            "3.11",
-            "3.12",
-            "3.13",
-            "3.14",
-        )
-    )
-
-
-def _claim_looks_like_feature_listing(claim_text: str) -> bool:
-    t = (claim_text or "").lower()
-    return any(
-        marker in t
-        for marker in (
-            "what are the key new features",
-            "what's new",
-            "what is new",
-            "new features",
-            "main differences",
-            "key differences",
-            "compare",
-            "comparison",
-            "pros and cons",
-            "что нового",
-            "новые возможности",
-            "новые функции",
-            "основные отличия",
-            "сравни",
-            "сравнение",
-        )
-    )
-
-
-def _claim_requests_role_identity(claim_text: str) -> bool:
-    t = (claim_text or "").casefold().strip()
-    return t.startswith("who ") or t.startswith("кто ")
-
-
-def _claim_role_terms(claim_text: str) -> tuple[str, ...]:
-    t = (claim_text or "").casefold()
-    role_groups = (
-        ("chief executive officer", "ceo"),
-        ("chief technology officer", "cto"),
-        ("chief financial officer", "cfo"),
-        ("president",),
-        ("founder",),
-        ("chairman",),
-    )
-    for group in role_groups:
-        if any(term in t for term in group):
-            return group
-    return ()
-
-
-def _direct_role_support_passage(claim: Claim, passages: list[Passage]) -> Passage | None:
-    if not _claim_requests_role_identity(claim.claim_text):
-        return None
-
-    role_terms = _claim_role_terms(claim.claim_text)
-    if not role_terms:
-        return None
-
-    entity_hints = claim.entity_set or extract_entities(claim.claim_text)
-    candidates: list[Passage] = []
-    for passage in passages:
-        lead = f"{passage.title}. {passage.text[:500]}"
-        lowered = lead.casefold()
-        if not any(term in lowered for term in role_terms):
+def _normalize_citation_groups(answer: str) -> str:
+    text = answer or ""
+    normalized: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "[":
+            normalized.append(text[index])
+            index += 1
             continue
-        if entity_hints and not any(entity.casefold() in lowered for entity in entity_hints):
+        end = text.find("]", index + 1)
+        if end == -1:
+            normalized.append(text[index])
+            index += 1
             continue
-        if not any(marker in lowered for marker in (" is ", " serves as ", " became ", " was named ")):
-            continue
-        if not any(" " in entity for entity in extract_entities(lead)):
-            continue
-        candidates.append(passage)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda passage: (passage.utility_score, len(passage.text or ""), passage.source_score))
-
-
-def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
-    if result.verdict == "supported" and result.confidence < 0.05:
-        result = replace(result, confidence=max(result.confidence, 0.38))
-    if result.verdict == "supported" and _claim_looks_like_feature_listing(claim.claim_text):
-        rationale = (result.rationale or "").strip()
-        suffix = (
-            "| Adjusted: open-ended comparison/feature request stays claim-level insufficient_evidence."
-            if rationale
-            else "Adjusted: open-ended comparison/feature request stays claim-level insufficient_evidence."
-        )
-        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
-        return replace(
-            result,
-            verdict="insufficient_evidence",
-            confidence=min(result.confidence, 0.45),
-            supporting_spans=[],
-            missing_dimensions=result.missing_dimensions or ["coverage"],
-            rationale=merged_rationale,
-        )
-    if result.verdict != "insufficient_evidence":
-        return result
-    if result.contradicting_spans:
-        return result
-    role_passage = _direct_role_support_passage(claim, passages)
-    if role_passage is not None:
-        quote = (role_passage.text or "")[:280]
-        span = EvidenceSpan(
-            passage_id=role_passage.passage_id,
-            url=role_passage.url,
-            title=role_passage.title,
-            section=role_passage.section,
-            text=quote,
-        )
-        rationale = (result.rationale or "").strip()
-        suffix = (
-            "| Adjusted: direct role-identification sentence found in retrieved evidence."
-            if rationale
-            else "Adjusted: direct role-identification sentence found in retrieved evidence."
-        )
-        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
-        return replace(
-            result,
-            verdict="supported",
-            confidence=max(result.confidence, 0.46),
-            supporting_spans=[span],
-            missing_dimensions=[],
-            rationale=merged_rationale,
-        )
-    candidates = [
-        p
-        for p in passages
-        if _is_official_python_doc_url(p.url) and len(p.text or "") >= 350 and p.utility_score >= 0.15
-    ]
-    if (
-        not candidates
-        or not _claim_sounds_python_related(claim.claim_text)
-        or _claim_looks_like_feature_listing(claim.claim_text)
-    ):
-        return result
-    best = max(candidates, key=lambda p: len(p.text or ""))
-    quote = (best.text or "")[:400]
-    span = EvidenceSpan(
-        passage_id=best.passage_id,
-        url=best.url,
-        title=best.title,
-        section=best.section,
-        text=quote,
-    )
-    rationale = (result.rationale or "").strip()
-    suffix = (
-        "| Adjusted: substantive excerpt from official Python documentation."
-        if rationale
-        else "Adjusted: substantive excerpt from official Python documentation."
-    )
-    merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
-    return replace(
-        result,
-        verdict="supported",
-        confidence=max(result.confidence, 0.46),
-        supporting_spans=[span],
-        missing_dimensions=[],
-        rationale=merged_rationale,
-    )
+        content = text[index + 1:end]
+        values: list[str] = []
+        current = ""
+        valid = True
+        for ch in content:
+            if ch.isdigit():
+                current += ch
+                continue
+            if ch in {",", ";", " "}:
+                if current:
+                    values.append(current)
+                    current = ""
+                continue
+            valid = False
+            break
+        if current:
+            values.append(current)
+        if valid and len(values) > 1:
+            normalized.extend(f"[{value}]" for value in values)
+        else:
+            normalized.append(text[index : end + 1])
+        index = end + 1
+    return "".join(normalized)
 
 
 def _default_intent_decision() -> "_IntentOutput":
@@ -273,6 +132,34 @@ def _claim_profile_lines(claim: Claim) -> list[str]:
     ]
 
 
+def _is_list_like_contract(profile: ClaimProfile | None) -> bool:
+    if profile is None:
+        return False
+    if profile.answer_shape == "comparison":
+        return True
+    if profile.answer_shape != "overview":
+        return False
+    dimension_keys = {value.casefold() for value in profile.required_dimensions}
+    if not dimension_keys and len(profile.focus_terms) >= 2:
+        return True
+    return bool(dimension_keys & {"feature_list", "improvements", "changes", "highlights", "options"})
+
+
+def _preserve_original_factual_claim(classification: QueryClassification, claim_text: str) -> str:
+    if classification.intent != "factual":
+        return claim_text
+    original = normalized_text(classification.normalized_query)
+    if not original:
+        return claim_text
+    if classification.time_scope and normalized_text(classification.time_scope).casefold() not in claim_text.casefold():
+        return original
+    query_numbers = set(extract_numbers(original))
+    claim_numbers = set(extract_numbers(claim_text))
+    if query_numbers and not query_numbers.issubset(claim_numbers):
+        return original
+    return claim_text
+
+
 def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passages: int, max_chars: int) -> str:
     prompt_lines: list[str] = []
     for passage in passages[:max_passages]:
@@ -286,6 +173,8 @@ def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passage
         "Verify the claim against the retrieved evidence.\n"
         "Use the claim contract. Do not invent facts. Use only the provided passages.\n"
         "For open-ended claims, collective coverage across multiple passages is allowed.\n"
+        "For explanatory overviews, you may return supported when the passages directly explain the concept or mechanism.\n"
+        "For list-like overviews or comparisons that require multiple features, differences, highlights, or options, keep the claim-level verdict as insufficient_evidence and let synthesis compose the final answer later.\n"
         "If the contract requires a primary source or multiple independent sources and the evidence set does not satisfy that contract, return insufficient_evidence.\n"
         "Return supporting_passages and contradicting_passages with short quotes.\n"
         "Use missing_dimensions from time, entity, number, location, source, coverage.\n\n"
@@ -300,6 +189,55 @@ def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passage
 def _post_adjust_verification(claim: Claim, passages: list[Passage], result: VerificationResult) -> VerificationResult:
     if result.verdict == "supported" and result.confidence < 0.05:
         return replace(result, confidence=max(result.confidence, 0.38))
+    profile = claim.claim_profile
+    if result.verdict == "supported" and profile is not None and not profile.strict_contract and _is_list_like_contract(profile):
+        rationale = (result.rationale or "").strip()
+        suffix = "Adjusted: open-ended contract stays claim-level insufficient_evidence until synthesis."
+        merged_rationale = f"{rationale} {suffix}".strip() if rationale else suffix
+        return replace(
+            result,
+            verdict="insufficient_evidence",
+            confidence=min(result.confidence, 0.62),
+            supporting_spans=[],
+            missing_dimensions=result.missing_dimensions or ["coverage"],
+            rationale=merged_rationale,
+        )
+    if (
+        result.verdict == "insufficient_evidence"
+        and profile is not None
+        and not profile.strict_contract
+        and profile.answer_shape == "overview"
+    ):
+        if _is_list_like_contract(profile):
+            return result
+        robust = [
+            passage
+            for passage in passages
+            if passage.utility_score >= 0.2 or passage.source_score >= 0.7
+        ]
+        unique_hosts = {
+            (passage.host or "").casefold().removeprefix("www.")
+            for passage in robust
+            if passage.host
+        }
+        if len(robust) >= 2 and len(unique_hosts) >= 1:
+            supporting = [
+                EvidenceSpan(
+                    passage_id=passage.passage_id,
+                    url=passage.url,
+                    title=passage.title,
+                    section=passage.section,
+                    text=normalized_text(passage.text[:220]),
+                )
+                for passage in robust[:2]
+            ]
+            return replace(
+                result,
+                verdict="supported",
+                confidence=max(result.confidence, 0.62),
+                supporting_spans=supporting,
+                missing_dimensions=[],
+            )
     return result
 
 
@@ -399,52 +337,6 @@ class PydanticAIQueryIntelligence:
                 "Only replace relative time references with explicit dates."
             ),
         )
-        self._claim_agent = Agent(
-            self._model,
-            output_type=_out(_ClaimDecompositionOutput),
-            retries=1,
-            instrument=True,
-            system_prompt=(
-                "Plan a grounded search run for a user query.\n"
-                "Return 1 to 4 claims. Use a single claim when decomposition is unnecessary.\n"
-                "Preserve named entities exactly and do not invent facts.\n"
-                "For each claim return:\n"
-                "- claim_text\n"
-                "- priority\n"
-                "- needs_freshness\n"
-                "- entity_set\n"
-                "- time_scope\n"
-                "- search_queries: 3 to 5 short keyword queries for web search\n"
-                "- claim_profile describing the retrieval contract\n"
-                "\n"
-                "claim_profile rules:\n"
-                "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
-                "- primary_source_required should be true for leadership roles, official status, releases, product specs, and fresh vendor facts\n"
-                "- min_independent_sources should usually be 2; use 3 for news digests; use 1 only for trivial stable facts\n"
-                "- preferred_domain_types should favor official/academic/vendor/major_media as appropriate\n"
-                "- routing_bias should be iterative_loop for synthesis, product specs, comparisons, and news digests\n"
-                "- required_dimensions should reflect what the answer must cover, e.g. time / number / source / specs\n"
-                "- focus_terms should contain 2 to 6 short evidence phrases that must be present in useful passages\n"
-                "- strict_contract should be true when the answer must not be produced without meeting the evidence contract\n"
-                "\n"
-                "Critical semantic rules:\n"
-                "- Never rewrite a features/specifications/характеристики request into an existence-check claim.\n"
-                "- If the user asks for features, specifications, technical characteristics, price/options, or an overview of a product/model, keep that information need intact and use answer_shape=product_specs.\n"
-                "- If the user asks for an explanation, comparison, or overview, keep it open-ended and use answer_shape=overview or comparison.\n"
-                "- Intent hints may be wrong; preserve the actual information need from the user request.\n"
-                "\n"
-                "Examples:\n"
-                "- 'Какие характеристики нового MacBook Neo?' -> one claim about the product specifications, not about whether it exists.\n"
-                "- 'Какие характеистики нового macbook neo?' -> still a product specifications claim.\n"
-                "- 'MacBook Neo specs' -> product_specs.\n"
-                "\n"
-                "Search query rules:\n"
-                "- keyword phrases only, no question wording\n"
-                "- match the user's language; add one English query when the input is non-English and the topic is global\n"
-                "- avoid boilerplate fillers\n"
-                "- include time scope or year when relevant"
-            ),
-        )
         self._query_gen_agent = Agent(
             self._model,
             output_type=_out(_QueryListOutput),
@@ -467,7 +359,8 @@ class PydanticAIQueryIntelligence:
             instrument=True,
             system_prompt=(
                 "You are a strict claim verifier. "
-                "Use only explicit evidence from provided passages."
+                "Use only explicit evidence from provided passages. "
+                "Explanatory overviews may be supported, but list-like overviews and comparisons should usually remain insufficient_evidence at claim level."
             ),
         )
         self._synth_agent = Agent(
@@ -481,6 +374,7 @@ class PydanticAIQueryIntelligence:
                 "Write in the same language as the user's question. "
                 "Use bullet points for comparisons. "
                 "Be specific: include version numbers, names, and figures where available. "
+                "When multiple sources are available for synthesis or comparisons, ground the answer in at least two distinct sources. "
                 "Do not add Markdown headings (##) inside bullet lists. "
                 "Cite sources inline using [N] after each claim, e.g. «Трамп заявил X [2].» "
                 "Do NOT add a sources/references section — it will be appended automatically."
@@ -540,6 +434,42 @@ class PydanticAIQueryIntelligence:
                 "Do not repeat existing queries. No explanations."
             ),
         )
+        self._claim_agent = Agent(
+            self._model,
+            output_type=_out(_ClaimDecompositionOutput),
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "Plan a grounded search run for a user query.\n"
+                "Return 1 to 4 claims. Use a single claim when decomposition is unnecessary.\n"
+                "Preserve named entities exactly and do not invent facts.\n"
+                "For each claim return: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
+                "\n"
+                "claim_profile rules:\n"
+                "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
+                "- overview/comparison/news_digest are open-ended contracts: primary_source_required=false and strict_contract=false\n"
+                "- news_digest must use min_independent_sources>=3 and routing_bias=iterative_loop\n"
+                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, routing_bias=iterative_loop, and strict_contract=true\n"
+                "- exact event-anchored number lookups should prefer routing_bias=iterative_loop and make the requested measurement the focus_terms\n"
+                "- for list-like overviews, use explicit required_dimensions such as feature_list, improvements, changes, or highlights\n"
+                "- focus_terms must describe the requested evidence itself, not generic context words\n"
+                "- do not use placeholder strings such as exact_date, exact_number, event details, or announcement details inside claim_text or focus_terms\n"
+                "\n"
+                "Semantic rules:\n"
+                "- Never rewrite a features or specifications request into an existence-check claim.\n"
+                "- Do not rewrite explanation or mechanism questions into a feature-list request.\n"
+                "- Keep explanation, comparison, and overview requests open-ended.\n"
+                "- Intent hints may be wrong; preserve the actual information need from the user request.\n"
+                "- Example: 'How does asyncio work in Python?' should stay a mechanism/explanation claim about event loops, coroutines, and scheduling; it must not become 'key features and usage patterns'.\n"
+                "- Example: 'What was the exact room temperature when Satya Nadella was named CEO of Microsoft?' must stay an exact event-anchored number claim with required_dimensions including number and event_context, and should prefer routing_bias=iterative_loop.\n"
+                "\n"
+                "Search query rules:\n"
+                "- keyword phrases only, no question wording\n"
+                "- match the user's language; add one English query when the input is non-English and the topic is global\n"
+                "- avoid boilerplate fillers\n"
+                "- include time scope or year when relevant"
+            ),
+        )
     def classify_query(self, query: str, log=None) -> QueryClassification:
         normalized_query = self._normalize_time_references(query, log=log)
         region_hint = extract_region_hint(normalized_query)
@@ -574,11 +504,7 @@ class PydanticAIQueryIntelligence:
         freshness: bool = False,
         log=None,
     ) -> _IntentOutput:
-        """Classify query via LLM.
-
-        Falls back to heuristic (is_news_digest_query → 'news_digest', else 'factual')
-        when LLM is disabled or on error.
-        """
+        """Classify query via LLM and return a structured intent decision."""
         log = log or (lambda msg: None)
 
         cached = self._classification_cache.get(normalized_query)
@@ -587,7 +513,6 @@ class PydanticAIQueryIntelligence:
             return cached
 
         if not self._enabled:
-            # No LLM available — fall back to heuristic.
             return _default_intent_decision()
 
         model_settings = build_model_settings(
@@ -635,7 +560,13 @@ class PydanticAIQueryIntelligence:
             "claim_profile must include: answer_shape, primary_source_required, min_independent_sources, "
             "preferred_domain_types, routing_bias, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
             "Keep claims atomic, exact, and capped at 4.\n"
-            "Return one claim when the request is already atomic.\n\n"
+            "Return one claim when the request is already atomic.\n"
+            "For overview, comparison, and news_digest claims, keep the contract open-ended and set strict_contract=false.\n"
+            "For product_specs claims, keep the specs request intact and require primary-source evidence.\n"
+            "For explanation or mechanism questions, keep the mechanism/explanation need intact and do not rewrite into a feature-list request.\n"
+            "For exact event-anchored number lookups, use focus_terms for the requested measurement and prefer routing_bias=iterative_loop.\n"
+            "For exact event-anchored number lookups, include event_context in required_dimensions when the number depends on a specific event or situation.\n"
+            "Never emit placeholder phrases like exact_date, exact_number, event details, or announcement details.\n\n"
             f"Intent: {classification.intent}\n"
             f"Complexity: {classification.complexity}\n"
             f"Needs freshness: {classification.needs_freshness}\n"
@@ -663,10 +594,14 @@ class PydanticAIQueryIntelligence:
             claims = []
             for idx, item in enumerate(result.output.claims[:4], 1):
                 claim_profile = self._claim_profile_from_output(item.claim_profile, classification)
+                claim_text = _preserve_original_factual_claim(
+                    classification,
+                    normalized_text(item.claim_text),
+                )
                 claims.append(
                     Claim(
                         claim_id=f"claim-{idx}",
-                        claim_text=normalized_text(item.claim_text),
+                        claim_text=claim_text,
                         priority=max(1, int(item.priority or idx)),
                         needs_freshness=bool(item.needs_freshness or classification.needs_freshness),
                         entity_set=[
@@ -940,14 +875,24 @@ class PydanticAIQueryIntelligence:
                         ),
                     )
                 metrics.output_chars = output_char_len(result.output)
-            answer = (result.output or "").strip()
+            answer = _normalize_citation_groups((result.output or "").strip())
             if not answer:
                 return ""
             # Append sources section for any [N] references cited in the answer.
             cited = _extract_citation_indices(answer)
-            if intent == "news_digest":
-                floor = min(4, len(passage_refs))
-                cited = sorted(set(cited) | set(range(1, floor + 1)))
+            floor_indices: list[int] = []
+            seen_urls: set[str] = set()
+            required_unique = 4 if intent == "news_digest" else 2 if intent == "synthesis" else 1
+            total_unique_urls = len({url for _, url in passage_refs if url})
+            for idx, (_, url) in enumerate(passage_refs, 1):
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                floor_indices.append(idx)
+                if len(seen_urls) >= min(required_unique, total_unique_urls):
+                    break
+            if intent in {"news_digest", "synthesis"}:
+                cited = sorted(set(cited) | set(floor_indices))
             if cited:
                 lines = ["\n\nИсточники:"]
                 for n in cited:
@@ -1141,23 +1086,96 @@ class PydanticAIQueryIntelligence:
         if output is None:
             answer_shape = "news_digest" if classification.intent == "news_digest" else "overview" if classification.intent == "synthesis" else "fact"
             return ClaimProfile(answer_shape=answer_shape)
+
+        answer_shape = output.answer_shape
         preferred_domain_types = [
             domain
             for domain in output.preferred_domain_types
             if domain in {"official", "academic", "vendor", "major_media", "forum", "unknown"}
         ]
+        required_dimensions: list[str] = []
+        seen_dimensions: set[str] = set()
+        for value in output.required_dimensions:
+            normalized = normalized_text(value)
+            key = normalized.casefold()
+            if not normalized or key in seen_dimensions:
+                continue
+            seen_dimensions.add(key)
+            required_dimensions.append(normalized)
+
+        focus_terms: list[str] = []
+        seen_focus: set[str] = set()
+        for value in output.focus_terms:
+            normalized = normalized_text(value)
+            key = normalized.casefold()
+            if not normalized or key in seen_focus:
+                continue
+            seen_focus.add(key)
+            focus_terms.append(normalized)
+
+        primary_source_required = bool(output.primary_source_required)
+        min_independent_sources = max(1, int(output.min_independent_sources or 1))
+        routing_bias = output.routing_bias
+        allow_synthesis_without_primary = bool(output.allow_synthesis_without_primary)
+        strict_contract = bool(output.strict_contract)
+
+        if answer_shape in {"overview", "comparison"}:
+            primary_source_required = False
+            min_independent_sources = max(2, min_independent_sources)
+            routing_bias = "iterative_loop"
+            allow_synthesis_without_primary = True
+            strict_contract = False
+        elif answer_shape == "news_digest":
+            primary_source_required = False
+            min_independent_sources = max(3, min_independent_sources)
+            routing_bias = "iterative_loop"
+            allow_synthesis_without_primary = True
+            strict_contract = False
+            required_dimensions = list(dict.fromkeys(required_dimensions + ["time", "source", "event"]))
+        elif answer_shape == "product_specs":
+            primary_source_required = True
+            min_independent_sources = max(2, min_independent_sources)
+            routing_bias = "iterative_loop"
+            allow_synthesis_without_primary = False
+            strict_contract = True
+            required_dimensions = list(dict.fromkeys(required_dimensions + ["specs", "source"]))
+        elif answer_shape == "exact_date":
+            if "source" not in required_dimensions and len(required_dimensions) <= 1:
+                min_independent_sources = 1
+                routing_bias = None
+                strict_contract = False
+        elif answer_shape == "exact_number":
+            if "number" not in required_dimensions:
+                required_dimensions.append("number")
+            lower_dimensions = [value.casefold() for value in required_dimensions]
+            if any("event" in value or "context" in value for value in lower_dimensions):
+                min_independent_sources = max(2, min_independent_sources)
+                routing_bias = "iterative_loop"
+                strict_contract = True
+            elif "source" in required_dimensions and len(required_dimensions) >= 2:
+                routing_bias = "iterative_loop"
+                strict_contract = True
+            elif "time" not in required_dimensions:
+                min_independent_sources = 1
+                routing_bias = None
+                strict_contract = False
+            else:
+                strict_contract = strict_contract or "number" in required_dimensions
+
         return ClaimProfile(
-            answer_shape=output.answer_shape,
-            primary_source_required=bool(output.primary_source_required),
-            min_independent_sources=max(1, int(output.min_independent_sources or 1)),
+            answer_shape=answer_shape,
+            primary_source_required=primary_source_required,
+            min_independent_sources=min_independent_sources,
             preferred_domain_types=preferred_domain_types or (
-                ["major_media", "official", "vendor"] if output.answer_shape == "news_digest" else ["official", "academic", "vendor", "major_media"]
+                ["major_media", "official", "vendor"]
+                if answer_shape == "news_digest"
+                else ["official", "academic", "vendor", "major_media"]
             ),
-            routing_bias=output.routing_bias,
-            required_dimensions=[normalized_text(value) for value in output.required_dimensions if normalized_text(value)],
-            focus_terms=[normalized_text(value) for value in output.focus_terms if normalized_text(value)],
-            allow_synthesis_without_primary=bool(output.allow_synthesis_without_primary),
-            strict_contract=bool(output.strict_contract),
+            routing_bias=routing_bias,
+            required_dimensions=required_dimensions,
+            focus_terms=focus_terms,
+            allow_synthesis_without_primary=allow_synthesis_without_primary,
+            strict_contract=strict_contract,
         )
 
     def _model_settings(self, *, max_tokens: int, temperature: float):

@@ -100,6 +100,152 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(claims[1].entity_set, ["Microsoft"])
         self.assertEqual(claims[0].claim_profile.focus_terms, ["revenue", "2025"])
 
+    def test_decompose_claims_preserves_factual_proposition_with_time_anchor(self):
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        classification = QueryClassification(
+            query="Was Python 3.13.0 released on October 1, 2024?",
+            normalized_query="Was Python 3.13.0 released on October 1, 2024?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+            time_scope="October 1, 2024",
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _ClaimDecompositionOutput(
+                    claims=[
+                        _ClaimDraft(
+                            claim_text="Python 3.13.0 release date",
+                            priority=1,
+                            needs_freshness=False,
+                            entity_set=["Python"],
+                            time_scope=None,
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="exact_date",
+                                required_dimensions=["release_date"],
+                                focus_terms=["release date"],
+                            ),
+                        )
+                    ]
+                )
+            },
+        )()
+
+        with patch.object(service._claim_agent, "run_sync", return_value=result):
+            claims = service.decompose_claims(classification)
+
+        self.assertEqual(claims[0].claim_text, "Was Python 3.13.0 released on October 1, 2024?")
+
+    def test_claim_profile_normalizes_open_ended_contracts(self) -> None:
+        classification = QueryClassification(
+            query="How does asyncio work in Python?",
+            normalized_query="How does asyncio work in Python?",
+            intent="synthesis",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="overview",
+                primary_source_required=True,
+                min_independent_sources=1,
+                routing_bias="short_path",
+                allow_synthesis_without_primary=False,
+                strict_contract=True,
+                focus_terms=["event details", "asyncio"],
+            ),
+            classification,
+        )
+
+        self.assertEqual(profile.answer_shape, "overview")
+        self.assertFalse(profile.primary_source_required)
+        self.assertGreaterEqual(profile.min_independent_sources, 2)
+        self.assertEqual(profile.routing_bias, "iterative_loop")
+        self.assertTrue(profile.allow_synthesis_without_primary)
+        self.assertFalse(profile.strict_contract)
+
+    def test_claim_profile_normalizes_event_exact_number_contracts(self) -> None:
+        classification = QueryClassification(
+            query="What was the exact room temperature when Satya Nadella was named CEO?",
+            normalized_query="What was the exact room temperature when Satya Nadella was named CEO?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="exact_number",
+                primary_source_required=True,
+                min_independent_sources=2,
+                routing_bias="targeted_retrieval",
+                required_dimensions=["time", "number", "source"],
+                strict_contract=False,
+                focus_terms=["room temperature", "event details"],
+            ),
+            classification,
+        )
+
+        self.assertEqual(profile.answer_shape, "exact_number")
+        self.assertEqual(profile.routing_bias, "iterative_loop")
+        self.assertIn("number", profile.required_dimensions)
+        self.assertTrue(profile.strict_contract)
+
+    def test_claim_profile_normalizes_event_context_exact_number_contracts(self) -> None:
+        classification = QueryClassification(
+            query="What was the room temperature when Satya Nadella was named CEO?",
+            normalized_query="What was the room temperature when Satya Nadella was named CEO?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="exact_number",
+                min_independent_sources=1,
+                routing_bias=None,
+                required_dimensions=["temperature value", "event context", "number"],
+                strict_contract=False,
+                focus_terms=["room temperature", "temperature"],
+            ),
+            classification,
+        )
+
+        self.assertGreaterEqual(profile.min_independent_sources, 2)
+        self.assertEqual(profile.routing_bias, "iterative_loop")
+        self.assertTrue(profile.strict_contract)
+
+    def test_claim_profile_relaxes_simple_exact_date_contracts(self) -> None:
+        classification = QueryClassification(
+            query="When was Python 3.13.0 released?",
+            normalized_query="When was Python 3.13.0 released?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="exact_date",
+                primary_source_required=True,
+                min_independent_sources=2,
+                routing_bias="iterative_loop",
+                required_dimensions=["release_date"],
+                strict_contract=True,
+                focus_terms=["release date"],
+            ),
+            classification,
+        )
+
+        self.assertEqual(profile.answer_shape, "exact_date")
+        self.assertEqual(profile.min_independent_sources, 1)
+        self.assertIsNone(profile.routing_bias)
+        self.assertFalse(profile.strict_contract)
+
     def test_verify_claim_maps_structured_quotes_to_spans(self):
         service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
         claim = Claim(

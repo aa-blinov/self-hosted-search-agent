@@ -28,7 +28,6 @@ from search_agent.domain.models import (
 from search_agent.domain.source_priors import lookup_source_prior
 from search_agent import tuning
 from search_agent.application.text_heuristics import (
-    COMPARISON_MARKERS,
     compact_text as _shared_compact_text,
     contains_date_like as _shared_contains_date_like,
     extract_entities as _shared_extract_entities,
@@ -36,7 +35,6 @@ from search_agent.application.text_heuristics import (
     extract_region_hint as _shared_extract_region_hint,
     extract_time_scope as _shared_extract_time_scope,
     is_cyrillic_text as _shared_is_cyrillic_text,
-    is_news_digest_query as _shared_is_news_digest_query,
     normalized_text as _shared_normalized_text,
     tokenize as _shared_tokenize,
 )
@@ -50,66 +48,6 @@ _STOPWORDS = {
     "чем", "какой", "какая", "какие", "каково", "есть", "был", "была", "были",
     "than", "about", "between", "latest", "current",
 }
-
-_UNIT_LIKE_ENTITY_TOKENS = {
-    "celsius",
-    "fahrenheit",
-    "kelvin",
-    "degree",
-    "degrees",
-    "atm",
-    "bar",
-    "psi",
-    "pascal",
-    "pascals",
-    "pa",
-    "kpa",
-    "mpa",
-    "meter",
-    "meters",
-    "metre",
-    "metres",
-    "cm",
-    "mm",
-    "km",
-    "mile",
-    "miles",
-    "kg",
-    "kilogram",
-    "kilograms",
-    "gram",
-    "grams",
-    "g",
-    "lb",
-    "lbs",
-    "pound",
-    "pounds",
-    "oz",
-    "ounce",
-    "ounces",
-    "liter",
-    "liters",
-    "litre",
-    "litres",
-    "percent",
-    "percentage",
-    "usd",
-    "eur",
-    "gbp",
-    "temperature",
-    "temperatures",
-    "temp",
-    "градус",
-    "градуса",
-    "градусов",
-    "цельсий",
-    "фаренгейт",
-    "кельвин",
-    "процент",
-    "процента",
-    "процентов",
-}
-
 
 _OFFICIAL_HOST_MARKERS = (
     ".gov", ".mil", ".gouv", "europa.eu", "who.int", "sec.gov", "irs.gov",
@@ -211,31 +149,6 @@ def _news_digest_site_hint(claim: Claim, classification: QueryClassification) ->
     if any(marker in haystack for marker in ("астан", "алмат", "казах", "қазақ", "kazakh", "kazakhstan", ".kz")):
         return "site:.kz"
     return None
-
-
-def _temporal_event_focus_term(text: str) -> str | None:
-    lowered = (text or "").casefold()
-    marker_map = (
-        (("named", "appointed", "elected"), "appointment"),
-        (("released", "launched", "introduced"), "release"),
-        (("announced",), "announcement"),
-        (("founded",), "founding"),
-        (("born",), "birth"),
-        (("died",), "death"),
-    )
-    for markers, focus in marker_map:
-        if any(marker in lowered for marker in markers):
-            return focus
-    return None
-
-
-def _is_temporal_event_verification_claim(claim: Claim) -> bool:
-    lowered = (claim.claim_text or "").casefold().strip()
-    if not lowered.startswith(("was ", "were ", "is ", "are ", "did ", "does ", "do ", "has ", "have ", "had ")):
-        return False
-    if not (claim.time_scope or _extract_time_scope(claim.claim_text) or _contains_date_like(claim.claim_text)):
-        return False
-    return _temporal_event_focus_term(claim.claim_text) is not None
 
 
 def infer_claim_profile(claim: Claim, classification: QueryClassification) -> ClaimProfile:
@@ -761,43 +674,12 @@ def gate_serp_results(
 
 
 def _answer_type(claim: Claim) -> str:
-    lowered = claim.claim_text.lower()
-    numeric_dimension_cues = (
-        "how many",
-        "how much",
-        "temperature",
-        "temp",
-        "boiling point",
-        "melting point",
-        "price",
-        "salary",
-        "rate",
-        "percent",
-        "percentage",
-        "amount",
-        "size",
-        "height",
-        "weight",
-        "exact",
-        "room temperature",
-        "температур",
-        "цена",
-        "стоимость",
-        "курс",
-        "процент",
-        "размер",
-        "вес",
-        "рост",
-        "точн",
-    )
-    if lowered.startswith("who ") or " who " in lowered:
-        return "person"
-    if lowered.startswith("where ") or " where " in lowered:
-        return "location"
-    if any(cue in lowered for cue in numeric_dimension_cues):
-        return "number"
-    if lowered.startswith("when ") or " when " in lowered or "release" in lowered or "released" in lowered:
-        return "time"
+    profile = claim.claim_profile
+    if profile is not None:
+        if profile.answer_shape == "exact_date":
+            return "time"
+        if profile.answer_shape == "exact_number":
+            return "number"
     return "fact"
 
 
@@ -812,98 +694,6 @@ def _extract_answer_candidates(claim: Claim, text: str) -> list[str]:
     if answer_type == "location":
         return _extract_location_candidates(text)
     return _extract_entities(text)[:3]
-
-
-def route_claim_retrieval(
-    claim: Claim,
-    gated_results: list[GatedSerpResult],
-) -> RoutingDecision:
-    top_results = gated_results[:5]
-    if not top_results:
-        return RoutingDecision(
-            mode="iterative_loop",
-            certainty=0.0,
-            consistency=0.0,
-            evidence_sufficiency=0.0,
-            rationale="No gated results available.",
-        )
-
-    certainty = sum(result.assessment.source_score for result in top_results[:3]) / min(len(top_results[:3]), 3)
-    detail_coverages = [
-        _dimension_coverage_score(claim, f"{result.serp.title} {result.serp.snippet}")
-        for result in top_results
-    ]
-    dimension_alignment = sum(detail_coverages) / len(detail_coverages)
-    max_detail_coverage = max(detail_coverages) if detail_coverages else 0.0
-
-    candidates: list[str] = []
-    for result in top_results:
-        text = f"{result.serp.title} {result.serp.snippet}"
-        candidates.extend([candidate.casefold() for candidate in _extract_answer_candidates(claim, text)])
-    if candidates:
-        counts: dict[str, int] = {}
-        for candidate in candidates:
-            counts[candidate] = counts.get(candidate, 0) + 1
-        consistency = max(counts.values()) / len(candidates)
-    else:
-        semantic_scores = [result.assessment.semantic_match_score for result in top_results]
-        consistency = sum(semantic_scores) / len(semantic_scores)
-
-    evidence_sufficiency = 0.0
-    evidence_sufficiency += min(0.5, 0.12 * sum(result.assessment.source_score >= 0.6 for result in gated_results[:8]))
-    evidence_sufficiency += 0.2 if any(result.assessment.primary_source_likelihood >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 if any(result.assessment.entity_match_score >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 if any(result.assessment.semantic_match_score >= 0.7 for result in top_results) else 0.0
-    evidence_sufficiency += 0.15 if max_detail_coverage >= 0.3 else 0.0
-    answer_type = _answer_type(claim)
-    time_source_anchor = answer_type == "time" and any(
-        _contains_release_date_cue(f"{result.serp.title} {result.serp.snippet}")
-        or any(
-            cue in f"{result.serp.title} {result.serp.url}".casefold()
-            for cue in ("release", "released", "announcement", "downloads/release", "whatsnew")
-        )
-        for result in top_results
-    )
-    detail_sensitive_numeric = answer_type == "number" and bool(_numeric_dimension_terms(claim))
-    exact_detail_request = detail_sensitive_numeric and "exact" in (claim.claim_text or "").casefold()
-    if answer_type in {"number", "time", "location", "person"} and max_detail_coverage < 0.2:
-        evidence_sufficiency -= 0.25
-        certainty -= 0.08
-    if "exact" in (claim.claim_text or "").casefold() and max_detail_coverage < 0.3:
-        evidence_sufficiency -= 0.12
-    if detail_sensitive_numeric and max_detail_coverage < 0.2:
-        evidence_sufficiency -= 0.18
-        certainty -= 0.10
-    evidence_sufficiency = _clamp(evidence_sufficiency)
-    certainty = _clamp(certainty)
-    consistency = _clamp(max(consistency, dimension_alignment * 0.6))
-
-    if _is_temporal_event_verification_claim(claim):
-        mode = "iterative_loop"
-    elif exact_detail_request and max_detail_coverage < 0.2:
-        mode = "iterative_loop"
-    elif certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
-        mode = "short_path"
-    elif answer_type == "time" and time_source_anchor and certainty >= 0.45 and evidence_sufficiency >= 0.35:
-        mode = "targeted_retrieval"
-    elif answer_type in {"number", "time"} and certainty >= 0.45 and max_detail_coverage >= 0.3 and evidence_sufficiency >= 0.35:
-        mode = "targeted_retrieval"
-    elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
-        mode = "targeted_retrieval"
-    else:
-        mode = "iterative_loop"
-
-    return RoutingDecision(
-        mode=mode,
-        certainty=_clamp(certainty),
-        consistency=_clamp(consistency),
-        evidence_sufficiency=evidence_sufficiency,
-        rationale=(
-            f"certainty={certainty:.2f}, consistency={consistency:.2f}, "
-            f"evidence_sufficiency={evidence_sufficiency:.2f}, "
-            f"dimension_alignment={dimension_alignment:.2f}"
-        ),
-    )
 
 
 def _extract_author(text: str) -> str | None:
@@ -1007,99 +797,6 @@ def _routing_limits(profile, decision: RoutingDecision, iteration: int = 1) -> t
     else:
         deep_limit = min(deep_limit, max(profile.fetch_top_n, tuning.AGENT_FETCH_TOP_N))
     return shallow_limit, deep_limit
-
-
-def _dimension_coverage_score(claim: Claim, text: str) -> float:
-    lowered = text.casefold()
-    score = 0.0
-    answer_type = _answer_type(claim)
-
-    if answer_type == "time" and _contains_date_like(text):
-        score += 0.45
-    if answer_type == "number" and _shared_extract_numbers(text):
-        numeric_terms = _numeric_dimension_terms(claim)
-        if not numeric_terms:
-            score += 0.45
-        elif any(term in lowered for term in numeric_terms):
-            score += 0.45
-        else:
-            score += 0.05
-    if answer_type == "person" and _contains_person_span(text):
-        score += 0.35
-    if answer_type == "location" and _contains_location_span(text):
-        score += 0.35
-    if claim.time_scope and claim.time_scope.casefold() in lowered:
-        score += 0.2
-    return _clamp(score)
-
-
-def _numeric_dimension_terms(claim: Claim) -> tuple[str, ...]:
-    lowered = (claim.claim_text or "").casefold()
-    cues: list[str] = []
-    groups = (
-        ("temperature", "temp", "room temperature", "celsius", "fahrenheit", "degree", "degrees", "°c", "°f"),
-        ("boiling point", "boil", "celsius", "fahrenheit", "°c", "°f", "degree", "degrees"),
-        ("melting point", "melt", "celsius", "fahrenheit", "°c", "°f", "degree", "degrees"),
-        ("price", "cost", "usd", "eur", "$"),
-        ("salary", "annual", "per year", "usd", "$"),
-        ("rate", "percent", "percentage", "%"),
-        ("amount", "size", "height", "weight"),
-        ("температур", "градус", "цена", "стоимость", "курс", "процент", "размер", "вес", "рост"),
-    )
-    for group in groups:
-        if any(term in lowered for term in group):
-            cues.extend(group)
-    return tuple(dict.fromkeys(cues))
-
-
-def _entity_requires_primary_source(entity: str) -> bool:
-    tokens = _tokenize(entity)
-    if not tokens:
-        return True
-    return not all(token in _UNIT_LIKE_ENTITY_TOKENS for token in tokens)
-
-
-def _claim_requires_primary_source(claim: Claim) -> bool:
-    if not claim.entity_set:
-        return False
-    return any(_entity_requires_primary_source(entity) for entity in claim.entity_set)
-
-
-def _exact_detail_guardrail_claim(claim: Claim) -> bool:
-    lowered = (claim.claim_text or "").casefold()
-    return (
-        _answer_type(claim) == "number"
-        and ("exact" in lowered or "точн" in lowered)
-        and bool(_numeric_dimension_terms(claim))
-    )
-
-
-def _claim_requires_primary_source_heuristic(claim: Claim) -> bool:
-    if not claim.entity_set:
-        return False
-    return any(_entity_requires_primary_source(entity) for entity in claim.entity_set)
-
-
-def _claim_requires_primary_source(claim: Claim) -> bool:
-    if claim.claim_profile is not None:
-        return claim.claim_profile.primary_source_required
-    return _claim_requires_primary_source_heuristic(claim)
-
-
-def _claim_min_independent_sources(claim: Claim) -> int:
-    if claim.claim_profile is not None:
-        return max(1, claim.claim_profile.min_independent_sources)
-    return 2
-
-
-def _answer_type(claim: Claim) -> str:
-    profile = claim.claim_profile
-    if profile is not None:
-        if profile.answer_shape == "exact_date":
-            return "time"
-        if profile.answer_shape == "exact_number":
-            return "number"
-    return "fact"
 
 
 def _verification_source_bonus(claim: Claim, *, host: str, title: str, url: str) -> float:
@@ -1473,91 +1170,6 @@ def _documents_for_passage_extraction(documents: list[FetchedDocument]) -> list[
     return [document for document in documents if document.fetch_depth == "shallow"]
 
 
-def cheap_passage_score(claim: Claim, passage: Passage) -> float:
-    overlap = _semantic_overlap(claim.claim_text, passage.text)
-    entity_overlap = _entity_overlap(claim.entity_set, passage.text)
-    dimension_overlap = _dimension_coverage_score(claim, passage.text)
-    claim_numbers = set(_shared_extract_numbers(claim.claim_text))
-    passage_numbers = set(_shared_extract_numbers(passage.text))
-    number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
-    if _claim_answer_shape(claim) == "product_specs":
-        preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
-        return _clamp(
-            0.34 * overlap
-            + 0.22 * entity_overlap
-            + 0.10 * dimension_overlap
-            + 0.10 * passage.source_score
-            + 0.24 * preferred_bonus
-        )
-    return _clamp(
-        0.35 * overlap
-        + 0.25 * entity_overlap
-        + 0.20 * dimension_overlap
-        + 0.10 * number_overlap
-        + 0.10 * passage.source_score
-    )
-
-
-def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
-    lowered = passage.text.casefold()
-    if _claim_answer_shape(claim) == "product_specs":
-        preferred_bonus = _preferred_domain_bonus(claim, _effective_domain_type(claim, passage.host))
-        source_bonus = _verification_source_bonus(
-            claim,
-            host=passage.host,
-            title=passage.title,
-            url=passage.url,
-        )
-        return _clamp(
-            0.42 * cheap_passage_score(claim, passage)
-            + 0.18 * preferred_bonus
-            + 0.20 * max(source_bonus, 0.0)
-            + 0.10 * passage.source_score
-        )
-    directness = 0.0
-    answer_type = _answer_type(claim)
-    source_bonus = _verification_source_bonus(
-        claim,
-        host=passage.host,
-        title=passage.title,
-        url=passage.url,
-    )
-
-    if answer_type == "time":
-        if _contains_release_date_cue(lowered):
-            directness += 0.35
-        if _contains_date_like(passage.text):
-            directness += 0.25
-        if any(
-            cue in f"{passage.title} {passage.url}".casefold()
-            for cue in ("release", "released", "announcement", "downloads/release", "whatsnew")
-        ):
-            directness += 0.15
-        if "release date:" in lowered:
-            directness += 0.15
-    elif answer_type == "person":
-        if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
-            directness += 0.35
-        if _contains_person_span(passage.text):
-            directness += 0.2
-    elif answer_type == "number":
-        if _shared_extract_numbers(passage.text):
-            directness += 0.35
-    elif answer_type == "location":
-        if _contains_location_span(passage.text):
-            directness += 0.25
-
-    contradiction_signal = 0.15 if _contains_negation_cue(lowered) else 0.0
-    return _clamp(
-        0.28 * cheap_passage_score(claim, passage)
-        + 0.24 * _dimension_coverage_score(claim, passage.text)
-        + 0.20 * directness
-        + 0.18 * max(source_bonus, 0.0)
-        + 0.10 * passage.source_score
-        + 0.05 * contradiction_signal
-    )
-
-
 def cheap_passage_filter(claim: Claim, passages: list[Passage], limit: int = tuning.CHEAP_PASSAGE_LIMIT) -> list[Passage]:
     scored: list[tuple[float, Passage]] = []
     for passage in passages:
@@ -1607,14 +1219,6 @@ def _news_digest_region_hint_from_claim(claim: Claim) -> str | None:
     return _shared_extract_region_hint(claim.claim_text)
 
 
-def _is_news_digest_claim(claim: Claim) -> bool:
-    return _shared_is_news_digest_query(
-        claim.claim_text,
-        region_hint=_news_digest_region_hint_from_claim(claim),
-        freshness=bool(claim.needs_freshness or claim.time_scope),
-    )
-
-
 def _news_digest_time_match(claim: Claim, passage: Passage) -> float:
     if not claim.time_scope:
         return 0.5
@@ -1636,127 +1240,6 @@ def _local_news_host_bonus(host: str) -> float:
         return 0.7
     return 0.0
 
-
-def cheap_passage_score(claim: Claim, passage: Passage) -> float:
-    overlap = _semantic_overlap(claim.claim_text, passage.text)
-    entity_overlap = _entity_overlap(claim.entity_set, passage.text)
-    dimension_overlap = _dimension_coverage_score(claim, passage.text)
-    claim_numbers = set(_shared_extract_numbers(claim.claim_text))
-    passage_numbers = set(_shared_extract_numbers(passage.text))
-    number_overlap = 1.0 if claim_numbers and claim_numbers & passage_numbers else 0.0
-
-    if _is_news_digest_claim(claim):
-        region = _news_digest_region_hint_from_claim(claim)
-        haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
-        region_match = _entity_overlap([region], haystack) if region else entity_overlap
-        time_match = _news_digest_time_match(claim, passage)
-        local_bonus = _local_news_host_bonus(passage.host)
-        event_terms = 1.0 if any(
-            term in haystack.casefold()
-            for term in (
-                "\u043d\u043e\u0432\u043e\u0441\u0442",
-                "\u0441\u043e\u0431\u044b\u0442",
-                "\u043f\u0440\u043e\u0438\u0441\u0448\u0435\u0441\u0442\u0432",
-                "news",
-                "events",
-                "breaking",
-            )
-        ) else 0.0
-        score = (
-            0.14 * overlap
-            + 0.34 * region_match
-            + 0.24 * time_match
-            + 0.12 * local_bonus
-            + 0.08 * event_terms
-            + 0.08 * passage.source_score
-        )
-        if region and region_match < 0.25:
-            score -= 0.30
-        if claim.time_scope and time_match <= 0.0:
-            score -= 0.20
-        return _clamp(score)
-
-    return _clamp(
-        0.35 * overlap
-        + 0.25 * entity_overlap
-        + 0.20 * dimension_overlap
-        + 0.10 * number_overlap
-        + 0.10 * passage.source_score
-    )
-
-
-def utility_score_for_claim(claim: Claim, passage: Passage) -> float:
-    lowered = passage.text.casefold()
-    if _is_news_digest_claim(claim):
-        region = _news_digest_region_hint_from_claim(claim)
-        haystack = f"{passage.title} {passage.text[:220]} {passage.url}"
-        region_match = _entity_overlap([region], haystack) if region else _entity_overlap(claim.entity_set, haystack)
-        time_match = _news_digest_time_match(claim, passage)
-        local_bonus = _local_news_host_bonus(passage.host)
-        title_match = 1.0 if region and _entity_overlap([region], passage.title) >= 0.6 else 0.0
-        source_bonus = _verification_source_bonus(
-            claim,
-            host=passage.host,
-            title=passage.title,
-            url=passage.url,
-        )
-        score = (
-            0.24 * cheap_passage_score(claim, passage)
-            + 0.28 * region_match
-            + 0.18 * time_match
-            + 0.12 * local_bonus
-            + 0.08 * title_match
-            + 0.05 * max(source_bonus, 0.0)
-            + 0.05 * passage.source_score
-        )
-        if region and region_match < 0.25:
-            score -= 0.30
-        if claim.time_scope and time_match <= 0.0:
-            score -= 0.20
-        return _clamp(score)
-
-    directness = 0.0
-    answer_type = _answer_type(claim)
-    source_bonus = _verification_source_bonus(
-        claim,
-        host=passage.host,
-        title=passage.title,
-        url=passage.url,
-    )
-
-    if answer_type == "time":
-        if _contains_release_date_cue(lowered):
-            directness += 0.35
-        if _contains_date_like(passage.text):
-            directness += 0.25
-        if any(
-            cue in f"{passage.title} {passage.url}".casefold()
-            for cue in ("release", "released", "announcement", "downloads/release", "whatsnew")
-        ):
-            directness += 0.15
-        if "release date:" in lowered:
-            directness += 0.15
-    elif answer_type == "person":
-        if any(role in lowered for role in ("ceo", "founder", "president", "chairman")):
-            directness += 0.35
-        if _contains_person_span(passage.text):
-            directness += 0.2
-    elif answer_type == "number":
-        if _shared_extract_numbers(passage.text):
-            directness += 0.35
-    elif answer_type == "location":
-        if _contains_location_span(passage.text):
-            directness += 0.25
-
-    contradiction_signal = 0.15 if _contains_negation_cue(lowered) else 0.0
-    return _clamp(
-        0.28 * cheap_passage_score(claim, passage)
-        + 0.24 * _dimension_coverage_score(claim, passage.text)
-        + 0.20 * directness
-        + 0.18 * max(source_bonus, 0.0)
-        + 0.10 * passage.source_score
-        + 0.05 * contradiction_signal
-    )
 
 def _select_passages_from_spans(passages: list[Passage], spans: list[EvidenceSpan]) -> list[Passage]:
     wanted = {span.passage_id for span in spans}
@@ -1905,50 +1388,6 @@ def refine_query_variants(
     return []
 
 
-def should_stop_claim_loop(claim: Claim, bundle: EvidenceBundle, iteration: int) -> bool:
-    verification = bundle.verification
-    if verification is None:
-        return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-    primary_sensitive = _claim_requires_primary_source(claim)
-    min_sources = _claim_min_independent_sources(claim)
-    if verification.verdict == "supported":
-        if bundle.contract_satisfied:
-            return True
-        if claim.needs_freshness and not bundle.freshness_ok:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if claim.claim_profile is not None and claim.claim_profile.strict_contract:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if primary_sensitive and not bundle.has_primary_source:
-            return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-        if bundle.independent_source_count >= min_sources and bundle.has_primary_source:
-            return True
-        if verification.confidence >= 0.75 and bundle.independent_source_count >= min_sources and not primary_sensitive:
-            return True
-    if (
-        verification.verdict == "insufficient_evidence"
-        and claim.claim_profile is not None
-        and claim.claim_profile.strict_contract
-        and bundle.contract_satisfied
-        and bundle.considered_passages
-    ):
-        return True
-    if (
-        verification.verdict == "insufficient_evidence"
-        and _exact_detail_guardrail_claim(claim)
-        and verification.confidence >= 0.9
-        and bundle.independent_source_count >= 2
-    ):
-        return True
-    # For comparison/synthesis claims, verify_claim reliably returns insufficient_evidence
-    # even when rich passages are found (the verifier looks for a binary provable fact).
-    # Stop after the first iteration if any passages were collected — the synthesize_answer
-    # step in use_cases will compose a proper answer from them.
-    if any(marker in (claim.claim_text or "").lower() for marker in COMPARISON_MARKERS):
-        if bundle.considered_passages:
-            return True
-    return iteration >= tuning.AGENT_MAX_CLAIM_ITERATIONS
-
-
 def _claim_focus_terms(claim: Claim) -> tuple[str, ...]:
     profile = claim.claim_profile
     if profile is None:
@@ -2084,6 +1523,7 @@ def route_claim_retrieval(
     open_ended = answer_shape in {"product_specs", "overview", "comparison", "news_digest"}
     exact_detail_request = _exact_detail_guardrail_claim(claim)
     answer_type = _answer_type(claim)
+    number_targeted_threshold = 0.4 if profile is not None and profile.answer_shape == "exact_number" and not profile.strict_contract else 0.45
 
     if exact_detail_request and (max_detail_coverage < 0.45 or _focus_term_overlap(claim, combined_top_text) < 0.6):
         mode = "iterative_loop"
@@ -2091,7 +1531,9 @@ def route_claim_retrieval(
         mode = "iterative_loop"
     elif not open_ended and certainty >= 0.8 and consistency >= 0.35 and evidence_sufficiency >= 0.6:
         mode = "short_path"
-    elif answer_type in {"number", "time"} and certainty >= 0.45 and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
+    elif answer_type == "number" and certainty >= number_targeted_threshold and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
+        mode = "targeted_retrieval"
+    elif answer_type == "time" and certainty >= 0.45 and max_detail_coverage >= 0.25 and evidence_sufficiency >= 0.35:
         mode = "targeted_retrieval"
     elif certainty >= 0.55 and evidence_sufficiency >= 0.45:
         mode = "targeted_retrieval"

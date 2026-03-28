@@ -4,6 +4,7 @@ from search_agent.config.profiles import get_profile
 from search_agent.domain.models import (
     Claim,
     ClaimProfile,
+    ClaimRun,
     EvidenceBundle,
     FetchedDocument,
     FetchPlan,
@@ -17,7 +18,7 @@ from search_agent.domain.models import (
     SourceAssessment,
     VerificationResult,
 )
-from search_agent.application.use_cases import SearchAgentUseCase, _select_synthesis_passages
+from search_agent.application.use_cases import SearchAgentUseCase, _claim_run_allows_synthesis, _select_synthesis_passages
 
 
 class _FakeIntelligence:
@@ -386,6 +387,35 @@ class _FakeSynthesisInsufficientIntelligence(_FakeSynthesisIntelligence):
         )
 
 
+class _FakeStrictExactNumberIntelligence(_FakeIntelligence):
+    def decompose_claims(self, classification, log=None):
+        return [
+            Claim(
+                claim_id="claim-1",
+                claim_text="What was the exact room temperature when Satya Nadella was named CEO of Microsoft?",
+                priority=1,
+                needs_freshness=False,
+                entity_set=["Satya Nadella", "Microsoft"],
+                claim_profile=ClaimProfile(
+                    answer_shape="exact_number",
+                    min_independent_sources=2,
+                    routing_bias="iterative_loop",
+                    required_dimensions=["time", "number", "source"],
+                    strict_contract=True,
+                ),
+            )
+        ]
+
+    def verify_claim(self, claim, passages, log=None):
+        self.verify_calls += 1
+        return VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=0.95,
+            missing_dimensions=["temperature", "number"],
+            rationale="Missing measured value.",
+        )
+
+
 class _FakeSynthesisSteps(_FakeSteps):
     def __init__(self, *, contract_satisfied: bool):
         self.contract_satisfied = contract_satisfied
@@ -488,6 +518,160 @@ class UseCaseLayerTests(unittest.TestCase):
         selected = _select_synthesis_passages(passages, intent="news_digest", limit=3)
 
         self.assertEqual([passage.host for passage in selected], ["news.example.com", "wire.example.net", "local.example.org"])
+
+    def test_select_synthesis_passages_diversifies_urls_before_reusing_same_source(self):
+        passages = [
+            Passage(
+                passage_id="p1",
+                url="https://docs.python.org/3/whatsnew/3.13.html",
+                canonical_url="https://docs.python.org/3/whatsnew/3.13.html",
+                host="docs.python.org",
+                title="What's New 3.13",
+                section="A",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p1",
+                text="Feature A",
+                source_score=0.95,
+                utility_score=0.9,
+            ),
+            Passage(
+                passage_id="p2",
+                url="https://docs.python.org/3/whatsnew/3.13.html",
+                canonical_url="https://docs.python.org/3/whatsnew/3.13.html",
+                host="docs.python.org",
+                title="What's New 3.13",
+                section="B",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p2",
+                text="Feature B",
+                source_score=0.94,
+                utility_score=0.88,
+            ),
+            Passage(
+                passage_id="p3",
+                url="https://realpython.com/python313-new-features/",
+                canonical_url="https://realpython.com/python313-new-features/",
+                host="realpython.com",
+                title="Real Python 3.13",
+                section="Main",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p3",
+                text="Feature C",
+                source_score=0.85,
+                utility_score=0.8,
+            ),
+        ]
+
+        selected = _select_synthesis_passages(passages, intent="synthesis", limit=3)
+
+        self.assertEqual(
+            [passage.url for passage in selected[:2]],
+            [
+                "https://docs.python.org/3/whatsnew/3.13.html",
+                "https://realpython.com/python313-new-features/",
+            ],
+        )
+
+    def test_news_digest_allows_synthesis_from_multiple_fetched_documents(self):
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Latest developments in the Iran conflict",
+            priority=1,
+            needs_freshness=True,
+            entity_set=["Iran"],
+            claim_profile=ClaimProfile(
+                answer_shape="news_digest",
+                min_independent_sources=3,
+                routing_bias="iterative_loop",
+                required_dimensions=["time", "source", "event"],
+            ),
+        )
+        passages = [
+            Passage(
+                passage_id="p1",
+                url="https://apnews.com/hub/iran",
+                canonical_url="https://apnews.com/hub/iran",
+                host="apnews.com",
+                title="Iran live updates",
+                section="News",
+                published_at="2026-03-27T00:00:00+00:00",
+                author=None,
+                extracted_at="2026-03-27T00:00:00+00:00",
+                chunk_id="p1",
+                text="Update",
+                source_score=0.9,
+                utility_score=0.8,
+            )
+        ]
+        bundle = EvidenceBundle(
+            claim_id=claim.claim_id,
+            claim_text=claim.claim_text,
+            considered_passages=passages,
+            independent_source_count=1,
+            has_primary_source=False,
+            freshness_ok=True,
+            verification=VerificationResult(
+                verdict="insufficient_evidence",
+                confidence=0.9,
+                missing_dimensions=["coverage"],
+                rationale="Need more corroboration.",
+            ),
+        )
+        claim_run = ClaimRun(
+            claim=claim,
+            fetched_documents=[
+                FetchedDocument(
+                    doc_id="doc-1",
+                    url="https://apnews.com/hub/iran",
+                    canonical_url="https://apnews.com/hub/iran",
+                    host="apnews.com",
+                    title="Iran live updates",
+                    author=None,
+                    published_at="2026-03-27T00:00:00+00:00",
+                    extracted_at="2026-03-27T00:00:00+00:00",
+                    content_hash="h1",
+                    content="Update",
+                    fetch_depth="deep",
+                    source_score=0.9,
+                ),
+                FetchedDocument(
+                    doc_id="doc-2",
+                    url="https://www.npr.org/2026/03/25/example",
+                    canonical_url="https://www.npr.org/2026/03/25/example",
+                    host="www.npr.org",
+                    title="NPR update",
+                    author=None,
+                    published_at="2026-03-27T00:00:00+00:00",
+                    extracted_at="2026-03-27T00:00:00+00:00",
+                    content_hash="h2",
+                    content="Update",
+                    fetch_depth="deep",
+                    source_score=0.85,
+                ),
+            ],
+            evidence_bundle=bundle,
+        )
+
+        self.assertTrue(_claim_run_allows_synthesis(claim_run))
+
+    def test_use_case_keeps_iterative_route_for_strict_exact_number_contract(self):
+        use_case = SearchAgentUseCase(
+            intelligence=_FakeStrictExactNumberIntelligence(),
+            search_gateway=_FakeSearchGateway(),
+            fetch_gateway=_FakeFetchGateway(),
+            receipt_writer=_FakeReceiptWriter(),
+            steps=_FakeSteps(),
+        )
+
+        report = use_case.run("room temperature claim", get_profile("web"))
+
+        self.assertEqual(report.claims[0].routing_decision.mode, "iterative_loop")
 
     def test_use_case_dedupes_search_across_parallel_claims(self):
         search_gateway = _FakeSearchGateway()

@@ -36,34 +36,39 @@ def _passage_domain_key(passage) -> str:
 def _select_synthesis_passages(passages: list, *, intent: str, limit: int) -> list:
     if limit <= 0:
         return []
-    if intent != "news_digest":
-        return passages[:limit]
+    max_per_url = 1 if intent == "news_digest" else 2
+    max_per_domain = 1 if intent == "news_digest" else 999
 
     selected: list = []
-    seen_urls: set[str] = set()
-    seen_domains: set[str] = set()
+    url_counts: dict[str, int] = {}
+    domain_counts: dict[str, int] = {}
 
     for passage in passages:
         url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
         domain = _passage_domain_key(passage) or url
-        if url and url in seen_urls:
+        if url and url_counts.get(url, 0) > 0:
             continue
-        if domain and domain in seen_domains:
+        if domain and domain_counts.get(domain, 0) >= max_per_domain:
             continue
         if url:
-            seen_urls.add(url)
+            url_counts[url] = 1
         if domain:
-            seen_domains.add(domain)
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
         selected.append(passage)
         if len(selected) >= limit:
             return selected
 
     for passage in passages:
         url = getattr(passage, "url", "") or getattr(passage, "canonical_url", "")
-        if url and url in seen_urls:
+        domain = _passage_domain_key(passage) or url
+        if url and url_counts.get(url, 0) >= max_per_url:
+            continue
+        if domain and domain_counts.get(domain, 0) >= max_per_domain:
             continue
         if url:
-            seen_urls.add(url)
+            url_counts[url] = url_counts.get(url, 0) + 1
+        if domain:
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
         selected.append(passage)
         if len(selected) >= limit:
             break
@@ -78,6 +83,13 @@ def _claim_run_allows_synthesis(claim_run: ClaimRun) -> bool:
         profile = claim_run.claim.claim_profile
         if profile is None:
             return False
+        if profile.answer_shape == "news_digest":
+            fetched_urls = {
+                getattr(document, "canonical_url", None) or getattr(document, "url", None)
+                for document in claim_run.fetched_documents
+                if getattr(document, "canonical_url", None) or getattr(document, "url", None)
+            }
+            return bool(bundle.considered_passages and (bundle.independent_source_count >= 2 or len(fetched_urls) >= 2))
         if profile.strict_contract:
             return bundle.contract_satisfied and bool(bundle.considered_passages)
         return bool(profile.allow_synthesis_without_primary and bundle.considered_passages)
@@ -396,6 +408,18 @@ class SearchAgentUseCase:
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             all_gated_results = _merge_gated_results(all_gated_results, gated_results)
             routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
+            profile_contract = claim.claim_profile
+            if (
+                profile_contract is not None
+                and profile_contract.answer_shape == "exact_number"
+                and profile_contract.strict_contract
+                and profile_contract.routing_bias == "iterative_loop"
+            ):
+                routing_decision = replace(
+                    routing_decision,
+                    mode="iterative_loop",
+                    rationale=routing_decision.rationale + " | strict exact-number contract",
+                )
             if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
                 routing_decision = replace(
                     routing_decision,
