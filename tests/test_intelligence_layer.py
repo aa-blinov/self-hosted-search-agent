@@ -138,6 +138,94 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         self.assertEqual(claims[0].claim_text, "Was Python 3.13.0 released on October 1, 2024?")
 
+    def test_decompose_claims_rejects_hallucinated_exact_date_answer_in_claim_text(self):
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        classification = QueryClassification(
+            query="When was Python 3.13.0 released?",
+            normalized_query="When was Python 3.13.0 released?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _ClaimDecompositionOutput(
+                    claims=[
+                        _ClaimDraft(
+                            claim_text="Python 3.13.0 was released on 2025-10-07.",
+                            priority=1,
+                            needs_freshness=False,
+                            entity_set=["Python"],
+                            time_scope=None,
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="exact_date",
+                                required_dimensions=["release_date"],
+                                focus_terms=["release date"],
+                            ),
+                        )
+                    ]
+                )
+            },
+        )()
+
+        with patch.object(service._claim_agent, "run_sync", return_value=result):
+            claims = service.decompose_claims(classification)
+
+        self.assertEqual(claims[0].claim_text, "When was Python 3.13.0 released?")
+
+    def test_decompose_claims_keeps_atomic_subclaims_for_multi_hop_factual_queries(self):
+        service = PydanticAIQueryIntelligence(AppSettings(llm_api_key="test-key"))
+        classification = QueryClassification(
+            query="Who is the CEO of Microsoft and when was Python 3.13.0 released?",
+            normalized_query="Who is the CEO of Microsoft and when was Python 3.13.0 released?",
+            intent="factual",
+            complexity="multi_hop",
+            needs_freshness=False,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "output": _ClaimDecompositionOutput(
+                    claims=[
+                        _ClaimDraft(
+                            claim_text="Who is the CEO of Microsoft?",
+                            priority=1,
+                            needs_freshness=False,
+                            entity_set=["Microsoft"],
+                            time_scope=None,
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="fact",
+                                required_dimensions=["role"],
+                                focus_terms=["CEO", "Microsoft"],
+                                preferred_domain_types=["official"],
+                            ),
+                        ),
+                        _ClaimDraft(
+                            claim_text="When was Python 3.13.0 released?",
+                            priority=2,
+                            needs_freshness=False,
+                            entity_set=["Python"],
+                            time_scope=None,
+                            claim_profile=_ClaimProfileOutput(
+                                answer_shape="exact_date",
+                                required_dimensions=["release_date"],
+                                focus_terms=["release date"],
+                            ),
+                        ),
+                    ]
+                )
+            },
+        )()
+
+        with patch.object(service._claim_agent, "run_sync", return_value=result):
+            claims = service.decompose_claims(classification)
+
+        self.assertEqual(claims[0].claim_text, "Who is the CEO of Microsoft?")
+        self.assertEqual(claims[1].claim_text, "When was Python 3.13.0 released?")
+
     def test_claim_profile_normalizes_open_ended_contracts(self) -> None:
         classification = QueryClassification(
             query="How does asyncio work in Python?",
@@ -242,9 +330,67 @@ class IntelligenceLayerTests(unittest.TestCase):
         )
 
         self.assertEqual(profile.answer_shape, "exact_number")
+        self.assertFalse(profile.primary_source_required)
         self.assertEqual(profile.min_independent_sources, 1)
         self.assertIsNone(profile.routing_bias)
         self.assertFalse(profile.strict_contract)
+        self.assertNotIn("event_context", [value.casefold() for value in profile.required_dimensions])
+
+    def test_claim_profile_strips_spurious_event_context_from_generic_exact_number_facts(self) -> None:
+        classification = QueryClassification(
+            query="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            normalized_query="At standard atmospheric pressure, what is the boiling point of water in Celsius?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="exact_number",
+                primary_source_required=True,
+                min_independent_sources=2,
+                routing_bias="iterative_loop",
+                required_dimensions=["number", "event_context"],
+                strict_contract=True,
+                focus_terms=["boiling point", "Celsius"],
+            ),
+            classification,
+        )
+
+        self.assertFalse(profile.primary_source_required)
+        self.assertEqual(profile.min_independent_sources, 1)
+        self.assertIsNone(profile.routing_bias)
+        self.assertFalse(profile.strict_contract)
+        self.assertEqual(profile.required_dimensions, ["number"])
+
+    def test_claim_profile_keeps_official_fact_contracts_strict(self) -> None:
+        classification = QueryClassification(
+            query="Is the IRS a U.S. government agency?",
+            normalized_query="Is the IRS a U.S. government agency?",
+            intent="factual",
+            complexity="single_hop",
+            needs_freshness=False,
+        )
+
+        profile = PydanticAIQueryIntelligence._claim_profile_from_output(
+            _ClaimProfileOutput(
+                answer_shape="fact",
+                primary_source_required=False,
+                min_independent_sources=1,
+                preferred_domain_types=["official", "major_media"],
+                routing_bias=None,
+                required_dimensions=["agency_classification"],
+                strict_contract=False,
+                focus_terms=["IRS", "government agency"],
+            ),
+            classification,
+        )
+
+        self.assertTrue(profile.primary_source_required)
+        self.assertEqual(profile.min_independent_sources, 2)
+        self.assertEqual(profile.routing_bias, "short_path")
+        self.assertTrue(profile.strict_contract)
 
     def test_claim_profile_relaxes_simple_exact_date_contracts(self) -> None:
         classification = QueryClassification(

@@ -111,17 +111,45 @@ def _default_verification(reason: str) -> VerificationResult:
     )
 
 
-def _preserve_original_factual_claim(classification: QueryClassification, claim_text: str) -> str:
+def _digit_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    current: list[str] = []
+    for ch in text or "":
+        if ch.isalnum() or ch in {".", "-", "/"}:
+            current.append(ch)
+            continue
+        if current:
+            token = "".join(current).strip(".,-/")
+            if token and any(char.isdigit() for char in token):
+                tokens.add(token.casefold())
+            current = []
+    if current:
+        token = "".join(current).strip(".,-/")
+        if token and any(char.isdigit() for char in token):
+            tokens.add(token.casefold())
+    return tokens
+
+
+def _preserve_original_factual_claim(
+    classification: QueryClassification,
+    claim_text: str,
+    claim_profile: ClaimProfile | None = None,
+) -> str:
     if classification.intent != "factual":
         return claim_text
+    single_hop = classification.complexity != "multi_hop"
     original = normalized_text(classification.normalized_query)
     if not original:
         return claim_text
-    if classification.time_scope and normalized_text(classification.time_scope).casefold() not in claim_text.casefold():
+    if single_hop and classification.time_scope and normalized_text(classification.time_scope).casefold() not in claim_text.casefold():
         return original
-    query_numbers = set(extract_numbers(original))
-    claim_numbers = set(extract_numbers(claim_text))
-    if query_numbers and not query_numbers.issubset(claim_numbers):
+    query_numbers = set(extract_numbers(original)) | _digit_tokens(original)
+    claim_numbers = set(extract_numbers(claim_text)) | _digit_tokens(claim_text)
+    if single_hop and claim_profile is not None and claim_profile.answer_shape in {"exact_date", "exact_number"}:
+        extra_numbers = {value for value in claim_numbers if value not in query_numbers}
+        if extra_numbers:
+            return original
+    if single_hop and query_numbers and not query_numbers.issubset(claim_numbers):
         return original
     return claim_text
 
@@ -141,6 +169,8 @@ def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passage
         "For open-ended claims, collective coverage across multiple passages is allowed.\n"
         "For explanatory overviews, you may return supported when the passages directly explain the concept or mechanism.\n"
         "For list-like overviews or comparisons that require multiple features, differences, highlights, or options, keep the claim-level verdict as insufficient_evidence and let synthesis compose the final answer later.\n"
+        "For simple identity, classification, membership, or agency-status claims, you may return supported when an official or otherwise strong passage directly states the relationship and a second strong passage corroborates it.\n"
+        "For agency-status or institutional-affiliation claims, an official passage that identifies the entity as a bureau, office, component, or service within a government department counts as explicit support for government-agency classification.\n"
         "If the contract requires a primary source or multiple independent sources and the evidence set does not satisfy that contract, return insufficient_evidence.\n"
         "Return supporting_passages and contradicting_passages with short quotes.\n"
         "Use missing_dimensions from time, entity, number, location, source, coverage.\n\n"
@@ -271,7 +301,9 @@ class PydanticAIQueryIntelligence:
             system_prompt=(
                 "You are a strict claim verifier. "
                 "Use only explicit evidence from provided passages. "
-                "Explanatory overviews may be supported, but list-like overviews and comparisons should usually remain insufficient_evidence at claim level."
+                "Explanatory overviews may be supported, but list-like overviews and comparisons should usually remain insufficient_evidence at claim level. "
+                "Simple identity or classification claims may be supported when one strong passage states the relationship and another strong passage corroborates it. "
+                "For agency-status claims, official bureau or departmental affiliation statements count as explicit classification support."
             ),
         )
         self._synth_agent = Agent(
@@ -370,14 +402,18 @@ class PydanticAIQueryIntelligence:
                 "- Never rewrite a features or specifications request into an existence-check claim.\n"
                 "- Do not rewrite explanation or mechanism questions into a feature-list request.\n"
                 "- Keep explanation, comparison, and overview requests open-ended.\n"
+                "- Never answer the claim inside claim_text. Do not inject candidate dates, numbers, or facts that were not already present in the user request.\n"
                 "- Intent hints may be wrong; preserve the actual information need from the user request.\n"
+                "- Example: 'Is the IRS a U.S. government agency?' is a simple factual classification claim. Keep answer_shape=fact, prefer official sources, require primary-source evidence, require at least two independent sources, and do not relax it into an open-ended overview contract.\n"
                 "- Example: 'How does asyncio work in Python?' should stay a mechanism/explanation claim about event loops, coroutines, and scheduling; it must not become 'key features and usage patterns'.\n"
+                "- Example: 'At standard atmospheric pressure, what is the boiling point of water in Celsius?' is a generic exact-number fact. Keep required_dimensions focused on number, do not add event_context, do not require a primary source by default, and avoid routing_bias=iterative_loop unless the claim truly depends on a specific event or dated situation.\n"
                 "- Example: 'What was the exact room temperature when Satya Nadella was named CEO of Microsoft?' must stay an exact event-anchored number claim with required_dimensions including number and event_context, and should prefer routing_bias=iterative_loop.\n"
                 "\n"
                 "Search query rules:\n"
                 "- keyword phrases only, no question wording\n"
                 "- match the user's language; add one English query when the input is non-English and the topic is global\n"
                 "- avoid boilerplate fillers\n"
+                "- for official classification or affiliation claims, target organizational structure, statutory authority, bureau, or parent-department pages instead of vague status wording\n"
                 "- include time scope or year when relevant"
             ),
         )
@@ -475,8 +511,11 @@ class PydanticAIQueryIntelligence:
             "For overview, comparison, and news_digest claims, keep the contract open-ended and set strict_contract=false.\n"
             "For product_specs claims, keep the specs request intact and require primary-source evidence.\n"
             "For explanation or mechanism questions, keep the mechanism/explanation need intact and do not rewrite into a feature-list request.\n"
+            "For simple factual classification or membership claims such as agency status, official role, or institutional affiliation, prefer official sources, require primary-source evidence, and require at least two independent sources.\n"
+            "For generic exact-number facts such as scientific constants, measurements under standard conditions, or stable reference values, keep required_dimensions centered on number, avoid event_context, and do not require a primary source by default.\n"
             "For exact event-anchored number lookups, use focus_terms for the requested measurement and prefer routing_bias=iterative_loop.\n"
             "For exact event-anchored number lookups, include event_context in required_dimensions when the number depends on a specific event or situation.\n"
+            "Never insert a candidate answer into claim_text. Keep exact_date and exact_number claims unresolved unless that date or number was already stated in the user request.\n"
             "Never emit placeholder phrases like exact_date, exact_number, event details, or announcement details.\n\n"
             f"Intent: {classification.intent}\n"
             f"Complexity: {classification.complexity}\n"
@@ -508,6 +547,7 @@ class PydanticAIQueryIntelligence:
                 claim_text = _preserve_original_factual_claim(
                     classification,
                     normalized_text(item.claim_text),
+                    claim_profile,
                 )
                 claims.append(
                     Claim(
@@ -1036,6 +1076,19 @@ class PydanticAIQueryIntelligence:
             routing_bias = "iterative_loop"
             allow_synthesis_without_primary = True
             strict_contract = False
+        elif answer_shape == "fact":
+            lower_dimensions = [value.casefold() for value in required_dimensions]
+            official_fact_markers = ("agency", "affiliation", "membership", "leadership", "title", "office", "role", "classification")
+            if "official" in preferred_domain_types and any(
+                marker in value
+                for value in lower_dimensions
+                for marker in official_fact_markers
+            ):
+                primary_source_required = True
+                min_independent_sources = max(2, min_independent_sources)
+                routing_bias = routing_bias or "short_path"
+                allow_synthesis_without_primary = False
+                strict_contract = True
         elif answer_shape == "news_digest":
             primary_source_required = False
             min_independent_sources = max(3, min_independent_sources)
@@ -1059,11 +1112,30 @@ class PydanticAIQueryIntelligence:
             if "number" not in required_dimensions:
                 required_dimensions.append("number")
             lower_dimensions = [value.casefold() for value in required_dimensions]
+            query_entities = {
+                normalized_text(entity).casefold()
+                for entity in extract_entities(classification.normalized_query)
+                if normalized_text(entity)
+            }
+            has_event_anchor_signal = bool(classification.time_scope) or len(query_entities) >= 2
             event_like_number = any(
                 marker in value
                 for value in lower_dimensions
                 for marker in ("event", "context", "time")
             )
+            if event_like_number and not has_event_anchor_signal:
+                required_dimensions = [
+                    value
+                    for value in required_dimensions
+                    if not any(marker in value.casefold() for marker in ("event", "context"))
+                ]
+                lower_dimensions = [value.casefold() for value in required_dimensions]
+                primary_source_required = False
+                min_independent_sources = 1
+                routing_bias = None
+                allow_synthesis_without_primary = True
+                strict_contract = False
+                event_like_number = False
             if event_like_number:
                 min_independent_sources = max(2, min_independent_sources)
                 routing_bias = "iterative_loop"

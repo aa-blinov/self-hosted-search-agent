@@ -129,6 +129,67 @@ class ClaimPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(adjusted.confidence, 0.62)
         self.assertEqual(len(adjusted.supporting_spans), 2)
 
+    def test_post_adjust_verification_promotes_simple_fact_with_strong_multi_source_support(self) -> None:
+        claim = Claim(
+            claim_id="claim-1",
+            claim_text="Is the IRS a U.S. government agency?",
+            priority=1,
+            needs_freshness=False,
+            entity_set=["IRS"],
+            claim_profile=ClaimProfile(
+                answer_shape="fact",
+                primary_source_required=True,
+                min_independent_sources=2,
+                required_dimensions=["agency_classification", "government_affiliation"],
+                focus_terms=["IRS", "government agency"],
+                strict_contract=True,
+            ),
+        )
+        passages = [
+            Passage(
+                passage_id="p1",
+                url="https://www.usa.gov/agencies/internal-revenue-service",
+                canonical_url="https://www.usa.gov/agencies/internal-revenue-service",
+                host="www.usa.gov",
+                title="Internal Revenue Service (IRS) | USAGov",
+                section="Agency",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p1",
+                text="The Internal Revenue Service (IRS) administers and enforces U.S. federal tax laws.",
+                source_score=0.71,
+                utility_score=0.39,
+            ),
+            Passage(
+                passage_id="p2",
+                url="https://usgovernmentmanual.gov/Agency?EntityId=IRS",
+                canonical_url="https://usgovernmentmanual.gov/Agency?EntityId=IRS",
+                host="usgovernmentmanual.gov",
+                title="United States Government Manual",
+                section="Commissioner of Internal Revenue",
+                published_at=None,
+                author=None,
+                extracted_at="2026-03-28T00:00:00+00:00",
+                chunk_id="p2",
+                text="The Internal Revenue Service (IRS) administers and enforces the internal revenue laws.",
+                source_score=0.69,
+                utility_score=0.37,
+            ),
+        ]
+        result = VerificationResult(
+            verdict="insufficient_evidence",
+            confidence=0.60,
+            missing_dimensions=["source", "coverage"],
+            rationale="Need a slightly clearer official corroboration.",
+        )
+
+        adjusted = post_adjust_verification(claim, passages, result)
+
+        self.assertEqual(adjusted.verdict, "supported")
+        self.assertGreaterEqual(adjusted.confidence, 0.66)
+        self.assertEqual(len(adjusted.supporting_spans), 2)
+
     def test_should_stop_claim_loop_respects_strict_contract(self) -> None:
         claim = Claim(
             claim_id="claim-1",
