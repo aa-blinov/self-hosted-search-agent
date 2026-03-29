@@ -143,18 +143,6 @@ class StepLibraryPort(Protocol):
     ) -> EvidenceBundle:
         ...
 
-    def refine_query_variants(
-        self,
-        claim: Claim,
-        classification: QueryClassification,
-        verification: VerificationResult,
-        gated_results: list[GatedSerpResult],
-        bundle: EvidenceBundle,
-        next_iteration: int,
-        existing_queries: set[str],
-    ) -> list[QueryVariant]:
-        ...
-
     def should_stop_claim_loop(
         self,
         claim: Claim,

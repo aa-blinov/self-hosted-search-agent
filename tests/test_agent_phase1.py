@@ -8,7 +8,6 @@ from search_agent.application.agent_steps import (
     compose_answer,
     gate_serp_results,
     infer_claim_profile,
-    refine_query_variants,
     route_claim_retrieval,
     should_stop_claim_loop,
 )
@@ -31,54 +30,6 @@ from search_agent.domain.models import (
 
 
 class AgentPhase1Tests(unittest.TestCase):
-    def test_refine_contradiction_only_when_verdict_contradicted(self):
-        """Template-free step library no longer manufactures follow-up queries."""
-        classification = QueryClassification(
-            query="test",
-            normalized_query="test",
-            intent="factual",
-            complexity="single_hop",
-            needs_freshness=False,
-        )
-        claim = Claim(
-            claim_id="c1",
-            claim_text="What is new in Python 3.12?",
-            priority=1,
-            needs_freshness=False,
-            entity_set=["Python"],
-        )
-        insufficient = VerificationResult(
-            verdict="insufficient_evidence",
-            confidence=0.2,
-            missing_dimensions=["coverage"],
-        )
-        variants_ie = refine_query_variants(
-            claim,
-            classification,
-            insufficient,
-            gated_results=[],
-            bundle=None,
-            iteration=1,
-            existing_queries=set(),
-        )
-        self.assertEqual(variants_ie, [])
-
-        contradicted = VerificationResult(
-            verdict="contradicted",
-            confidence=0.75,
-            missing_dimensions=[],
-        )
-        variants_ct = refine_query_variants(
-            claim,
-            classification,
-            contradicted,
-            gated_results=[],
-            bundle=None,
-            iteration=1,
-            existing_queries=set(),
-        )
-        self.assertEqual(variants_ct, [])
-
     def test_query_variants_preserve_entities(self):
         classification = QueryClassification(
             query="What did OpenAI announce about GPT-4.1 in Q1 2026?",

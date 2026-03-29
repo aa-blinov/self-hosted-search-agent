@@ -241,9 +241,6 @@ class _FakeSteps:
             verification=verification,
         )
 
-    def refine_query_variants(self, claim, classification, verification, gated_results, bundle, next_iteration, existing_queries):
-        return []
-
     def should_stop_claim_loop(self, claim, bundle, iteration):
         return True
 
@@ -324,17 +321,6 @@ class _FakeContradictionSteps(_FakeSteps):
             freshness_ok=True,
             verification=verification,
         )
-
-    def refine_query_variants(self, claim, classification, verification, gated_results, bundle, next_iteration, existing_queries):
-        return [
-            QueryVariant(
-                variant_id="v2",
-                claim_id=claim.claim_id,
-                query_text=f'"{claim.claim_text}"',
-                strategy="refined_exact",
-                rationale="second iteration",
-            )
-        ]
 
     def should_stop_claim_loop(self, claim, bundle, iteration):
         return False

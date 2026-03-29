@@ -58,7 +58,7 @@ AGENT_MAX_PARALLEL_CLAIMS = 4
 AGENT_MAX_SEARCH_CALLS_PER_RUN = 0
 AGENT_MAX_QUERY_VARIANTS = 6
 # Variant cap for iteration 1 only (broad + entity_locked + exact_match at most).
-# Freshness/source_restricted variants are added by refine_query_variants on iteration 2 if needed.
+# Later iterations can still add LLM-refined queries through QueryIntelligence.refine_search_queries.
 AGENT_MAX_QUERY_VARIANTS_ITER1 = 3
 AGENT_MAX_REFINE_VARIANTS = 12
 AGENT_FETCH_TOP_N = 4

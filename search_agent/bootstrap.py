@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from search_agent.application.legacy_steps import LegacyAgentStepLibrary
+from search_agent.application.step_library import AgentStepLibrary
 from search_agent.application.use_cases import SearchAgentUseCase
-from search_agent.infrastructure.fetch_gateway import LegacyFetchGateway
+from search_agent.infrastructure.fetch_gateway import AgentFetchGateway
 from search_agent.infrastructure.gateway_factory import build_search_gateway
 from search_agent.infrastructure.intelligence import PydanticAIQueryIntelligence
 from search_agent.infrastructure.receipt_gateway import JsonReceiptWriter
@@ -19,7 +19,7 @@ def build_search_agent_use_case() -> SearchAgentUseCase:
     return SearchAgentUseCase(
         intelligence=PydanticAIQueryIntelligence(settings),
         search_gateway=build_search_gateway(settings),
-        fetch_gateway=LegacyFetchGateway(),
+        fetch_gateway=AgentFetchGateway(),
         receipt_writer=JsonReceiptWriter(),
-        steps=LegacyAgentStepLibrary(),
+        steps=AgentStepLibrary(),
     )

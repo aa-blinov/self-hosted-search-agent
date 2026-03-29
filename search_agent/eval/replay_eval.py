@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from search_agent.application.legacy_steps import LegacyAgentStepLibrary
+from search_agent.application.step_library import AgentStepLibrary
 from search_agent.application.use_cases import SearchAgentUseCase
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import (
@@ -352,7 +352,7 @@ def build_replay_use_case(fixture: ReplayFixture) -> SearchAgentUseCase:
         search_gateway=_ReplaySearchGateway(fixture),
         fetch_gateway=_ReplayFetchGateway(fixture),
         receipt_writer=_ReplayReceiptWriter(),
-        steps=LegacyAgentStepLibrary(),
+        steps=AgentStepLibrary(),
     )
 
 

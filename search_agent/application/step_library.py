@@ -14,14 +14,13 @@ from search_agent.application.agent_steps import (
     compose_answer,
     gate_serp_results,
     infer_claim_profile,
-    refine_query_variants,
     route_claim_retrieval,
     should_stop_claim_loop,
     utility_rerank_passages,
 )
 
 
-class LegacyAgentStepLibrary:
+class AgentStepLibrary:
     def build_run_id(self, query: str, started_at) -> str:
         return _build_run_id(query, started_at)
 
@@ -57,26 +56,6 @@ class LegacyAgentStepLibrary:
 
     def build_snippet_passages(self, gated_results):
         return build_snippet_passages(gated_results)
-
-    def refine_query_variants(
-        self,
-        claim,
-        classification,
-        verification,
-        gated_results,
-        bundle,
-        next_iteration,
-        existing_queries,
-    ):
-        return refine_query_variants(
-            claim,
-            classification,
-            verification,
-            gated_results,
-            bundle,
-            next_iteration,
-            existing_queries,
-        )
 
     def should_stop_claim_loop(self, claim, bundle, iteration):
         return should_stop_claim_loop(claim, bundle, iteration)

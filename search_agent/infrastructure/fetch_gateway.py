@@ -5,7 +5,7 @@ import logfire
 from search_agent.application.agent_steps import fetch_claim_documents
 
 
-class LegacyFetchGateway:
+class AgentFetchGateway:
     def fetch_claim_documents(
         self,
         claim,

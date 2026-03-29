@@ -109,18 +109,6 @@ def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSn
     )
 
 
-def refine_query_variants(
-    claim: Claim,
-    classification: QueryClassification,
-    verification,
-    gated_results,
-    bundle,
-    iteration: int,
-    existing_queries: set[str],
-) -> list[QueryVariant]:
-    return []
-
-
 def run_search_agent(
     query: str,
     profile,
