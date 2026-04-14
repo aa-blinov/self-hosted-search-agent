@@ -102,6 +102,53 @@ def _default_intent_decision() -> "_IntentOutput":
     return _IntentOutput(intent="factual", complexity="single_hop", search_queries=[])
 
 
+# Patterns indicating an explanation/comparison/how-to query — these are
+# unambiguously synthesis intent. The LLM classifier occasionally mislabels
+# them as factual on cross-language inputs (e.g. Russian "Как работает X"),
+# which routes them through the wrong decompose+verify path. We defensively
+# override factual -> synthesis when the normalized query starts with one
+# of these phrases.
+_SYNTHESIS_PATTERNS: tuple[str, ...] = (
+    # Russian
+    "как работает",
+    "как работают",
+    "как использовать",
+    "как устроен",
+    "как устроена",
+    "как устроено",
+    "что такое",
+    "чем отличается",
+    "чем отличаются",
+    "в чем разница",
+    "в чём разница",
+    "объясни",
+    "опиши",
+    "сравни",
+    "расскажи про",
+    "расскажи о",
+    # English
+    "how does",
+    "how do",
+    "how to",
+    "what is",
+    "what are",
+    "explain",
+    "describe",
+    "compare",
+    "difference between",
+    "differences between",
+    "what's the difference",
+    "what is the difference",
+)
+
+
+def _looks_like_synthesis(query: str) -> bool:
+    q = (query or "").casefold().strip()
+    if not q:
+        return False
+    return any(q.startswith(pattern) for pattern in _SYNTHESIS_PATTERNS)
+
+
 def _default_verification(reason: str) -> VerificationResult:
     return VerificationResult(
         verdict="insufficient_evidence",
@@ -213,7 +260,6 @@ class _ClaimProfileOutput(BaseModel):
     primary_source_required: bool = False
     min_independent_sources: int = 1
     preferred_domain_types: list[Literal["official", "academic", "vendor", "major_media", "forum", "unknown"]] = Field(default_factory=list)
-    needs_broad_retrieval: bool = False
     required_dimensions: list[str] = Field(default_factory=list)
     focus_terms: list[str] = Field(default_factory=list)
     allow_synthesis_without_primary: bool = True
@@ -408,9 +454,9 @@ class PydanticAIQueryIntelligence:
                 "claim_profile rules:\n"
                 "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
                 "- overview/comparison/news_digest are open-ended contracts: primary_source_required=false and strict_contract=false\n"
-                "- news_digest must use min_independent_sources>=3 and needs_broad_retrieval=true\n"
-                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, needs_broad_retrieval=true, and strict_contract=true\n"
-                "- exact event-anchored number lookups should prefer needs_broad_retrieval=true and make the requested measurement the focus_terms\n"
+                "- news_digest must use min_independent_sources>=3\n"
+                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, and strict_contract=true\n"
+                "- exact event-anchored number lookups should make the requested measurement the focus_terms\n"
                 "- for list-like overviews, use explicit required_dimensions such as feature_list, improvements, changes, or highlights\n"
                 "- focus_terms must describe the requested evidence itself, not generic context words\n"
                 "- do not use placeholder strings such as exact_date, exact_number, event details, or announcement details inside claim_text or focus_terms\n"
@@ -509,6 +555,19 @@ class PydanticAIQueryIntelligence:
             decision = _default_intent_decision()
             self._classification_cache[normalized_query] = decision
 
+        # Heuristic boost: explanation/comparison/how-to patterns are unambiguous
+        # synthesis queries. The LLM occasionally classifies these as factual on
+        # cross-language inputs (e.g. Russian "Как работает X"), which sends them
+        # down the wrong decompose+verify path. Override defensively.
+        if decision.intent == "factual" and _looks_like_synthesis(normalized_query):
+            log(f"  [dim yellow]-> intent override: factual -> synthesis (explanation pattern)[/dim yellow]")
+            decision = _IntentOutput(
+                intent="synthesis",
+                complexity=decision.complexity,
+                search_queries=decision.search_queries,
+            )
+            self._classification_cache[normalized_query] = decision
+
         self._intent_cache[normalized_query] = decision.intent
         return decision
 
@@ -518,11 +577,23 @@ class PydanticAIQueryIntelligence:
             queries = self._get_or_generate_queries(classification, log)
             return self._fallback_claims(classification, search_queries=queries)
 
+        # SYNTHESIS_SKIP_DECOMPOSE: for open-ended synthesis/news_digest intents the
+        # LLM-decomposed sub-claims are usually wrong (verify_claim returns
+        # insufficient_evidence on descriptive claims), and the N-claims × M-variants
+        # SERP fan-out is wasteful. Treat the original query as a single claim and
+        # rely on synthesize_answer for the final response.
+        if (
+            tuning.SYNTHESIS_SKIP_DECOMPOSE
+            and classification.intent in {"synthesis", "news_digest"}
+        ):
+            queries = self._get_or_generate_queries(classification, log)
+            return self._fallback_claims(classification, search_queries=queries)
+
         prompt = (
             "Return JSON with one key `claims`.\n"
             "Each claim must include: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
             "claim_profile must include: answer_shape, primary_source_required, min_independent_sources, "
-            "preferred_domain_types, needs_broad_retrieval, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
+            "preferred_domain_types, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
             "Keep claims atomic, exact, and capped at 4.\n"
             "Return one claim when the request is already atomic.\n"
             "For overview, comparison, and news_digest claims, keep the contract open-ended and set strict_contract=false.\n"
@@ -530,7 +601,7 @@ class PydanticAIQueryIntelligence:
             "For explanation or mechanism questions, keep the mechanism/explanation need intact and do not rewrite into a feature-list request.\n"
             "For simple factual classification or membership claims such as agency status, official role, or institutional affiliation, prefer official sources, require primary-source evidence, and require at least two independent sources.\n"
             "For generic exact-number facts such as scientific constants, measurements under standard conditions, or stable reference values, keep required_dimensions centered on number, avoid event_context, and do not require a primary source by default.\n"
-            "For exact event-anchored number lookups, use focus_terms for the requested measurement and prefer needs_broad_retrieval=true.\n"
+            "For exact event-anchored number lookups, use focus_terms for the requested measurement.\n"
             "For exact event-anchored number lookups, include event_context in required_dimensions when the number depends on a specific event or situation.\n"
             "Never insert a candidate answer into claim_text. Keep exact_date and exact_number claims unresolved unless that date or number was already stated in the user request.\n"
             "Never emit placeholder phrases like exact_date, exact_number, event details, or announcement details.\n\n"
@@ -1044,7 +1115,6 @@ class PydanticAIQueryIntelligence:
                     primary_source_required=False,
                     min_independent_sources=3 if classification.intent == "news_digest" else 2 if classification.intent == "synthesis" else 1,
                     preferred_domain_types=["major_media", "official", "vendor"] if classification.intent == "news_digest" else ["official", "academic", "vendor", "major_media"],
-                    needs_broad_retrieval=classification.intent in {"synthesis", "news_digest"},
                     required_dimensions=["time", "source"] if classification.intent == "news_digest" else [],
                     focus_terms=[],
                     allow_synthesis_without_primary=classification.intent != "factual",
@@ -1090,14 +1160,12 @@ class PydanticAIQueryIntelligence:
 
         primary_source_required = bool(output.primary_source_required)
         min_independent_sources = max(1, int(output.min_independent_sources or 1))
-        needs_broad_retrieval = bool(output.needs_broad_retrieval)
         allow_synthesis_without_primary = bool(output.allow_synthesis_without_primary)
         strict_contract = bool(output.strict_contract)
 
         if answer_shape in {"overview", "comparison"}:
             primary_source_required = False
             min_independent_sources = max(2, min_independent_sources)
-            needs_broad_retrieval = True
             allow_synthesis_without_primary = True
             strict_contract = False
         elif answer_shape == "fact":
@@ -1115,21 +1183,18 @@ class PydanticAIQueryIntelligence:
         elif answer_shape == "news_digest":
             primary_source_required = False
             min_independent_sources = max(3, min_independent_sources)
-            needs_broad_retrieval = True
             allow_synthesis_without_primary = True
             strict_contract = False
             required_dimensions = list(dict.fromkeys(required_dimensions + ["time", "source", "event"]))
         elif answer_shape == "product_specs":
             primary_source_required = True
             min_independent_sources = max(2, min_independent_sources)
-            needs_broad_retrieval = True
             allow_synthesis_without_primary = False
             strict_contract = True
             required_dimensions = list(dict.fromkeys(required_dimensions + ["specs", "source"]))
         elif answer_shape == "exact_date":
             if "source" not in required_dimensions and len(required_dimensions) <= 1:
                 min_independent_sources = 1
-                needs_broad_retrieval = False
                 strict_contract = False
         elif answer_shape == "exact_number":
             if "number" not in required_dimensions:
@@ -1155,24 +1220,19 @@ class PydanticAIQueryIntelligence:
                 lower_dimensions = [value.casefold() for value in required_dimensions]
                 primary_source_required = False
                 min_independent_sources = 1
-                needs_broad_retrieval = False
                 allow_synthesis_without_primary = True
                 strict_contract = False
                 event_like_number = False
             if event_like_number:
                 min_independent_sources = max(2, min_independent_sources)
-                needs_broad_retrieval = True
                 strict_contract = True
             elif not primary_source_required and not event_like_number:
                 min_independent_sources = 1
-                needs_broad_retrieval = False
                 strict_contract = False
             elif "source" in lower_dimensions and len(required_dimensions) >= 2:
-                needs_broad_retrieval = True
                 strict_contract = True
             elif "time" not in lower_dimensions:
                 min_independent_sources = 1
-                needs_broad_retrieval = False
                 strict_contract = False
             else:
                 strict_contract = strict_contract or "number" in lower_dimensions
@@ -1186,7 +1246,6 @@ class PydanticAIQueryIntelligence:
                 if answer_shape == "news_digest"
                 else ["official", "academic", "vendor", "major_media"]
             ),
-            needs_broad_retrieval=needs_broad_retrieval,
             required_dimensions=required_dimensions,
             focus_terms=focus_terms,
             allow_synthesis_without_primary=allow_synthesis_without_primary,

@@ -240,7 +240,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 answer_shape="overview",
                 primary_source_required=True,
                 min_independent_sources=1,
-                needs_broad_retrieval=False,
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
                 focus_terms=["event details", "asyncio"],
@@ -251,7 +250,6 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(profile.answer_shape, "overview")
         self.assertFalse(profile.primary_source_required)
         self.assertGreaterEqual(profile.min_independent_sources, 2)
-        self.assertTrue(profile.needs_broad_retrieval)
         self.assertTrue(profile.allow_synthesis_without_primary)
         self.assertFalse(profile.strict_contract)
 
@@ -269,7 +267,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 answer_shape="exact_number",
                 primary_source_required=True,
                 min_independent_sources=2,
-                needs_broad_retrieval=False,
                 required_dimensions=["time", "number", "source"],
                 strict_contract=False,
                 focus_terms=["room temperature", "event details"],
@@ -278,7 +275,6 @@ class IntelligenceLayerTests(unittest.TestCase):
         )
 
         self.assertEqual(profile.answer_shape, "exact_number")
-        self.assertTrue(profile.needs_broad_retrieval)
         self.assertIn("number", profile.required_dimensions)
         self.assertTrue(profile.strict_contract)
 
@@ -295,7 +291,6 @@ class IntelligenceLayerTests(unittest.TestCase):
             _ClaimProfileOutput(
                 answer_shape="exact_number",
                 min_independent_sources=1,
-                needs_broad_retrieval=False,
                 required_dimensions=["temperature value", "event context", "number"],
                 strict_contract=False,
                 focus_terms=["room temperature", "temperature"],
@@ -304,7 +299,6 @@ class IntelligenceLayerTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(profile.min_independent_sources, 2)
-        self.assertTrue(profile.needs_broad_retrieval)
         self.assertTrue(profile.strict_contract)
 
     def test_claim_profile_relaxes_simple_exact_number_contracts(self) -> None:
@@ -321,7 +315,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 answer_shape="exact_number",
                 primary_source_required=False,
                 min_independent_sources=2,
-                needs_broad_retrieval=True,
                 required_dimensions=["number", "source"],
                 strict_contract=True,
                 focus_terms=["boiling point", "Celsius"],
@@ -332,7 +325,6 @@ class IntelligenceLayerTests(unittest.TestCase):
         self.assertEqual(profile.answer_shape, "exact_number")
         self.assertFalse(profile.primary_source_required)
         self.assertEqual(profile.min_independent_sources, 1)
-        self.assertFalse(profile.needs_broad_retrieval)
         self.assertFalse(profile.strict_contract)
         self.assertNotIn("event_context", [value.casefold() for value in profile.required_dimensions])
 
@@ -350,7 +342,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 answer_shape="exact_number",
                 primary_source_required=True,
                 min_independent_sources=2,
-                needs_broad_retrieval=True,
                 required_dimensions=["number", "event_context"],
                 strict_contract=True,
                 focus_terms=["boiling point", "Celsius"],
@@ -360,7 +351,6 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         self.assertFalse(profile.primary_source_required)
         self.assertEqual(profile.min_independent_sources, 1)
-        self.assertFalse(profile.needs_broad_retrieval)
         self.assertFalse(profile.strict_contract)
         self.assertEqual(profile.required_dimensions, ["number"])
 
@@ -379,7 +369,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 primary_source_required=False,
                 min_independent_sources=1,
                 preferred_domain_types=["official", "major_media"],
-                needs_broad_retrieval=False,
                 required_dimensions=["agency_classification"],
                 strict_contract=False,
                 focus_terms=["IRS", "government agency"],
@@ -389,7 +378,6 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         self.assertTrue(profile.primary_source_required)
         self.assertEqual(profile.min_independent_sources, 2)
-        self.assertFalse(profile.needs_broad_retrieval)
         self.assertTrue(profile.strict_contract)
 
     def test_claim_profile_relaxes_simple_exact_date_contracts(self) -> None:
@@ -406,7 +394,6 @@ class IntelligenceLayerTests(unittest.TestCase):
                 answer_shape="exact_date",
                 primary_source_required=True,
                 min_independent_sources=2,
-                needs_broad_retrieval=True,
                 required_dimensions=["release_date"],
                 strict_contract=True,
                 focus_terms=["release date"],
@@ -416,7 +403,6 @@ class IntelligenceLayerTests(unittest.TestCase):
 
         self.assertEqual(profile.answer_shape, "exact_date")
         self.assertEqual(profile.min_independent_sources, 1)
-        self.assertFalse(profile.needs_broad_retrieval)
         self.assertFalse(profile.strict_contract)
 
     def test_verify_claim_maps_structured_quotes_to_spans(self):

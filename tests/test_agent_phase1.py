@@ -1098,7 +1098,6 @@ class AgentPhase1Tests(unittest.TestCase):
             entity_set=["Satya Nadella", "Microsoft"],
             claim_profile=ClaimProfile(
                 answer_shape="exact_date",
-                needs_broad_retrieval=True,
                 required_dimensions=["time"],
                 focus_terms=["named CEO", "2015"],
             ),
@@ -1223,7 +1222,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1258,7 +1256,6 @@ class AgentPhase1Tests(unittest.TestCase):
 
         self.assertEqual(profile.answer_shape, "overview")
         self.assertEqual(profile.min_independent_sources, 2)
-        self.assertTrue(profile.needs_broad_retrieval)
 
     def test_product_specs_query_variants_prioritize_spec_queries(self):
         classification = QueryClassification(
@@ -1284,7 +1281,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1318,7 +1314,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1342,7 +1337,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1418,7 +1412,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1525,7 +1518,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1557,7 +1549,6 @@ class AgentPhase1Tests(unittest.TestCase):
                 primary_source_required=True,
                 min_independent_sources=2,
                 preferred_domain_types=["official", "vendor", "major_media"],
-                needs_broad_retrieval=True,
                 required_dimensions=["source", "specs"],
                 allow_synthesis_without_primary=False,
                 strict_contract=True,
@@ -1648,7 +1639,6 @@ class AgentPhase1Tests(unittest.TestCase):
                             primary_source_required=True,
                             min_independent_sources=2,
                             preferred_domain_types=["official", "vendor", "major_media"],
-                            needs_broad_retrieval=True,
                             required_dimensions=["source", "specs"],
                             allow_synthesis_without_primary=False,
                             strict_contract=True,

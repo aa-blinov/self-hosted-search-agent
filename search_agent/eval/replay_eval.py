@@ -72,7 +72,6 @@ def _load_claim_profile(raw: dict | None) -> ClaimProfile | None:
         primary_source_required=bool(raw.get("primary_source_required", False)),
         min_independent_sources=int(raw.get("min_independent_sources", 1)),
         preferred_domain_types=list(raw.get("preferred_domain_types") or []),
-        needs_broad_retrieval=bool(raw.get("needs_broad_retrieval", False)),
         required_dimensions=list(raw.get("required_dimensions") or []),
         focus_terms=list(raw.get("focus_terms") or []),
         allow_synthesis_without_primary=bool(raw.get("allow_synthesis_without_primary", True)),

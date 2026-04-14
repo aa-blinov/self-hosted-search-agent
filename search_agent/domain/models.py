@@ -29,7 +29,6 @@ class ClaimProfile:
     primary_source_required: bool = False
     min_independent_sources: int = 1
     preferred_domain_types: list[DomainType] = field(default_factory=list)
-    needs_broad_retrieval: bool = False
     required_dimensions: list[str] = field(default_factory=list)
     focus_terms: list[str] = field(default_factory=list)
     allow_synthesis_without_primary: bool = True

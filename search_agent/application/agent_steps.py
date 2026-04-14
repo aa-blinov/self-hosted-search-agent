@@ -52,13 +52,11 @@ def infer_claim_profile(claim: Claim, classification: QueryClassification) -> Cl
         return ClaimProfile(
             answer_shape="news_digest",
             min_independent_sources=policy_tuning.DEFAULT_NEWS_DIGEST_MIN_INDEPENDENT_SOURCES,
-            needs_broad_retrieval=True,
         )
     if classification.intent == "synthesis":
         return ClaimProfile(
             answer_shape="overview",
             min_independent_sources=policy_tuning.DEFAULT_OVERVIEW_MIN_INDEPENDENT_SOURCES,
-            needs_broad_retrieval=True,
         )
     return ClaimProfile(
         answer_shape="fact",

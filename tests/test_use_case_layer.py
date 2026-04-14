@@ -396,7 +396,6 @@ class _FakeSynthesisIntelligence(_FakeIntelligence):
                     primary_source_required=True,
                     min_independent_sources=2,
                     preferred_domain_types=["official", "vendor", "major_media"],
-                    needs_broad_retrieval=True,
                     required_dimensions=["source", "specs"],
                     allow_synthesis_without_primary=False,
                     strict_contract=True,
@@ -432,7 +431,6 @@ class _FakeStrictExactNumberIntelligence(_FakeIntelligence):
                 claim_profile=ClaimProfile(
                     answer_shape="exact_number",
                     min_independent_sources=2,
-                    needs_broad_retrieval=True,
                     required_dimensions=["time", "number", "source"],
                     strict_contract=True,
                 ),
@@ -459,7 +457,6 @@ class _FakeSynthesisSteps(_FakeSteps):
             primary_source_required=True,
             min_independent_sources=2,
             preferred_domain_types=["official", "vendor", "major_media"],
-            needs_broad_retrieval=True,
             required_dimensions=["source", "specs"],
             allow_synthesis_without_primary=False,
             strict_contract=True,
@@ -621,7 +618,6 @@ class UseCaseLayerTests(unittest.TestCase):
             claim_profile=ClaimProfile(
                 answer_shape="news_digest",
                 min_independent_sources=3,
-                needs_broad_retrieval=True,
                 required_dimensions=["time", "source", "event"],
             ),
         )
