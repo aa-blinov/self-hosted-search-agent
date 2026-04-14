@@ -155,17 +155,17 @@ def main() -> None:
 
     if args.search_provider:
         os.environ["SEARCH_PROVIDER_OVERRIDE"] = args.search_provider
-        from search_agent.bootstrap import build_search_agent_use_case
+        from search_agent.bootstrap import build_unified_search_agent_use_case
         from search_agent.settings import get_settings
 
         get_settings.cache_clear()
-        build_search_agent_use_case.cache_clear()
+        build_unified_search_agent_use_case.cache_clear()
 
     api_key = require_api_key()
     client = make_client(api_key)
-    from search_agent import build_search_agent_use_case
+    from search_agent import build_unified_search_agent_use_case
 
-    use_case = build_search_agent_use_case()
+    use_case = build_unified_search_agent_use_case()
 
     if args.eval:
         from pathlib import Path

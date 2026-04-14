@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from search_agent.application.agent_steps import run_search_agent
 from search_agent.config.profiles import get_profile
 from search_agent.domain.models import AgentRunResult, ClaimRun
 from search_agent import tuning
@@ -483,7 +482,13 @@ def evaluate_dataset(
     log=None,
     # Deprecated: kept for call-site compatibility, ignored.
     client=None,
+    unified: bool = True,  # kept as no-op for backward-compat call sites
 ) -> dict:
+    """Run the unified search agent against a JSONL dataset and score it.
+
+    The ``unified`` parameter is retained for call-site compatibility but is
+    now a no-op — the classic pipeline has been removed from the eval path.
+    """
     log = log or (lambda msg: None)
     cases = load_evaluation_cases(dataset_path)
     reports: dict[str, AgentRunResult] = {}
@@ -494,20 +499,25 @@ def evaluate_dataset(
         else tuning.EVAL_CASE_DELAY_SEC
     )
 
+    from search_agent import build_unified_search_agent_use_case
+
+    use_case = build_unified_search_agent_use_case()
+
     for idx, case in enumerate(cases, 1):
         if idx > 1 and case_delay > 0:
             time.sleep(case_delay)
         log(f"[eval] case {idx}/{len(cases)}: {case.case_id}")
         start = time.perf_counter()
-        report = run_search_agent(
+        report = use_case.run(
             case.query,
             profile=get_profile(case.profile),
-            log=log,
             receipts_dir=receipts_dir,
+            log=log,
         )
         latencies_ms[case.case_id] = int((time.perf_counter() - start) * 1000)
         reports[case.case_id] = report
 
     summary = score_reports(cases, reports, latencies_ms)
     summary["dataset_path"] = str(Path(dataset_path))
+    summary["mode"] = "unified"
     return summary

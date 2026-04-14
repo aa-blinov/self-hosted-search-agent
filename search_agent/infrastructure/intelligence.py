@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.output import PromptedOutput
 
+from search_agent.domain.assessment import Assessment, KeyClaim
 from search_agent.domain.models import (
     Claim,
     ClaimProfile,
@@ -302,6 +303,17 @@ class _RefinedQueriesOutput(BaseModel):
     queries: list[str] = Field(default_factory=list)
 
 
+class _KeyClaimOutput(BaseModel):
+    text: str = Field(min_length=1)
+    supporting_citation_numbers: list[int] = Field(default_factory=list)
+
+
+class _AssessmentOutput(BaseModel):
+    answer: str = Field(default="")
+    key_claims: list[_KeyClaimOutput] = Field(default_factory=list)
+    confidence: float = 0.0
+    gaps: list[str] = Field(default_factory=list)
+    contradicts_query: bool = False
 
 
 class PydanticAIQueryIntelligence:
@@ -480,6 +492,71 @@ class PydanticAIQueryIntelligence:
                 "- include time scope or year when relevant"
             ),
         )
+
+        # Unified pipeline: writes final answer + self-assessment in a single call.
+        # Replaces verify_claim + synthesize_answer + compose_answer in the iterative
+        # runner.  The output includes key_claims with 1-based citation numbers so
+        # the Python-side stop check can count independent domains per assertion.
+        self._assess_agent: Agent[None, _AssessmentOutput] = Agent(
+            self._model,
+            output_type=_out(_AssessmentOutput),
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "You answer a user query using numbered web passages as evidence.\n"
+                "Return JSON with: answer, key_claims, confidence, gaps, contradicts_query.\n"
+                "\n"
+                "answer — a grounded markdown answer in the SAME language as the query.\n"
+                "  Cite sources inline with [N] where N is a passage number.\n"
+                "  Adapt format to the query shape:\n"
+                "    - short factual query (who/when/where/exact number) → 1–3 sentences.\n"
+                "    - explanation / how-does-X / overview → comprehensive multi-paragraph markdown.\n"
+                "    - comparison / what's-the-difference → bulleted or sectioned breakdown per dimension.\n"
+                "    - news / latest / what's happening → bullet list of distinct developments, each citing a different source.\n"
+                "  Do NOT add a Sources/References section — it will be appended automatically from citations.\n"
+                "\n"
+                "key_claims — atomic factual assertions the answer makes.\n"
+                "  Each key_claim has: text (the assertion) and supporting_citation_numbers\n"
+                "  (the list of [N] indices that back it up).\n"
+                "  Include 1–6 key claims covering the main points. Omit purely stylistic phrases.\n"
+                "\n"
+                "confidence — 0.0 to 1.0, your honest estimate that the answer is complete and correct.\n"
+                "  Use < 0.5 when passages are thin, off-topic, or contradictory and you cannot\n"
+                "  produce a reliable answer.\n"
+                "  Use >= 0.75 when the answer is well-grounded and you would be comfortable serving it.\n"
+                "\n"
+                "gaps — specific missing information the next search iteration should target.\n"
+                "  Return an empty list when confidence is high. Keep each gap short and concrete.\n"
+                "\n"
+                "contradicts_query — set to true ONLY if the user's query assumes a fact that\n"
+                "  the passages directly disprove (e.g. wrong year, wrong attribution, wrong value).\n"
+                "  When true, the answer MUST explicitly correct the user's assumption.\n"
+                "\n"
+                "Do not invent facts. Do not cite passage numbers that don't exist.\n"
+                "If passages are insufficient, say so in the answer, set confidence low,\n"
+                "and list the missing information in gaps."
+            ),
+        )
+
+        # Follow-up query generation driven by gaps from the previous assessment.
+        # Used on iteration 2+ when the stop check fails.
+        self._gap_query_agent: Agent[None, _QueryListOutput] = Agent(
+            self._model,
+            output_type=_out(_QueryListOutput),
+            retries=1,
+            instrument=True,
+            system_prompt=(
+                "Generate 1 to 4 focused web search queries that target specific missing information.\n"
+                "Input: the original user query, a list of information gaps, and queries already tried.\n"
+                "Rules:\n"
+                "- keyword phrases only, no question wording\n"
+                "- match the user's language; add one English query when input is non-English\n"
+                "- each query must target one specific gap, not the whole topic\n"
+                "- do not repeat or paraphrase queries from the 'already tried' list\n"
+                "- max 8 words per query"
+            ),
+        )
+
     def classify_query(self, query: str, log=None) -> QueryClassification:
         normalized_query = self._normalize_time_references(query, log=log)
         region_hint = extract_region_hint(normalized_query)
@@ -1047,6 +1124,199 @@ class PydanticAIQueryIntelligence:
             log=log,
         )
         return queries[0] if queries else None
+
+    # ------------------------------------------------------------------
+    # Unified iterative pipeline — replaces classify/decompose/verify/synthesize
+    # with two calls: generate_queries_unified + assess_and_answer.
+    # ------------------------------------------------------------------
+
+    def generate_queries_unified(
+        self,
+        *,
+        user_query: str,
+        normalized_query: str,
+        iteration: int,
+        prior_assessment: Assessment | None,
+        used_queries: set[str],
+        log=None,
+    ) -> list[str]:
+        """Produce search queries for the current iteration of the unified runner.
+
+        Iter 1: reuse the query list generated by the combined intent-classification
+        call (``_query_cache``) — one LLM round-trip already fires when ``classify_query``
+        runs. If nothing is cached (LLM disabled, cache miss) fall back to
+        ``_generate_queries_llm``.
+
+        Iter 2+: feed the prior assessment's ``gaps`` into ``_gap_query_agent`` so the
+        next retrieval targets specifically the information the model said was missing.
+        """
+        log = log or (lambda msg: None)
+
+        def _dedupe(candidates: list[str]) -> list[str]:
+            out: list[str] = []
+            seen = {q.casefold().strip() for q in used_queries if q}
+            for candidate in candidates:
+                text = normalized_text(candidate)
+                if not text:
+                    continue
+                key = text.casefold().strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(text)
+            return out
+
+        if iteration <= 1 or prior_assessment is None:
+            cached = self._query_cache.get(normalized_query)
+            if cached:
+                for q in cached:
+                    log(f"  [dim]-> llm_query: {q}[/dim]")
+                return _dedupe(cached)
+            fallback_classification = QueryClassification(
+                query=user_query,
+                normalized_query=normalized_query,
+                intent="factual",
+                complexity="single_hop",
+                needs_freshness=False,
+            )
+            return _dedupe(
+                self._generate_queries_llm(normalized_query, fallback_classification, log=log)
+            )
+
+        if not self._enabled:
+            return []
+        gaps = [gap for gap in (prior_assessment.gaps or []) if (gap or "").strip()]
+        if not gaps:
+            return []
+
+        prompt = (
+            f"User query: {user_query}\n"
+            f"Gaps to fill:\n" + "\n".join(f"- {gap}" for gap in gaps) + "\n"
+            f"Already tried:\n" + ("\n".join(f"- {q}" for q in sorted(used_queries)) or "- none")
+        )
+        try:
+            with log_llm_call(
+                log,
+                task="generate_queries_gap",
+                model=self._settings.llm_model,
+                detail=user_query[:60],
+                input_chars=len(prompt),
+            ) as metrics:
+                result = self._gap_query_agent.run_sync(
+                    prompt,
+                    model_settings=self._model_settings(max_tokens=200, temperature=0),
+                )
+                metrics.output_chars = output_char_len(result.output)
+            queries = _dedupe(list(result.output.queries))
+            for q in queries:
+                log(f"  [dim]-> llm_gap_query: {q}[/dim]")
+            return queries[:4]
+        except Exception as exc:
+            log(f"  [dim yellow]-> generate_queries_gap failed: {exc}[/dim yellow]")
+            return []
+
+    def assess_and_answer(
+        self,
+        user_query: str,
+        passages: list[Passage],
+        log=None,
+    ) -> Assessment:
+        """Single LLM call that writes the final answer AND self-evaluates sufficiency.
+
+        Returns an ``Assessment`` with the markdown answer, the key_claims the answer
+        makes (with [N] citation indices), a confidence score, the gaps that would
+        drive the next iteration, and a ``contradicts_query`` flag for counterfactual
+        user queries.
+
+        ``passages`` must already be the final ranked and capped list in the exact
+        order that citation indices [1..N] will reference.  The caller (unified
+        runner) is responsible for URL/domain capping; this method does NOT re-cap
+        or re-number, so the indices returned in ``key_claims`` align 1-to-1 with
+        ``passages``.
+        """
+        log = log or (lambda msg: None)
+        if not self._enabled or not passages:
+            return Assessment(answer="", confidence=0.0, contradicts_query=False)
+
+        prompt_parts: list[str] = []
+        passage_refs: list[Passage] = []
+        for p in passages:
+            text = (p.text or "").strip()
+            if not text:
+                continue
+            n = len(prompt_parts) + 1
+            title = (p.title or "").strip()
+            url = (p.url or "").strip()
+            prompt_parts.append(f"[{n}] {title} | {url}\n{text[:1200]}")
+            passage_refs.append(p)
+
+        if not prompt_parts:
+            return Assessment(answer="", confidence=0.0, contradicts_query=False)
+
+        prompt = (
+            f"Query: {user_query}\n\n"
+            f"Passages:\n\n" + "\n\n".join(prompt_parts)
+        )
+
+        try:
+            with log_llm_call(
+                log,
+                task="assess_and_answer",
+                model=self._settings.llm_model,
+                detail=user_query[:60],
+                input_chars=len(prompt),
+            ) as metrics:
+                with logfire.span("query_intelligence.assess_and_answer", query=user_query):
+                    result = self._assess_agent.run_sync(
+                        prompt,
+                        model_settings=self._model_settings(
+                            max_tokens=self._settings.resolved_synthesize_answer_max_tokens(),
+                            temperature=0.3,
+                        ),
+                    )
+                metrics.output_chars = output_char_len(result.output)
+            output = result.output
+
+            answer_text = _normalize_citation_groups((output.answer or "").strip())
+
+            # Append Sources section from citations actually used in the answer,
+            # mirroring synthesize_answer's sources footer.  We look up each [N]
+            # against the passage_refs we built above.
+            cited_indices = _extract_citation_indices(answer_text)
+            if cited_indices and answer_text:
+                lines = ["\n\nИсточники:"]
+                for n in cited_indices:
+                    if 1 <= n <= len(passage_refs):
+                        passage = passage_refs[n - 1]
+                        label = (passage.title or passage.url)[:80]
+                        url = passage.url
+                        lines.append(f"[{n}] {label} — {url}" if url else f"[{n}] {label}")
+                answer_text += "\n".join(lines)
+
+            key_claims = [
+                KeyClaim(
+                    text=(kc.text or "").strip(),
+                    supporting_citation_numbers=[
+                        n for n in (kc.supporting_citation_numbers or []) if 1 <= n <= len(passage_refs)
+                    ],
+                )
+                for kc in (output.key_claims or [])
+                if (kc.text or "").strip()
+            ]
+
+            confidence = clamp(float(output.confidence or 0.0))
+            gaps = [normalized_text(g) for g in (output.gaps or []) if normalized_text(g)]
+
+            return Assessment(
+                answer=answer_text,
+                key_claims=key_claims,
+                confidence=confidence,
+                gaps=gaps,
+                contradicts_query=bool(output.contradicts_query),
+            )
+        except Exception as exc:
+            log(f"  [dim yellow]-> assess_and_answer failed: {exc}[/dim yellow]")
+            return Assessment(answer="", confidence=0.0, contradicts_query=False)
 
     def _normalize_time_references(self, query: str, log=None) -> str:
         log = log or (lambda msg: None)
