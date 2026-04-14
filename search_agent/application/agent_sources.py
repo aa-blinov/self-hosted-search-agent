@@ -360,22 +360,11 @@ def _select_fetch_candidates(gated_results: list[GatedSerpResult], limit: int) -
 
 def _routing_limits(profile, decision: RoutingDecision, iteration: int = 1) -> tuple[int, int]:
     if iteration == 1:
-        shallow_limit = {
-            "short_path": tuning.SHALLOW_FETCH_SHORT_FAST_LIMIT,
-            "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_FAST_LIMIT,
-            "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_FAST_LIMIT,
-        }[decision.mode]
+        shallow_limit = tuning.SHALLOW_FETCH_FAST_LIMIT
+        deep_limit = tuning.DEEP_FETCH_FAST_LIMIT
     else:
-        shallow_limit = {
-            "short_path": tuning.SHALLOW_FETCH_SHORT_LIMIT,
-            "targeted_retrieval": tuning.SHALLOW_FETCH_TARGETED_LIMIT,
-            "iterative_loop": tuning.SHALLOW_FETCH_ITERATIVE_LIMIT,
-        }[decision.mode]
-    deep_limit = {
-        "short_path": tuning.DEEP_FETCH_SHORT_LIMIT,
-        "targeted_retrieval": tuning.DEEP_FETCH_TARGETED_LIMIT,
-        "iterative_loop": tuning.DEEP_FETCH_ITERATIVE_LIMIT,
-    }[decision.mode]
+        shallow_limit = tuning.SHALLOW_FETCH_FULL_LIMIT
+        deep_limit = tuning.DEEP_FETCH_FULL_LIMIT
     if profile.fetch_top_n == 0:
         deep_limit = 0
     else:

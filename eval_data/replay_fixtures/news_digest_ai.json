@@ -19,7 +19,7 @@
       "claim_profile": {
         "answer_shape": "news_digest",
         "min_independent_sources": 2,
-        "routing_bias": "iterative_loop"
+        "needs_broad_retrieval": true
       }
     }
   ],

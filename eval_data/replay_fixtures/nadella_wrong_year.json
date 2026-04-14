@@ -17,7 +17,7 @@
       "claim_profile": {
         "answer_shape": "exact_date",
         "min_independent_sources": 2,
-        "routing_bias": "iterative_loop"
+        "needs_broad_retrieval": true
       }
     }
   ],

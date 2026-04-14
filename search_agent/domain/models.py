@@ -6,7 +6,7 @@ from typing import Literal
 
 DomainType = Literal["official", "academic", "vendor", "major_media", "forum", "unknown"]
 Verdict = Literal["supported", "contradicted", "insufficient_evidence"]
-RouteMode = Literal["short_path", "targeted_retrieval", "iterative_loop"]
+RouteMode = Literal["fast", "full"]
 FetchDepth = Literal["shallow", "deep", "snippet_only"]
 AnswerShape = Literal["fact", "exact_date", "exact_number", "product_specs", "overview", "comparison", "news_digest"]
 
@@ -29,7 +29,7 @@ class ClaimProfile:
     primary_source_required: bool = False
     min_independent_sources: int = 1
     preferred_domain_types: list[DomainType] = field(default_factory=list)
-    routing_bias: RouteMode | None = None
+    needs_broad_retrieval: bool = False
     required_dimensions: list[str] = field(default_factory=list)
     focus_terms: list[str] = field(default_factory=list)
     allow_synthesis_without_primary: bool = True

@@ -118,7 +118,7 @@ def _show_routing_decision(decision):
     t.add_row("consistency",  f"{decision.consistency:.3f}",          "0.650", "—",     ("[green]OK[/]" if decision.consistency >= 0.65 else "[red]FAIL (short_path blocked)[/]"))
     t.add_row("sufficiency",  f"{decision.evidence_sufficiency:.3f}", "0.600", "0.450", check(decision.evidence_sufficiency, 0.6, 0.45))
 
-    mode_style = {"short_path": "green", "targeted_retrieval": "yellow", "iterative_loop": "red"}[decision.mode]
+    mode_style = {"fast": "green", "fast": "yellow", "fast": "red"}[decision.mode]
     console.print(t)
     console.print(f"  → route = [{mode_style}]{decision.mode}[/]")
     console.print(f"  rationale: {decision.rationale}\n")

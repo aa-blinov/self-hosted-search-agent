@@ -48,8 +48,8 @@ class AgentStepLibrary:
     def cheap_passage_filter(self, claim, passages, limit=tuning.CHEAP_PASSAGE_LIMIT):
         return cheap_passage_filter(claim, passages, limit=limit)
 
-    def utility_rerank_passages(self, claim, passages):
-        return utility_rerank_passages(claim, passages)
+    def utility_rerank_passages(self, claim, passages, prior_passage_ids=None):
+        return utility_rerank_passages(claim, passages, prior_passage_ids=prior_passage_ids)
 
     def build_evidence_bundle(self, claim, passages, verification, gated_results):
         return build_evidence_bundle(claim, passages, verification, gated_results)

@@ -15,7 +15,7 @@ from .runner import (
 )
 
 DEFAULT_DATASET = DEFAULT_DATASETS_DIR / "route_claim.jsonl"
-ROUTE_MODES = ["short_path", "targeted_retrieval", "iterative_loop"]
+ROUTE_MODES = ["fast", "full"]
 
 
 def run_component_eval(

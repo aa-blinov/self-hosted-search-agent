@@ -244,7 +244,7 @@ def score_reports(
     latency_values: list[int] = []
     case_details: list[dict] = []
     all_iterations: list[int] = []
-    route_counts: dict[str, int] = {"short_path": 0, "targeted_retrieval": 0, "iterative_loop": 0}
+    route_counts: dict[str, int] = {"fast": 0, "full": 0}
 
     by_split: dict[str, dict[str, list[float] | int]] = {}
 
@@ -438,9 +438,8 @@ def score_reports(
         "median_search_cost": round(statistics.median(costs), 3) if costs else 0.0,
         "median_answer_latency": round(statistics.median(latency_values), 1) if latency_values else 0.0,
         "avg_iterations_per_claim": round(statistics.mean(all_iterations), 2) if all_iterations else 0.0,
-        "route_short_path_rate": round(route_counts["short_path"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
-        "route_targeted_rate": round(route_counts["targeted_retrieval"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
-        "route_iterative_rate": round(route_counts["iterative_loop"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
+        "route_fast_rate": round(route_counts["fast"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
+        "route_full_rate": round(route_counts["full"] / sum(route_counts.values()), 4) if sum(route_counts.values()) else 0.0,
     }
 
     split_metrics: dict[str, dict] = {}

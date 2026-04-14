@@ -25,6 +25,7 @@ from search_agent.application.agent_scoring import (
     utility_rerank_passages,
 )
 from search_agent.application.text_heuristics import normalized_text as _shared_normalized_text
+from search_agent.application.text_heuristics import tokenize as _tokenize_words
 from search_agent.domain.models import (
     AgentRunResult,
     Claim,
@@ -51,18 +52,27 @@ def infer_claim_profile(claim: Claim, classification: QueryClassification) -> Cl
         return ClaimProfile(
             answer_shape="news_digest",
             min_independent_sources=policy_tuning.DEFAULT_NEWS_DIGEST_MIN_INDEPENDENT_SOURCES,
-            routing_bias="iterative_loop",
+            needs_broad_retrieval=True,
         )
     if classification.intent == "synthesis":
         return ClaimProfile(
             answer_shape="overview",
             min_independent_sources=policy_tuning.DEFAULT_OVERVIEW_MIN_INDEPENDENT_SOURCES,
-            routing_bias="iterative_loop",
+            needs_broad_retrieval=True,
         )
     return ClaimProfile(
         answer_shape="fact",
         min_independent_sources=policy_tuning.DEFAULT_FACT_MIN_INDEPENDENT_SOURCES,
     )
+
+
+def _jaccard_similarity(tokens_a: set[str], tokens_b: set[str]) -> float:
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+_JACCARD_DIVERSITY_THRESHOLD = 0.75
 
 
 def build_query_variants(claim: Claim, classification: QueryClassification) -> list[QueryVariant]:
@@ -72,12 +82,17 @@ def build_query_variants(claim: Claim, classification: QueryClassification) -> l
         queries = [fallback] if fallback else []
 
     seen: set[str] = set()
+    accepted_token_sets: list[set[str]] = []
     variants: list[QueryVariant] = []
     for idx, query_text in enumerate(queries, 1):
         key = query_text.casefold().strip()
         if not key or key in seen:
             continue
         seen.add(key)
+        tokens = set(_tokenize_words(query_text))
+        if any(_jaccard_similarity(tokens, prev) >= _JACCARD_DIVERSITY_THRESHOLD for prev in accepted_token_sets):
+            continue
+        accepted_token_sets.append(tokens)
         variants.append(
             QueryVariant(
                 variant_id=f"{claim.claim_id}-q{idx}",

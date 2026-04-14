@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import threading
 from concurrent.futures import Future
 
@@ -48,7 +47,7 @@ class CachingBudgetSearchGateway:
                     profile=pname,
                     routed_prefix=routed[:120],
                 )
-                return copy.deepcopy(self._cache[key])
+                return list(self._cache[key])
             if key in self._inflight:
                 wait_for = self._inflight[key]
             else:
@@ -69,12 +68,12 @@ class CachingBudgetSearchGateway:
                 owner = True
 
         if not owner and wait_for is not None:
-            return copy.deepcopy(wait_for.result())
+            return list(wait_for.result())
 
         # Network I/O without holding the lock so parallel variants run concurrently.
         try:
             out = self._inner.search_variant(query, profile, log=log)
-            stored = copy.deepcopy(out)
+            stored = list(out)
         except Exception as exc:
             with self._lock:
                 pending = self._inflight.pop(key, None)
@@ -86,6 +85,6 @@ class CachingBudgetSearchGateway:
             self._cache[key] = stored
             pending = self._inflight.pop(key, None)
             if pending is not None and not pending.done():
-                pending.set_result(copy.deepcopy(stored))
+                pending.set_result(list(stored))
 
-        return copy.deepcopy(stored)
+        return list(stored)

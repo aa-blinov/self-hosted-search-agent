@@ -131,7 +131,7 @@ class StepLibraryPort(Protocol):
     def cheap_passage_filter(self, claim: Claim, passages: list[Passage]) -> list[Passage]:
         ...
 
-    def utility_rerank_passages(self, claim: Claim, passages: list[Passage]) -> list[Passage]:
+    def utility_rerank_passages(self, claim: Claim, passages: list[Passage], prior_passage_ids: set[str] | None = None) -> list[Passage]:
         ...
 
     def build_evidence_bundle(

@@ -154,6 +154,22 @@ def _preserve_original_factual_claim(
     return claim_text
 
 
+def _verdict_guidance_for_shape(claim: Claim) -> str:
+    shape = claim.claim_profile.answer_shape if claim.claim_profile else "fact"
+    if shape in ("overview", "comparison", "news_digest", "product_specs"):
+        return (
+            "This is an open-ended claim. Collective coverage across multiple passages is allowed.\n"
+            "You may return supported when the passages collectively address the main aspects of the claim, "
+            "even if not every detail is covered.\n"
+            "Return insufficient_evidence only when the passages fail to address the core of the claim.\n"
+        )
+    return (
+        "For open-ended claims, collective coverage across multiple passages is allowed.\n"
+        "For explanatory overviews, you may return supported when the passages directly explain the concept or mechanism.\n"
+        "For list-like overviews or comparisons that require multiple features, differences, highlights, or options, keep the claim-level verdict as insufficient_evidence and let synthesis compose the final answer later.\n"
+    )
+
+
 def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passages: int, max_chars: int) -> str:
     prompt_lines: list[str] = []
     for passage in passages[:max_passages]:
@@ -166,10 +182,10 @@ def _build_verifier_prompt(claim: Claim, passages: list[Passage], *, max_passage
     return (
         "Verify the claim against the retrieved evidence.\n"
         "Use the claim contract. Do not invent facts. Use only the provided passages.\n"
-        "For open-ended claims, collective coverage across multiple passages is allowed.\n"
-        "For explanatory overviews, you may return supported when the passages directly explain the concept or mechanism.\n"
-        "For list-like overviews or comparisons that require multiple features, differences, highlights, or options, keep the claim-level verdict as insufficient_evidence and let synthesis compose the final answer later.\n"
-        "For simple identity, classification, membership, or agency-status claims, you may return supported when an official or otherwise strong passage directly states the relationship and a second strong passage corroborates it.\n"
+        "Before producing the JSON verdict, briefly summarize the key evidence from the passages "
+        "in the rationale field — what supports, what contradicts, and what is missing.\n"
+        + _verdict_guidance_for_shape(claim)
+        + "For simple identity, classification, membership, or agency-status claims, you may return supported when an official or otherwise strong passage directly states the relationship and a second strong passage corroborates it.\n"
         "For agency-status or institutional-affiliation claims, an official passage that identifies the entity as a bureau, office, component, or service within a government department counts as explicit support for government-agency classification.\n"
         "If the contract requires a primary source or multiple independent sources and the evidence set does not satisfy that contract, return insufficient_evidence.\n"
         "Return supporting_passages and contradicting_passages with short quotes.\n"
@@ -197,7 +213,7 @@ class _ClaimProfileOutput(BaseModel):
     primary_source_required: bool = False
     min_independent_sources: int = 1
     preferred_domain_types: list[Literal["official", "academic", "vendor", "major_media", "forum", "unknown"]] = Field(default_factory=list)
-    routing_bias: Literal["short_path", "targeted_retrieval", "iterative_loop"] | None = None
+    needs_broad_retrieval: bool = False
     required_dimensions: list[str] = Field(default_factory=list)
     focus_terms: list[str] = Field(default_factory=list)
     allow_synthesis_without_primary: bool = True
@@ -385,14 +401,16 @@ class PydanticAIQueryIntelligence:
                 "Plan a grounded search run for a user query.\n"
                 "Return 1 to 4 claims. Use a single claim when decomposition is unnecessary.\n"
                 "Preserve named entities exactly and do not invent facts.\n"
+                "Each claim_text must be fully self-contained: resolve all pronouns, references, and implicit entities "
+                "to explicit names from the original query. A claim must be understandable without seeing the query.\n"
                 "For each claim return: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
                 "\n"
                 "claim_profile rules:\n"
                 "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
                 "- overview/comparison/news_digest are open-ended contracts: primary_source_required=false and strict_contract=false\n"
-                "- news_digest must use min_independent_sources>=3 and routing_bias=iterative_loop\n"
-                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, routing_bias=iterative_loop, and strict_contract=true\n"
-                "- exact event-anchored number lookups should prefer routing_bias=iterative_loop and make the requested measurement the focus_terms\n"
+                "- news_digest must use min_independent_sources>=3 and needs_broad_retrieval=true\n"
+                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, needs_broad_retrieval=true, and strict_contract=true\n"
+                "- exact event-anchored number lookups should prefer needs_broad_retrieval=true and make the requested measurement the focus_terms\n"
                 "- for list-like overviews, use explicit required_dimensions such as feature_list, improvements, changes, or highlights\n"
                 "- focus_terms must describe the requested evidence itself, not generic context words\n"
                 "- do not use placeholder strings such as exact_date, exact_number, event details, or announcement details inside claim_text or focus_terms\n"
@@ -504,7 +522,7 @@ class PydanticAIQueryIntelligence:
             "Return JSON with one key `claims`.\n"
             "Each claim must include: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
             "claim_profile must include: answer_shape, primary_source_required, min_independent_sources, "
-            "preferred_domain_types, routing_bias, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
+            "preferred_domain_types, needs_broad_retrieval, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
             "Keep claims atomic, exact, and capped at 4.\n"
             "Return one claim when the request is already atomic.\n"
             "For overview, comparison, and news_digest claims, keep the contract open-ended and set strict_contract=false.\n"
@@ -512,7 +530,7 @@ class PydanticAIQueryIntelligence:
             "For explanation or mechanism questions, keep the mechanism/explanation need intact and do not rewrite into a feature-list request.\n"
             "For simple factual classification or membership claims such as agency status, official role, or institutional affiliation, prefer official sources, require primary-source evidence, and require at least two independent sources.\n"
             "For generic exact-number facts such as scientific constants, measurements under standard conditions, or stable reference values, keep required_dimensions centered on number, avoid event_context, and do not require a primary source by default.\n"
-            "For exact event-anchored number lookups, use focus_terms for the requested measurement and prefer routing_bias=iterative_loop.\n"
+            "For exact event-anchored number lookups, use focus_terms for the requested measurement and prefer needs_broad_retrieval=true.\n"
             "For exact event-anchored number lookups, include event_context in required_dimensions when the number depends on a specific event or situation.\n"
             "Never insert a candidate answer into claim_text. Keep exact_date and exact_number claims unresolved unless that date or number was already stated in the user request.\n"
             "Never emit placeholder phrases like exact_date, exact_number, event details, or announcement details.\n\n"
@@ -687,7 +705,6 @@ class PydanticAIQueryIntelligence:
             self._verify_cache[prompt] = verification
             return verification
         except Exception:
-            log("  [dim yellow]-> verify_claim primary pass failed[/dim yellow]")
             log("  [dim yellow]-> verify_claim primary pass failed[/dim yellow]")
 
         rescue_prompt = _build_verifier_prompt(claim, passages, max_passages=4, max_chars=450)
@@ -886,6 +903,12 @@ class PydanticAIQueryIntelligence:
             f"focus_terms={','.join(profile.focus_terms)}" if profile and profile.focus_terms else "focus_terms=",
             f"strict_contract={profile.strict_contract}" if profile else "strict_contract=False",
         ]
+        passage_lines: list[str] = []
+        if bundle and bundle.considered_passages:
+            for p in bundle.considered_passages[:3]:
+                snippet = (p.text or "")[:100].replace("\n", " ")
+                passage_lines.append(f"- {p.title}: {snippet}")
+
         prompt = (
             f"Claim: {claim.claim_text}\n"
             f"Intent: {classification.intent}\n"
@@ -901,6 +924,8 @@ class PydanticAIQueryIntelligence:
             + f"\nExisting queries: {', '.join(sorted(existing_queries)) or 'none'}"
             + "\nTop current evidence:\n"
             + ("\n".join(evidence_lines) if evidence_lines else "none")
+            + "\nTop retrieved passages:\n"
+            + ("\n".join(passage_lines) if passage_lines else "none")
         )
         try:
             with log_llm_call(
@@ -1019,7 +1044,7 @@ class PydanticAIQueryIntelligence:
                     primary_source_required=False,
                     min_independent_sources=3 if classification.intent == "news_digest" else 2 if classification.intent == "synthesis" else 1,
                     preferred_domain_types=["major_media", "official", "vendor"] if classification.intent == "news_digest" else ["official", "academic", "vendor", "major_media"],
-                    routing_bias="iterative_loop" if classification.intent in {"synthesis", "news_digest"} else None,
+                    needs_broad_retrieval=classification.intent in {"synthesis", "news_digest"},
                     required_dimensions=["time", "source"] if classification.intent == "news_digest" else [],
                     focus_terms=[],
                     allow_synthesis_without_primary=classification.intent != "factual",
@@ -1065,14 +1090,14 @@ class PydanticAIQueryIntelligence:
 
         primary_source_required = bool(output.primary_source_required)
         min_independent_sources = max(1, int(output.min_independent_sources or 1))
-        routing_bias = output.routing_bias
+        needs_broad_retrieval = bool(output.needs_broad_retrieval)
         allow_synthesis_without_primary = bool(output.allow_synthesis_without_primary)
         strict_contract = bool(output.strict_contract)
 
         if answer_shape in {"overview", "comparison"}:
             primary_source_required = False
             min_independent_sources = max(2, min_independent_sources)
-            routing_bias = "iterative_loop"
+            needs_broad_retrieval = True
             allow_synthesis_without_primary = True
             strict_contract = False
         elif answer_shape == "fact":
@@ -1085,27 +1110,26 @@ class PydanticAIQueryIntelligence:
             ):
                 primary_source_required = True
                 min_independent_sources = max(2, min_independent_sources)
-                routing_bias = routing_bias or "short_path"
                 allow_synthesis_without_primary = False
                 strict_contract = True
         elif answer_shape == "news_digest":
             primary_source_required = False
             min_independent_sources = max(3, min_independent_sources)
-            routing_bias = "iterative_loop"
+            needs_broad_retrieval = True
             allow_synthesis_without_primary = True
             strict_contract = False
             required_dimensions = list(dict.fromkeys(required_dimensions + ["time", "source", "event"]))
         elif answer_shape == "product_specs":
             primary_source_required = True
             min_independent_sources = max(2, min_independent_sources)
-            routing_bias = "iterative_loop"
+            needs_broad_retrieval = True
             allow_synthesis_without_primary = False
             strict_contract = True
             required_dimensions = list(dict.fromkeys(required_dimensions + ["specs", "source"]))
         elif answer_shape == "exact_date":
             if "source" not in required_dimensions and len(required_dimensions) <= 1:
                 min_independent_sources = 1
-                routing_bias = None
+                needs_broad_retrieval = False
                 strict_contract = False
         elif answer_shape == "exact_number":
             if "number" not in required_dimensions:
@@ -1131,24 +1155,24 @@ class PydanticAIQueryIntelligence:
                 lower_dimensions = [value.casefold() for value in required_dimensions]
                 primary_source_required = False
                 min_independent_sources = 1
-                routing_bias = None
+                needs_broad_retrieval = False
                 allow_synthesis_without_primary = True
                 strict_contract = False
                 event_like_number = False
             if event_like_number:
                 min_independent_sources = max(2, min_independent_sources)
-                routing_bias = "iterative_loop"
+                needs_broad_retrieval = True
                 strict_contract = True
             elif not primary_source_required and not event_like_number:
                 min_independent_sources = 1
-                routing_bias = None
+                needs_broad_retrieval = False
                 strict_contract = False
             elif "source" in lower_dimensions and len(required_dimensions) >= 2:
-                routing_bias = "iterative_loop"
+                needs_broad_retrieval = True
                 strict_contract = True
             elif "time" not in lower_dimensions:
                 min_independent_sources = 1
-                routing_bias = None
+                needs_broad_retrieval = False
                 strict_contract = False
             else:
                 strict_contract = strict_contract or "number" in lower_dimensions
@@ -1162,7 +1186,7 @@ class PydanticAIQueryIntelligence:
                 if answer_shape == "news_digest"
                 else ["official", "academic", "vendor", "major_media"]
             ),
-            routing_bias=routing_bias,
+            needs_broad_retrieval=needs_broad_retrieval,
             required_dimensions=required_dimensions,
             focus_terms=focus_terms,
             allow_synthesis_without_primary=allow_synthesis_without_primary,

@@ -17,7 +17,7 @@
       "claim_profile": {
         "answer_shape": "exact_number",
         "min_independent_sources": 2,
-        "routing_bias": "iterative_loop",
+        "needs_broad_retrieval": true,
         "required_dimensions": ["exact_measurement"],
         "focus_terms": ["room temperature"],
         "strict_contract": true

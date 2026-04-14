@@ -108,13 +108,13 @@ class Phase3Tests(unittest.TestCase):
                         match="CEO of Microsoft",
                         expected_verdict="supported",
                         requires_primary_source=True,
-                        expected_routes=["targeted_retrieval"],
+                        expected_routes=["fast"],
                         min_independent_sources=2,
                     )
                 ],
             )
         ]
-        report.claims[0].routing_decision = type("Route", (), {"mode": "targeted_retrieval"})()
+        report.claims[0].routing_decision = type("Route", (), {"mode": "fast"})()
         summary = score_reports(cases, {"case-1": report}, {"case-1": 1000})
 
         self.assertEqual(summary["case_count"], 1)
@@ -126,7 +126,7 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(summary["metrics"]["primary_requirement_rate"], 1.0)
         self.assertEqual(summary["metrics"]["source_requirement_rate"], 1.0)
         self.assertEqual(summary["metrics"]["median_answer_latency"], 1000)
-        self.assertEqual(summary["cases"][0]["claims"][0]["actual_route"], "targeted_retrieval")
+        self.assertEqual(summary["cases"][0]["claims"][0]["actual_route"], "fast")
 
     def test_evaluation_metrics_null_without_route_primary_source_expectations(self):
         report = _make_supported_report()
@@ -160,7 +160,7 @@ class Phase3Tests(unittest.TestCase):
 
         self.assertGreaterEqual(len(cases), 8)
         microsoft_case = next(case for case in cases if case.case_id == "ceo-microsoft")
-        self.assertIn("targeted_retrieval", microsoft_case.expected_claims[0].expected_routes)
+        self.assertIn("fast", microsoft_case.expected_claims[0].expected_routes)
         self.assertEqual(microsoft_case.expected_claims[0].min_independent_sources, 2)
 
     def test_evaluation_matches_claims_with_filler_words(self):
@@ -173,7 +173,7 @@ class Phase3Tests(unittest.TestCase):
             entity_set=["Python 3.13.0"],
         )
         report.claims[0].evidence_bundle.claim_text = report.claims[0].claim.claim_text
-        report.claims[0].routing_decision = type("Route", (), {"mode": "targeted_retrieval"})()
+        report.claims[0].routing_decision = type("Route", (), {"mode": "fast"})()
         cases = [
             EvaluationCase(
                 case_id="case-1",

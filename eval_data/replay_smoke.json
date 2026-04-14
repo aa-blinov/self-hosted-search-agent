@@ -9,7 +9,7 @@
         "match": "CEO of Microsoft",
         "expected_verdict": "supported",
         "requires_primary_source": true,
-        "expected_route": ["targeted_retrieval", "short_path"],
+        "expected_route": ["fast", "full"],
         "min_independent_sources": 2
       }
     ],
@@ -154,7 +154,7 @@
       {
         "match": "released on October 1, 2024",
         "expected_verdict": "contradicted",
-        "expected_route": ["short_path", "targeted_retrieval"]
+        "expected_route": ["fast", "full"]
       }
     ],
     "replay": {
@@ -297,7 +297,7 @@
       {
         "match": "room temperature",
         "expected_verdict": "insufficient_evidence",
-        "expected_route": "iterative_loop"
+        "expected_route": ["fast", "full"]
       }
     ],
     "replay": {
@@ -319,7 +319,7 @@
           "claim_profile": {
             "answer_shape": "exact_number",
             "min_independent_sources": 2,
-            "routing_bias": "iterative_loop",
+            "needs_broad_retrieval": true,
             "required_dimensions": ["exact_measurement"],
             "focus_terms": ["room temperature"],
             "strict_contract": true
@@ -462,7 +462,7 @@
       {
         "match": "Как работает asyncio",
         "expected_verdict": "supported",
-        "expected_route": "iterative_loop"
+        "expected_route": ["fast", "full"]
       }
     ],
     "min_answer_chars": 400,
@@ -485,7 +485,7 @@
           "claim_profile": {
             "answer_shape": "overview",
             "min_independent_sources": 2,
-            "routing_bias": "iterative_loop",
+            "needs_broad_retrieval": true,
             "focus_terms": ["event loop", "coroutines", "await"],
             "allow_synthesis_without_primary": true
           }

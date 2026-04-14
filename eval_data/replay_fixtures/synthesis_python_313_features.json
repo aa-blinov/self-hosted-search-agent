@@ -17,7 +17,7 @@
       "claim_profile": {
         "answer_shape": "overview",
         "min_independent_sources": 2,
-        "routing_bias": "iterative_loop",
+        "needs_broad_retrieval": true,
         "focus_terms": ["new features", "release highlights", "standard library"],
         "allow_synthesis_without_primary": true
       }

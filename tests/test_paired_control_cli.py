@@ -17,7 +17,7 @@ class PairedControlCliTests(unittest.TestCase):
                         {
                             "match": "foo",
                             "actual_verdict": "supported",
-                            "actual_route": "short_path",
+                            "actual_route": "fast",
                             "has_primary_source": True,
                             "independent_source_count": 2,
                         }
@@ -37,7 +37,7 @@ class PairedControlCliTests(unittest.TestCase):
                         {
                             "match": "foo",
                             "actual_verdict": "supported",
-                            "actual_route": "iterative_loop",
+                            "actual_route": "fast",
                             "has_primary_source": True,
                             "independent_source_count": 2,
                         }

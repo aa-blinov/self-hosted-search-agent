@@ -194,7 +194,7 @@ class _FakeSteps:
 
     def route_claim_retrieval(self, claim, gated_results):
         return RoutingDecision(
-            mode="short_path",
+            mode="fast",
             certainty=0.9,
             consistency=0.9,
             evidence_sufficiency=0.9,
@@ -226,7 +226,7 @@ class _FakeSteps:
     def cheap_passage_filter(self, claim, passages):
         return passages
 
-    def utility_rerank_passages(self, claim, passages):
+    def utility_rerank_passages(self, claim, passages, prior_passage_ids=None):
         return passages
 
     def build_evidence_bundle(self, claim, passages, verification, gated_results):
@@ -303,7 +303,7 @@ class _FakeContradictionIntelligence(_FakeIntelligence):
 class _FakeContradictionSteps(_FakeSteps):
     def route_claim_retrieval(self, claim, gated_results):
         return RoutingDecision(
-            mode="targeted_retrieval",
+            mode="fast",
             certainty=0.9,
             consistency=0.8,
             evidence_sufficiency=0.9,
@@ -362,7 +362,7 @@ class _FakeIterativeEscalationIntelligence(_FakeIntelligence):
 class _FakeIterativeEscalationSteps(_FakeSteps):
     def route_claim_retrieval(self, claim, gated_results):
         return RoutingDecision(
-            mode="targeted_retrieval",
+            mode="fast",
             certainty=0.88,
             consistency=0.72,
             evidence_sufficiency=0.84,
@@ -396,7 +396,7 @@ class _FakeSynthesisIntelligence(_FakeIntelligence):
                     primary_source_required=True,
                     min_independent_sources=2,
                     preferred_domain_types=["official", "vendor", "major_media"],
-                    routing_bias="iterative_loop",
+                    needs_broad_retrieval=True,
                     required_dimensions=["source", "specs"],
                     allow_synthesis_without_primary=False,
                     strict_contract=True,
@@ -432,7 +432,7 @@ class _FakeStrictExactNumberIntelligence(_FakeIntelligence):
                 claim_profile=ClaimProfile(
                     answer_shape="exact_number",
                     min_independent_sources=2,
-                    routing_bias="iterative_loop",
+                    needs_broad_retrieval=True,
                     required_dimensions=["time", "number", "source"],
                     strict_contract=True,
                 ),
@@ -459,7 +459,7 @@ class _FakeSynthesisSteps(_FakeSteps):
             primary_source_required=True,
             min_independent_sources=2,
             preferred_domain_types=["official", "vendor", "major_media"],
-            routing_bias="iterative_loop",
+            needs_broad_retrieval=True,
             required_dimensions=["source", "specs"],
             allow_synthesis_without_primary=False,
             strict_contract=True,
@@ -621,7 +621,7 @@ class UseCaseLayerTests(unittest.TestCase):
             claim_profile=ClaimProfile(
                 answer_shape="news_digest",
                 min_independent_sources=3,
-                routing_bias="iterative_loop",
+                needs_broad_retrieval=True,
                 required_dimensions=["time", "source", "event"],
             ),
         )
@@ -704,7 +704,7 @@ class UseCaseLayerTests(unittest.TestCase):
 
         report = use_case.run("room temperature claim", get_profile("web"))
 
-        self.assertEqual(report.claims[0].routing_decision.mode, "iterative_loop")
+        self.assertEqual(report.claims[0].routing_decision.mode, "fast")
 
     def test_use_case_dedupes_search_across_parallel_claims(self):
         search_gateway = _FakeSearchGateway()
@@ -763,7 +763,7 @@ class UseCaseLayerTests(unittest.TestCase):
             receipts_dir=None,
         )
 
-        self.assertEqual(report.claims[0].routing_decision.mode, "targeted_retrieval")
+        self.assertEqual(report.claims[0].routing_decision.mode, "full")
 
     def test_use_case_stops_after_strong_contradiction_without_second_iteration(self):
         receipt_writer = _FakeReceiptWriter()
@@ -785,7 +785,7 @@ class UseCaseLayerTests(unittest.TestCase):
 
         self.assertEqual(len(search_gateway.queries), 1)
         self.assertEqual(intelligence.verify_calls, 1)
-        self.assertEqual(report.claims[0].routing_decision.mode, "iterative_loop")
+        self.assertEqual(report.claims[0].routing_decision.mode, "fast")
 
     def test_use_case_skips_synthesis_when_strict_claim_contract_is_not_satisfied(self):
         receipt_writer = _FakeReceiptWriter()

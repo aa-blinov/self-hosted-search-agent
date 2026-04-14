@@ -249,42 +249,10 @@ class SearchAgentUseCase:
         reported_routing_decision: RoutingDecision,
     ) -> tuple[RoutingDecision, RoutingDecision]:
         base_routing_decision = self._steps.route_claim_retrieval(claim, gated_results)
-        if base_routing_decision.mode != "iterative_loop":
-            reported_routing_decision = base_routing_decision
-
-        routing_decision = base_routing_decision
-        profile_contract = claim.claim_profile
-        if (
-            profile_contract is not None
-            and profile_contract.answer_shape == "exact_number"
-            and profile_contract.strict_contract
-            and profile_contract.routing_bias == "iterative_loop"
-        ):
-            routing_decision = replace(
-                routing_decision,
-                mode="iterative_loop",
-                rationale=routing_decision.rationale + " | strict exact-number contract",
-            )
-        if classification.intent == "synthesis" and routing_decision.mode != "iterative_loop":
-            routing_decision = replace(
-                routing_decision,
-                mode="iterative_loop",
-                rationale=routing_decision.rationale + " | synthesis requires broader retrieval",
-            )
-        if bundle and bundle.verification and bundle.verification.verdict != "supported":
-            if routing_decision.mode == "short_path":
-                routing_decision = replace(
-                    routing_decision,
-                    mode="targeted_retrieval",
-                    rationale=routing_decision.rationale + " | escalated after weak verification",
-                )
-            elif iteration > 1:
-                routing_decision = replace(
-                    routing_decision,
-                    mode="iterative_loop",
-                    rationale=routing_decision.rationale + " | iterative escalation",
-                )
-        return routing_decision, reported_routing_decision
+        # iter1 = fast, iter2+ = full (escalated by should_stop_claim_loop)
+        mode = "fast" if iteration == 1 else "full"
+        routing_decision = replace(base_routing_decision, mode=mode)
+        return routing_decision, routing_decision
 
     def _fetch_iteration_documents(
         self,
@@ -323,14 +291,14 @@ class SearchAgentUseCase:
             documents.append(document)
         return new_fetch_plans
 
-    def _collect_iteration_passages(self, claim, documents, log) -> list:
+    def _collect_iteration_passages(self, claim, documents, log, prior_passage_ids: set[str] | None = None) -> list:
         passage_documents = self._steps.documents_for_passage_extraction(documents)
         passages = []
         for document in passage_documents:
             passages.extend(self._steps.split_into_passages(document))
 
         cheap_filtered = self._steps.cheap_passage_filter(claim, passages)
-        final_passages = self._steps.utility_rerank_passages(claim, cheap_filtered)
+        final_passages = self._steps.utility_rerank_passages(claim, cheap_filtered, prior_passage_ids=prior_passage_ids)
         log(
             f"  [dim]passages: {len(passages)} total | "
             f"{len(cheap_filtered)} after cheap filter | "
@@ -404,18 +372,18 @@ class SearchAgentUseCase:
         documents = []
         final_passages = []
         routing_decision = RoutingDecision(
-            mode="iterative_loop",
+            mode="fast",
             certainty=0.0,
             consistency=0.0,
             evidence_sufficiency=0.0,
             rationale="Not evaluated yet.",
         )
-        reported_routing_decision = routing_decision
         bundle: EvidenceBundle | None = None
 
         existing_queries: set[str] = set()
         seen_urls: set[str] = set()
         seen_documents: set[tuple[str, str, str]] = set()
+        prior_passage_ids: set[str] = set()
         next_variants = self._steps.build_query_variants(claim, classification)[:tuning.AGENT_MAX_QUERY_VARIANTS_ITER1]
 
         iterations_used = 0
@@ -442,13 +410,13 @@ class SearchAgentUseCase:
             gated_limit = min(tuning.SERP_GATE_MAX_URLS, max(tuning.SERP_GATE_MIN_URLS, profile.max_results))
             gated_results = self._steps.gate_serp_results(claim, snapshots, gated_limit)
             all_gated_results = _merge_gated_results(all_gated_results, gated_results)
-            routing_decision, reported_routing_decision = self._route_iteration(
+            routing_decision, _ = self._route_iteration(
                 claim,
                 classification,
                 gated_results,
                 bundle,
                 iteration,
-                reported_routing_decision,
+                routing_decision,
             )
 
             log(
@@ -476,7 +444,11 @@ class SearchAgentUseCase:
                 )
             )
 
-            final_passages = self._collect_iteration_passages(claim, documents, log)
+            final_passages = self._collect_iteration_passages(
+                claim, documents, log,
+                prior_passage_ids=prior_passage_ids if iteration > 1 else None,
+            )
+            prior_passage_ids.update(p.passage_id for p in final_passages)
             bundle = self._verify_iteration_bundle(
                 claim,
                 final_passages,
@@ -491,13 +463,6 @@ class SearchAgentUseCase:
                 and verification.confidence >= 0.9
                 and bundle.independent_source_count >= 2
             ):
-                if routing_decision.mode != "iterative_loop":
-                    routing_decision = replace(
-                        routing_decision,
-                        mode="iterative_loop",
-                        rationale=routing_decision.rationale + " | contradiction settled without extra iteration",
-                    )
-                reported_routing_decision = routing_decision
                 break
 
             if self._steps.should_stop_claim_loop(claim, bundle, iteration):
@@ -513,15 +478,6 @@ class SearchAgentUseCase:
                 log,
             )
 
-        final_routing_decision = routing_decision
-        if (
-            bundle is not None
-            and bundle.verification is not None
-            and bundle.verification.verdict == "supported"
-            and reported_routing_decision.mode != "iterative_loop"
-        ):
-            final_routing_decision = reported_routing_decision
-
         claim_run = ClaimRun(
             claim=claim,
             query_variants=all_variants,
@@ -531,6 +487,6 @@ class SearchAgentUseCase:
             fetched_documents=documents,
             passages=final_passages,
             evidence_bundle=bundle,
-            routing_decision=final_routing_decision,
+            routing_decision=routing_decision,
         )
         return claim_run, iterations_used

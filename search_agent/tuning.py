@@ -66,16 +66,11 @@ AGENT_PASSAGE_TOP_K = 8
 SERP_GATE_MIN_URLS = 10
 SERP_GATE_MAX_URLS = 20
 AGENT_SNIPPET_FALLBACK_DOCS = 2
-SHALLOW_FETCH_SHORT_LIMIT = 5
-SHALLOW_FETCH_TARGETED_LIMIT = 8
-SHALLOW_FETCH_ITERATIVE_LIMIT = 10
-# Fast limits for iteration 1 — scale up only if a second iteration is needed.
-SHALLOW_FETCH_SHORT_FAST_LIMIT = 3
-SHALLOW_FETCH_TARGETED_FAST_LIMIT = 4
-SHALLOW_FETCH_ITERATIVE_FAST_LIMIT = 5
-DEEP_FETCH_SHORT_LIMIT = 1
-DEEP_FETCH_TARGETED_LIMIT = 2
-DEEP_FETCH_ITERATIVE_LIMIT = 2
+# Two-tier fetch limits: fast (iteration 1) and full (iteration 2+).
+SHALLOW_FETCH_FAST_LIMIT = 5
+SHALLOW_FETCH_FULL_LIMIT = 10
+DEEP_FETCH_FAST_LIMIT = 2
+DEEP_FETCH_FULL_LIMIT = 2
 CHEAP_PASSAGE_LIMIT = 12
 # For synthesis queries, max passages passed to synthesize_answer.
 # Synthesis path bypasses TF-IDF cheap_passage_filter (cross-language queries
