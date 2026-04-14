@@ -1,3 +1,3 @@
-from search_agent.application.use_cases import SearchAgentUseCase
+from search_agent.application.unified_runner import UnifiedSearchAgentUseCase
 
-__all__ = ["SearchAgentUseCase"]
+__all__ = ["UnifiedSearchAgentUseCase"]

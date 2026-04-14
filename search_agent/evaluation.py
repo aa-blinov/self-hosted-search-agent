@@ -480,15 +480,8 @@ def evaluate_dataset(
     receipts_dir: str | None = None,
     delay_between_cases: float | None = None,
     log=None,
-    # Deprecated: kept for call-site compatibility, ignored.
-    client=None,
-    unified: bool = True,  # kept as no-op for backward-compat call sites
 ) -> dict:
-    """Run the unified search agent against a JSONL dataset and score it.
-
-    The ``unified`` parameter is retained for call-site compatibility but is
-    now a no-op — the classic pipeline has been removed from the eval path.
-    """
+    """Run the unified search agent against a JSONL dataset and score it."""
     log = log or (lambda msg: None)
     cases = load_evaluation_cases(dataset_path)
     reports: dict[str, AgentRunResult] = {}

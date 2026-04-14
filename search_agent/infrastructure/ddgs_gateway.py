@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -17,6 +18,13 @@ _DDGS_TIMELIMIT_FROM_TIME_RANGE: dict[str, str] = {
     "month": "m",
     "year": "y",
 }
+
+# Retry policy for transient DDGS failures (e.g. Yahoo backend 5xx, flaky
+# DNS, empty results).  We keep retries tight — the agent parallelises many
+# SERP calls and the caller has its own budget, so we don't want to amplify
+# a slow backend into minutes of waiting.
+_DDGS_RETRY_ATTEMPTS = 2  # retries on top of the initial attempt (3 total)
+_DDGS_RETRY_BACKOFF_S = (0.5, 1.0)  # sleep before retry 1, retry 2
 
 
 def _ddgs_timelimit(profile) -> str | None:
@@ -59,29 +67,60 @@ class DDGSSearchGateway:
                 f"[dim](region={region}, safesearch={safesearch}, timelimit={timelimit})[/dim]"
             )
             ddgs_failed = False
-            try:
-                results = DDGS(timeout=self._settings.ddgs_timeout).text(
-                    routed,
-                    region=region,
-                    safesearch=safesearch,
-                    max_results=profile.max_results,
-                    timelimit=timelimit,
-                    timeout=self._settings.ddgs_timeout,
-                )
-            except Exception as exc:
-                exc_str = str(exc)
-                # DDGS internally queries Wikipedia OpenSearch using the region prefix
-                # (e.g. "wt" from "wt-wt") which produces invalid subdomains like
-                # wt.wikipedia.org. This is a library-level limitation — suppress the
-                # noise and treat as empty rather than a real backend failure.
-                is_wiki_dns = "wikipedia.org" in exc_str and "ConnectError" in exc_str
-                if not is_wiki_dns:
+            results: list = []
+            total_attempts = _DDGS_RETRY_ATTEMPTS + 1
+            for attempt in range(total_attempts):
+                try:
+                    results = DDGS(timeout=self._settings.ddgs_timeout).text(
+                        routed,
+                        region=region,
+                        safesearch=safesearch,
+                        max_results=profile.max_results,
+                        timelimit=timelimit,
+                        timeout=self._settings.ddgs_timeout,
+                    )
+                except Exception as exc:
+                    exc_str = str(exc)
+                    # DDGS internally queries Wikipedia OpenSearch using the region prefix
+                    # (e.g. "wt" from "wt-wt") which produces invalid subdomains like
+                    # wt.wikipedia.org. This is a library-level limitation — suppress the
+                    # noise and treat as empty rather than a real backend failure, no retry.
+                    is_wiki_dns = "wikipedia.org" in exc_str and "ConnectError" in exc_str
+                    if is_wiki_dns:
+                        log("  [dim]DDGS Wikipedia instant-answer skipped (DNS not reachable)[/dim]")
+                        results = []
+                        break
+                    # Real backend failure (Yahoo 5xx, DNS hiccup, timeout).
+                    if attempt < total_attempts - 1:
+                        backoff = _DDGS_RETRY_BACKOFF_S[attempt]
+                        log(
+                            f"  [yellow]DDGS error (attempt {attempt + 1}/{total_attempts}):[/yellow] "
+                            f"{exc} [dim]— retrying in {backoff}s[/dim]"
+                        )
+                        time.sleep(backoff)
+                        continue
                     ddgs_failed = True
-                    logfire.warning("search_gateway.ddgs.text_failed", error=exc_str, query=routed[:200])
-                    log(f"  [yellow]DDGS error (empty results):[/yellow] {exc}")
-                else:
-                    log("  [dim]DDGS Wikipedia instant-answer skipped (DNS not reachable)[/dim]")
-                results = []
+                    logfire.warning(
+                        "search_gateway.ddgs.text_failed",
+                        error=exc_str,
+                        query=routed[:200],
+                        attempts=total_attempts,
+                    )
+                    log(f"  [yellow]DDGS error (empty results after {total_attempts} attempts):[/yellow] {exc}")
+                    results = []
+                    break
+                # No exception.  If the backend returned an empty list, retry —
+                # DDGS sometimes shrugs off a transient Yahoo failure and comes
+                # back with real results on a second try.
+                if not results and attempt < total_attempts - 1:
+                    backoff = _DDGS_RETRY_BACKOFF_S[attempt]
+                    log(
+                        f"  [yellow]DDGS empty result (attempt {attempt + 1}/{total_attempts}):[/yellow] "
+                        f"[dim]retrying in {backoff}s[/dim]"
+                    )
+                    time.sleep(backoff)
+                    continue
+                break
 
             serp_results: list[SerpResult] = []
             for idx, row in enumerate(results[: profile.max_results], 1):

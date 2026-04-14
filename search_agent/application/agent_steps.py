@@ -27,7 +27,6 @@ from search_agent.application.agent_scoring import (
 from search_agent.application.text_heuristics import normalized_text as _shared_normalized_text
 from search_agent.application.text_heuristics import tokenize as _tokenize_words
 from search_agent.domain.models import (
-    AgentRunResult,
     Claim,
     ClaimProfile,
     QueryClassification,
@@ -119,21 +118,4 @@ def _retag_snapshot(snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSn
         retrieved_at=snapshot.retrieved_at,
         profile_name=snapshot.profile_name,
         unresponsive_engines=list(snapshot.unresponsive_engines),
-    )
-
-
-def run_search_agent(
-    query: str,
-    profile,
-    client=None,
-    receipts_dir: str | None = None,
-    log=None,
-) -> AgentRunResult:
-    from search_agent import build_search_agent_use_case
-
-    return build_search_agent_use_case().run(
-        query,
-        profile,
-        receipts_dir=receipts_dir,
-        log=log,
     )

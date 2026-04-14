@@ -210,16 +210,62 @@ def _build_query_variants(claim: Claim, queries: list[str]) -> list[QueryVariant
     return variants
 
 
-def _rank_passages_for_prompt(passages: list[Passage]) -> list[Passage]:
-    """Sort by source_score desc + fall back to utility_score.
+def _rank_passages_for_prompt(
+    passages: list[Passage],
+    *,
+    top_k: int | None = None,
+) -> list[Passage]:
+    """Rank passages for the prompt slate, with URL-level diversification.
+
+    Passages are first sorted by ``(source_score, utility_score)`` desc — the
+    base quality order.  Then a round-robin pass reorders them so chunks
+    from different URLs are interleaved, preventing one long article from
+    monopolizing the top-K window.
+
+    Motivation: without round-robin, a query that extracts 20+ chunks from a
+    single authority page would push every other URL out of the top-K.  The
+    downstream URL/domain caps in ``_build_prompt_passages`` then starve the
+    slate — e.g. "latest Node.js LTS" produced only 4 prompt passages
+    because top-25 held just 3 distinct URLs.  With interleave, top-25 gets
+    one passage from each URL before any URL gets two, so the caps see a
+    diverse pool to pack from.
 
     Passages must already be deduped by passage_id before calling this.
     """
-    return sorted(
+    if not passages:
+        return []
+    sorted_passages = sorted(
         passages,
         key=lambda p: (p.source_score, p.utility_score),
         reverse=True,
     )
+    # Bucket by URL, preserving each bucket's internal quality order.
+    buckets: dict[str, list[Passage]] = {}
+    url_order: list[str] = []
+    for p in sorted_passages:
+        url = p.url or ""
+        if url not in buckets:
+            buckets[url] = []
+            url_order.append(url)
+        buckets[url].append(p)
+    # Round-robin: round r picks the r-th best passage from each URL bucket in
+    # first-appearance order.  First-appearance order == base quality order of
+    # each URL's best chunk, so the highest-quality URL still leads the list.
+    interleaved: list[Passage] = []
+    round_idx = 0
+    while True:
+        added = False
+        for url in url_order:
+            bucket = buckets[url]
+            if round_idx < len(bucket):
+                interleaved.append(bucket[round_idx])
+                added = True
+                if top_k is not None and len(interleaved) >= top_k:
+                    return interleaved
+        if not added:
+            break
+        round_idx += 1
+    return interleaved
 
 
 def _build_prompt_passages(
@@ -237,6 +283,8 @@ def _build_prompt_passages(
     citation indices ``[1..N]`` will reference.  This is what the runner then
     hands to ``assess_and_answer`` AND uses to rebuild its ``passage_index`` so
     the indices align 1-to-1.
+
+    Strict greedy pack with per-URL and per-domain caps.
     """
     kept: list[Passage] = []
     per_url: dict[str, int] = {}
@@ -407,7 +455,7 @@ class UnifiedSearchAgentUseCase:
 
                 # Rank, then cap per URL/domain → this is the exact slate the
                 # LLM will cite as [1..N].  passage_index uses the same order.
-                ranked = _rank_passages_for_prompt(all_passages)[:UNIFIED_PASSAGE_TOP_K]
+                ranked = _rank_passages_for_prompt(all_passages, top_k=UNIFIED_PASSAGE_TOP_K)
                 prompt_passages = _build_prompt_passages(ranked)
 
                 # One LLM call: answer + key_claims + confidence + gaps + contradicts
@@ -431,7 +479,7 @@ class UnifiedSearchAgentUseCase:
             # Rebuild the same prompt slate the last iteration saw so that
             # passage_index lookups align with the key_claim citation numbers.
             final_assessment = assessment or Assessment(answer="", confidence=0.0)
-            ranked = _rank_passages_for_prompt(all_passages)[:UNIFIED_PASSAGE_TOP_K]
+            ranked = _rank_passages_for_prompt(all_passages, top_k=UNIFIED_PASSAGE_TOP_K)
             prompt_passages = _build_prompt_passages(ranked)
             passage_index = {i + 1: p for i, p in enumerate(prompt_passages)}
 

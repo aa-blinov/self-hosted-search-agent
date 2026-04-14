@@ -11,11 +11,8 @@ from pydantic_ai.output import PromptedOutput
 from search_agent.domain.assessment import Assessment, KeyClaim
 from search_agent.domain.models import (
     Claim,
-    ClaimProfile,
     DomainType,
-    EvidenceBundle,
     EvidenceSpan,
-    GatedSerpResult,
     Passage,
     QueryClassification,
     VerificationResult,
@@ -27,7 +24,6 @@ from search_agent.application.claim_policy import (
 from search_agent.application.text_heuristics import (
     clamp,
     extract_entities,
-    extract_numbers,
     extract_region_hint,
     extract_time_scope,
     needs_freshness,
@@ -159,49 +155,6 @@ def _default_verification(reason: str) -> VerificationResult:
     )
 
 
-def _digit_tokens(text: str) -> set[str]:
-    tokens: set[str] = set()
-    current: list[str] = []
-    for ch in text or "":
-        if ch.isalnum() or ch in {".", "-", "/"}:
-            current.append(ch)
-            continue
-        if current:
-            token = "".join(current).strip(".,-/")
-            if token and any(char.isdigit() for char in token):
-                tokens.add(token.casefold())
-            current = []
-    if current:
-        token = "".join(current).strip(".,-/")
-        if token and any(char.isdigit() for char in token):
-            tokens.add(token.casefold())
-    return tokens
-
-
-def _preserve_original_factual_claim(
-    classification: QueryClassification,
-    claim_text: str,
-    claim_profile: ClaimProfile | None = None,
-) -> str:
-    if classification.intent != "factual":
-        return claim_text
-    single_hop = classification.complexity != "multi_hop"
-    original = normalized_text(classification.normalized_query)
-    if not original:
-        return claim_text
-    if single_hop and classification.time_scope and normalized_text(classification.time_scope).casefold() not in claim_text.casefold():
-        return original
-    query_numbers = set(extract_numbers(original)) | _digit_tokens(original)
-    claim_numbers = set(extract_numbers(claim_text)) | _digit_tokens(claim_text)
-    if single_hop and claim_profile is not None and claim_profile.answer_shape in {"exact_date", "exact_number"}:
-        extra_numbers = {value for value in claim_numbers if value not in query_numbers}
-        if extra_numbers:
-            return original
-    if single_hop and query_numbers and not query_numbers.issubset(claim_numbers):
-        return original
-    return claim_text
-
-
 def _verdict_guidance_for_shape(claim: Claim) -> str:
     shape = claim.claim_profile.answer_shape if claim.claim_profile else "fact"
     if shape in ("overview", "comparison", "news_digest", "product_specs"):
@@ -256,31 +209,6 @@ class _IntentOutput(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
 
 
-class _ClaimProfileOutput(BaseModel):
-    answer_shape: Literal["fact", "exact_date", "exact_number", "product_specs", "overview", "comparison", "news_digest"]
-    primary_source_required: bool = False
-    min_independent_sources: int = 1
-    preferred_domain_types: list[Literal["official", "academic", "vendor", "major_media", "forum", "unknown"]] = Field(default_factory=list)
-    required_dimensions: list[str] = Field(default_factory=list)
-    focus_terms: list[str] = Field(default_factory=list)
-    allow_synthesis_without_primary: bool = True
-    strict_contract: bool = False
-
-
-class _ClaimDraft(BaseModel):
-    claim_text: str = Field(min_length=1)
-    priority: int = 1
-    needs_freshness: bool = False
-    entity_set: list[str] = Field(default_factory=list)
-    time_scope: str | None = None
-    search_queries: list[str] = Field(default_factory=list)
-    claim_profile: _ClaimProfileOutput | None = None
-
-
-class _ClaimDecompositionOutput(BaseModel):
-    claims: list[_ClaimDraft] = Field(default_factory=list)
-
-
 class _QueryListOutput(BaseModel):
     queries: list[str] = Field(default_factory=list)
 
@@ -297,10 +225,6 @@ class _VerificationOutput(BaseModel):
     contradicting_passages: list[_EvidenceQuote] = Field(default_factory=list)
     missing_dimensions: list[str] = Field(default_factory=list)
     rationale: str = ""
-
-
-class _RefinedQueriesOutput(BaseModel):
-    queries: list[str] = Field(default_factory=list)
 
 
 class _KeyClaimOutput(BaseModel):
@@ -436,62 +360,6 @@ class PydanticAIQueryIntelligence:
         )
         # Cache for intent classification: keyed on normalized query string.
         self._intent_cache: dict[str, str] = {}
-
-        # SAFE-inspired: generates one focused search query from the verifier's rationale.
-        self._refiner_agent = Agent(
-            self._model,
-            output_type=_out(_RefinedQueriesOutput),
-            retries=1,
-            instrument=True,
-            system_prompt=(
-                "Generate 1 to 3 focused follow-up web search queries.\n"
-                "Use the claim, retrieval contract, verifier rationale, and current evidence context.\n"
-                "Return only short keyword queries that would find the missing evidence.\n"
-                "Do not repeat existing queries. No explanations."
-            ),
-        )
-        self._claim_agent = Agent(
-            self._model,
-            output_type=_out(_ClaimDecompositionOutput),
-            retries=1,
-            instrument=True,
-            system_prompt=(
-                "Plan a grounded search run for a user query.\n"
-                "Return 1 to 4 claims. Use a single claim when decomposition is unnecessary.\n"
-                "Preserve named entities exactly and do not invent facts.\n"
-                "Each claim_text must be fully self-contained: resolve all pronouns, references, and implicit entities "
-                "to explicit names from the original query. A claim must be understandable without seeing the query.\n"
-                "For each claim return: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
-                "\n"
-                "claim_profile rules:\n"
-                "- answer_shape must be one of: fact, exact_date, exact_number, product_specs, overview, comparison, news_digest\n"
-                "- overview/comparison/news_digest are open-ended contracts: primary_source_required=false and strict_contract=false\n"
-                "- news_digest must use min_independent_sources>=3\n"
-                "- product_specs must use primary_source_required=true, min_independent_sources>=2, allow_synthesis_without_primary=false, and strict_contract=true\n"
-                "- exact event-anchored number lookups should make the requested measurement the focus_terms\n"
-                "- for list-like overviews, use explicit required_dimensions such as feature_list, improvements, changes, or highlights\n"
-                "- focus_terms must describe the requested evidence itself, not generic context words\n"
-                "- do not use placeholder strings such as exact_date, exact_number, event details, or announcement details inside claim_text or focus_terms\n"
-                "\n"
-                "Semantic rules:\n"
-                "- Never rewrite a features or specifications request into an existence-check claim.\n"
-                "- Do not rewrite explanation or mechanism questions into a feature-list request.\n"
-                "- Keep explanation, comparison, and overview requests open-ended.\n"
-                "- Never answer the claim inside claim_text. Do not inject candidate dates, numbers, or facts that were not already present in the user request.\n"
-                "- Intent hints may be wrong; preserve the actual information need from the user request.\n"
-                "- Simple factual classification or affiliation claims should remain fact-shaped and prefer official evidence when the contract depends on institutional status.\n"
-                "- Mechanism or explanation requests must remain explanatory rather than being rewritten into feature lists.\n"
-                "- Generic stable numeric facts should keep required_dimensions focused on number and should not gain event_context unless the number depends on a specific event or dated situation.\n"
-                "- Event-anchored exact-number requests may use event_context and iterative retrieval when the requested value depends on a particular event, announcement, or circumstance.\n"
-                "\n"
-                "Search query rules:\n"
-                "- keyword phrases only, no question wording\n"
-                "- match the user's language; add one English query when the input is non-English and the topic is global\n"
-                "- avoid boilerplate fillers\n"
-                "- for official classification or affiliation claims, target organizational structure, statutory authority, bureau, or parent-department pages instead of vague status wording\n"
-                "- include time scope or year when relevant"
-            ),
-        )
 
         # Unified pipeline: writes final answer + self-assessment in a single call.
         # Replaces verify_claim + synthesize_answer + compose_answer in the iterative
@@ -647,93 +515,6 @@ class PydanticAIQueryIntelligence:
 
         self._intent_cache[normalized_query] = decision.intent
         return decision
-
-    def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
-        log = log or (lambda msg: None)
-        if not self._enabled:
-            queries = self._get_or_generate_queries(classification, log)
-            return self._fallback_claims(classification, search_queries=queries)
-
-        # SYNTHESIS_SKIP_DECOMPOSE: for open-ended synthesis/news_digest intents the
-        # LLM-decomposed sub-claims are usually wrong (verify_claim returns
-        # insufficient_evidence on descriptive claims), and the N-claims × M-variants
-        # SERP fan-out is wasteful. Treat the original query as a single claim and
-        # rely on synthesize_answer for the final response.
-        if (
-            tuning.SYNTHESIS_SKIP_DECOMPOSE
-            and classification.intent in {"synthesis", "news_digest"}
-        ):
-            queries = self._get_or_generate_queries(classification, log)
-            return self._fallback_claims(classification, search_queries=queries)
-
-        prompt = (
-            "Return JSON with one key `claims`.\n"
-            "Each claim must include: claim_text, priority, needs_freshness, entity_set, time_scope, search_queries, claim_profile.\n"
-            "claim_profile must include: answer_shape, primary_source_required, min_independent_sources, "
-            "preferred_domain_types, required_dimensions, focus_terms, allow_synthesis_without_primary, strict_contract.\n"
-            "Keep claims atomic, exact, and capped at 4.\n"
-            "Return one claim when the request is already atomic.\n"
-            "For overview, comparison, and news_digest claims, keep the contract open-ended and set strict_contract=false.\n"
-            "For product_specs claims, keep the specs request intact and require primary-source evidence.\n"
-            "For explanation or mechanism questions, keep the mechanism/explanation need intact and do not rewrite into a feature-list request.\n"
-            "For simple factual classification or membership claims such as agency status, official role, or institutional affiliation, prefer official sources, require primary-source evidence, and require at least two independent sources.\n"
-            "For generic exact-number facts such as scientific constants, measurements under standard conditions, or stable reference values, keep required_dimensions centered on number, avoid event_context, and do not require a primary source by default.\n"
-            "For exact event-anchored number lookups, use focus_terms for the requested measurement.\n"
-            "For exact event-anchored number lookups, include event_context in required_dimensions when the number depends on a specific event or situation.\n"
-            "Never insert a candidate answer into claim_text. Keep exact_date and exact_number claims unresolved unless that date or number was already stated in the user request.\n"
-            "Never emit placeholder phrases like exact_date, exact_number, event details, or announcement details.\n\n"
-            f"Intent: {classification.intent}\n"
-            f"Complexity: {classification.complexity}\n"
-            f"Needs freshness: {classification.needs_freshness}\n"
-            f"Time scope: {classification.time_scope or ''}\n"
-            f"Region hint: {classification.region_hint or ''}\n"
-            f"User request: {classification.normalized_query}"
-        )
-        try:
-            with log_llm_call(
-                log,
-                task="decompose_claims",
-                model=self._settings.llm_model,
-                detail=classification.normalized_query,
-                input_chars=len(prompt),
-            ) as metrics:
-                with logfire.span("query_intelligence.decompose_claims", query=classification.normalized_query):
-                    result = self._claim_agent.run_sync(
-                        prompt,
-                        model_settings=self._model_settings(
-                            max_tokens=self._settings.resolved_claim_decompose_max_tokens(),
-                            temperature=0,
-                        ),
-                    )
-                metrics.output_chars = output_char_len(result.output)
-            claims = []
-            for idx, item in enumerate(result.output.claims[:4], 1):
-                claim_profile = self._claim_profile_from_output(item.claim_profile, classification)
-                claim_text = _preserve_original_factual_claim(
-                    classification,
-                    normalized_text(item.claim_text),
-                    claim_profile,
-                )
-                claims.append(
-                    Claim(
-                        claim_id=f"claim-{idx}",
-                        claim_text=claim_text,
-                        priority=max(1, int(item.priority or idx)),
-                        needs_freshness=bool(item.needs_freshness or classification.needs_freshness),
-                        entity_set=[
-                            normalized_text(entity)
-                            for entity in item.entity_set
-                            if normalized_text(entity)
-                        ] or extract_entities(item.claim_text),
-                        time_scope=normalized_text(item.time_scope) if item.time_scope else extract_time_scope(item.claim_text),
-                        search_queries=[q.strip() for q in (item.search_queries or []) if q.strip()],
-                        claim_profile=claim_profile,
-                    )
-                )
-            return claims or self._fallback_claims(classification)
-        except Exception as exc:
-            log("  [dim yellow]→ fallback: single claim from query[/dim yellow]")
-            return self._fallback_claims(classification)
 
     def _get_or_generate_queries(self, classification: QueryClassification, log=None) -> list[str]:
         """Return pre-generated queries from the intent-classification cache, or generate them now.
@@ -1021,110 +802,6 @@ class PydanticAIQueryIntelligence:
             log(f"  [dim yellow]→ synthesize_answer failed: {exc}[/dim yellow]")
             return ""
 
-    def refine_search_queries(
-        self,
-        claim: Claim,
-        classification: QueryClassification,
-        verification: VerificationResult,
-        gated_results: list[GatedSerpResult],
-        bundle: EvidenceBundle | None,
-        next_iteration: int,
-        existing_queries: set[str],
-        log=None,
-    ) -> list[str]:
-        log = log or (lambda msg: None)
-        if not self._enabled:
-            return []
-
-        evidence_lines: list[str] = []
-        for idx, result in enumerate(gated_results[:6], 1):
-            evidence_lines.append(
-                f"{idx}. {result.serp.title} | {result.serp.url} | domain={result.assessment.domain_type} | source_score={result.assessment.source_score:.2f}"
-            )
-        profile = claim.claim_profile
-        profile_lines = [
-            f"answer_shape={profile.answer_shape}" if profile else "answer_shape=fact",
-            f"primary_source_required={profile.primary_source_required}" if profile else "primary_source_required=False",
-            f"min_independent_sources={profile.min_independent_sources}" if profile else "min_independent_sources=1",
-            f"preferred_domain_types={','.join(profile.preferred_domain_types)}" if profile and profile.preferred_domain_types else "preferred_domain_types=",
-            f"required_dimensions={','.join(profile.required_dimensions)}" if profile and profile.required_dimensions else "required_dimensions=",
-            f"focus_terms={','.join(profile.focus_terms)}" if profile and profile.focus_terms else "focus_terms=",
-            f"strict_contract={profile.strict_contract}" if profile else "strict_contract=False",
-        ]
-        passage_lines: list[str] = []
-        if bundle and bundle.considered_passages:
-            for p in bundle.considered_passages[:3]:
-                snippet = (p.text or "")[:100].replace("\n", " ")
-                passage_lines.append(f"- {p.title}: {snippet}")
-
-        prompt = (
-            f"Claim: {claim.claim_text}\n"
-            f"Intent: {classification.intent}\n"
-            f"Iteration: {next_iteration}\n"
-            f"Needs freshness: {claim.needs_freshness}\n"
-            f"Time scope: {claim.time_scope or ''}\n"
-            "Claim contract:\n"
-            + "\n".join(profile_lines)
-            + "\n\nVerifier verdict: "
-            + verification.verdict
-            + f"\nMissing dimensions: {', '.join(verification.missing_dimensions) or 'none'}"
-            + f"\nRationale: {verification.rationale or 'none'}"
-            + f"\nExisting queries: {', '.join(sorted(existing_queries)) or 'none'}"
-            + "\nTop current evidence:\n"
-            + ("\n".join(evidence_lines) if evidence_lines else "none")
-            + "\nTop retrieved passages:\n"
-            + ("\n".join(passage_lines) if passage_lines else "none")
-        )
-        try:
-            with log_llm_call(
-                log,
-                task="refine_search_queries",
-                model=self._settings.llm_model,
-                detail=claim.claim_text,
-                input_chars=len(prompt),
-            ) as metrics:
-                result = self._refiner_agent.run_sync(
-                    prompt,
-                    model_settings=self._model_settings(max_tokens=160, temperature=0),
-                )
-                metrics.output_chars = output_char_len(result.output)
-            queries: list[str] = []
-            seen = {query.casefold() for query in existing_queries}
-            for candidate in result.output.queries:
-                query_text = normalized_text(candidate)
-                if not query_text:
-                    continue
-                key = query_text.casefold()
-                if key in seen:
-                    continue
-                seen.add(key)
-                queries.append(query_text)
-                log(f"  [dim]-> llm_refined_query: {query_text}[/dim]")
-            return queries[:3]
-        except Exception as exc:
-            log(f"  [dim yellow]-> refine_search_queries failed: {exc}[/dim yellow]")
-            return []
-
-    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
-        classification = QueryClassification(
-            query=claim_text,
-            normalized_query=claim_text,
-            intent="factual",
-            complexity="single_hop",
-            needs_freshness=False,
-        )
-        queries = self.refine_search_queries(
-            Claim(claim_id="claim-1", claim_text=claim_text, priority=1, needs_freshness=False),
-            classification,
-            VerificationResult(verdict="insufficient_evidence", rationale=rationale),
-            gated_results=[],
-            bundle=None,
-            next_iteration=2,
-            existing_queries=set(),
-            log=log,
-        )
-        return queries[0] if queries else None
-
     # ------------------------------------------------------------------
     # Unified iterative pipeline — replaces classify/decompose/verify/synthesize
     # with two calls: generate_queries_unified + assess_and_answer.
@@ -1364,163 +1041,6 @@ class PydanticAIQueryIntelligence:
         except Exception:
             log("  [dim yellow]→ fallback: original query (time normalization failed)[/dim yellow]")
             return query
-
-    @staticmethod
-    def _fallback_claims(
-        classification: QueryClassification,
-        search_queries: list[str] | None = None,
-    ) -> list[Claim]:
-        answer_shape = "news_digest" if classification.intent == "news_digest" else "overview" if classification.intent == "synthesis" else "fact"
-        return [
-            Claim(
-                claim_id="claim-1",
-                claim_text=classification.normalized_query,
-                priority=1,
-                needs_freshness=classification.needs_freshness,
-                entity_set=extract_entities(classification.normalized_query),
-                time_scope=classification.time_scope,
-                search_queries=search_queries or [],
-                claim_profile=ClaimProfile(
-                    answer_shape=answer_shape,
-                    primary_source_required=False,
-                    min_independent_sources=3 if classification.intent == "news_digest" else 2 if classification.intent == "synthesis" else 1,
-                    preferred_domain_types=["major_media", "official", "vendor"] if classification.intent == "news_digest" else ["official", "academic", "vendor", "major_media"],
-                    required_dimensions=["time", "source"] if classification.intent == "news_digest" else [],
-                    focus_terms=[],
-                    allow_synthesis_without_primary=classification.intent != "factual",
-                    strict_contract=False,
-                ),
-            )
-        ]
-
-    @staticmethod
-    def _claim_profile_from_output(
-        output: _ClaimProfileOutput | None,
-        classification: QueryClassification,
-    ) -> ClaimProfile:
-        if output is None:
-            answer_shape = "news_digest" if classification.intent == "news_digest" else "overview" if classification.intent == "synthesis" else "fact"
-            return ClaimProfile(answer_shape=answer_shape)
-
-        answer_shape = output.answer_shape
-        preferred_domain_types = [
-            domain
-            for domain in output.preferred_domain_types
-            if domain in {"official", "academic", "vendor", "major_media", "forum", "unknown"}
-        ]
-        required_dimensions: list[str] = []
-        seen_dimensions: set[str] = set()
-        for value in output.required_dimensions:
-            normalized = normalized_text(value)
-            key = normalized.casefold()
-            if not normalized or key in seen_dimensions:
-                continue
-            seen_dimensions.add(key)
-            required_dimensions.append(normalized)
-
-        focus_terms: list[str] = []
-        seen_focus: set[str] = set()
-        for value in output.focus_terms:
-            normalized = normalized_text(value)
-            key = normalized.casefold()
-            if not normalized or key in seen_focus:
-                continue
-            seen_focus.add(key)
-            focus_terms.append(normalized)
-
-        primary_source_required = bool(output.primary_source_required)
-        min_independent_sources = max(1, int(output.min_independent_sources or 1))
-        allow_synthesis_without_primary = bool(output.allow_synthesis_without_primary)
-        strict_contract = bool(output.strict_contract)
-
-        if answer_shape in {"overview", "comparison"}:
-            primary_source_required = False
-            min_independent_sources = max(2, min_independent_sources)
-            allow_synthesis_without_primary = True
-            strict_contract = False
-        elif answer_shape == "fact":
-            lower_dimensions = [value.casefold() for value in required_dimensions]
-            official_fact_markers = ("agency", "affiliation", "membership", "leadership", "title", "office", "role", "classification")
-            if "official" in preferred_domain_types and any(
-                marker in value
-                for value in lower_dimensions
-                for marker in official_fact_markers
-            ):
-                primary_source_required = True
-                min_independent_sources = max(2, min_independent_sources)
-                allow_synthesis_without_primary = False
-                strict_contract = True
-        elif answer_shape == "news_digest":
-            primary_source_required = False
-            min_independent_sources = max(3, min_independent_sources)
-            allow_synthesis_without_primary = True
-            strict_contract = False
-            required_dimensions = list(dict.fromkeys(required_dimensions + ["time", "source", "event"]))
-        elif answer_shape == "product_specs":
-            primary_source_required = True
-            min_independent_sources = max(2, min_independent_sources)
-            allow_synthesis_without_primary = False
-            strict_contract = True
-            required_dimensions = list(dict.fromkeys(required_dimensions + ["specs", "source"]))
-        elif answer_shape == "exact_date":
-            if "source" not in required_dimensions and len(required_dimensions) <= 1:
-                min_independent_sources = 1
-                strict_contract = False
-        elif answer_shape == "exact_number":
-            if "number" not in required_dimensions:
-                required_dimensions.append("number")
-            lower_dimensions = [value.casefold() for value in required_dimensions]
-            query_entities = {
-                normalized_text(entity).casefold()
-                for entity in extract_entities(classification.normalized_query)
-                if normalized_text(entity)
-            }
-            has_event_anchor_signal = bool(classification.time_scope) or len(query_entities) >= 2
-            event_like_number = any(
-                marker in value
-                for value in lower_dimensions
-                for marker in ("event", "context", "time")
-            )
-            if event_like_number and not has_event_anchor_signal:
-                required_dimensions = [
-                    value
-                    for value in required_dimensions
-                    if not any(marker in value.casefold() for marker in ("event", "context"))
-                ]
-                lower_dimensions = [value.casefold() for value in required_dimensions]
-                primary_source_required = False
-                min_independent_sources = 1
-                allow_synthesis_without_primary = True
-                strict_contract = False
-                event_like_number = False
-            if event_like_number:
-                min_independent_sources = max(2, min_independent_sources)
-                strict_contract = True
-            elif not primary_source_required and not event_like_number:
-                min_independent_sources = 1
-                strict_contract = False
-            elif "source" in lower_dimensions and len(required_dimensions) >= 2:
-                strict_contract = True
-            elif "time" not in lower_dimensions:
-                min_independent_sources = 1
-                strict_contract = False
-            else:
-                strict_contract = strict_contract or "number" in lower_dimensions
-
-        return ClaimProfile(
-            answer_shape=answer_shape,
-            primary_source_required=primary_source_required,
-            min_independent_sources=min_independent_sources,
-            preferred_domain_types=preferred_domain_types or (
-                ["major_media", "official", "vendor"]
-                if answer_shape == "news_digest"
-                else ["official", "academic", "vendor", "major_media"]
-            ),
-            required_dimensions=required_dimensions,
-            focus_terms=focus_terms,
-            allow_synthesis_without_primary=allow_synthesis_without_primary,
-            strict_contract=strict_contract,
-        )
 
     def _model_settings(self, *, max_tokens: int, temperature: float):
         return build_model_settings(

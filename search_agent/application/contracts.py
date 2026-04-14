@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from search_agent.domain.assessment import Assessment
 from search_agent.domain.models import (
     AgentRunResult,
     Claim,
-    ClaimProfile,
-    EvidenceBundle,
     FetchedDocument,
     FetchPlan,
     GatedSerpResult,
@@ -15,7 +14,6 @@ from search_agent.domain.models import (
     QueryVariant,
     RoutingDecision,
     SearchSnapshot,
-    VerificationResult,
 )
 
 
@@ -23,29 +21,24 @@ class QueryIntelligencePort(Protocol):
     def classify_query(self, query: str, log=None) -> QueryClassification:
         ...
 
-    def decompose_claims(self, classification: QueryClassification, log=None) -> list[Claim]:
-        ...
-
-    def verify_claim(self, claim: Claim, passages: list[Passage], log=None) -> VerificationResult:
-        ...
-
-    def synthesize_answer(self, query: str, passages: list[Passage], log=None, intent: str = "synthesis") -> str:
-        ...
-
-    def suggest_rationale_query(self, claim_text: str, rationale: str, log=None) -> str | None:
-        ...
-
-    def refine_search_queries(
+    def generate_queries_unified(
         self,
-        claim: Claim,
-        classification: QueryClassification,
-        verification: VerificationResult,
-        gated_results: list[GatedSerpResult],
-        bundle: EvidenceBundle | None,
-        next_iteration: int,
-        existing_queries: set[str],
+        *,
+        user_query: str,
+        normalized_query: str,
+        iteration: int,
+        prior_assessment: Assessment | None,
+        used_queries: set[str],
         log=None,
     ) -> list[str]:
+        ...
+
+    def assess_and_answer(
+        self,
+        user_query: str,
+        passages: list[Passage],
+        log=None,
+    ) -> Assessment:
         ...
 
 
@@ -78,21 +71,14 @@ class ReceiptWriterPort(Protocol):
 
 
 class StepLibraryPort(Protocol):
+    """Thin surface of helper steps the unified runner calls.
+
+    Lots of helper functions still live in ``agent_steps`` / ``agent_scoring``
+    (they are invoked directly by component evals and ``bench/routing_probe``),
+    but the unified orchestrator only needs this small subset.
+    """
+
     def build_run_id(self, query: str, started_at) -> str:
-        ...
-
-    def infer_claim_profile(
-        self,
-        claim: Claim,
-        classification: QueryClassification,
-    ) -> ClaimProfile:
-        ...
-
-    def build_query_variants(
-        self,
-        claim: Claim,
-        classification: QueryClassification,
-    ) -> list[QueryVariant]:
         ...
 
     def retag_snapshot(self, snapshot: SearchSnapshot, variant: QueryVariant) -> SearchSnapshot:
@@ -106,19 +92,6 @@ class StepLibraryPort(Protocol):
     ) -> list[GatedSerpResult]:
         ...
 
-    def route_claim_retrieval(
-        self,
-        claim: Claim,
-        gated_results: list[GatedSerpResult],
-    ) -> RoutingDecision:
-        ...
-
-    def build_snippet_passages(
-        self,
-        gated_results: list[GatedSerpResult],
-    ) -> list[Passage]:
-        ...
-
     def documents_for_passage_extraction(
         self,
         documents: list[FetchedDocument],
@@ -126,32 +99,6 @@ class StepLibraryPort(Protocol):
         ...
 
     def split_into_passages(self, document: FetchedDocument) -> list[Passage]:
-        ...
-
-    def cheap_passage_filter(self, claim: Claim, passages: list[Passage]) -> list[Passage]:
-        ...
-
-    def utility_rerank_passages(self, claim: Claim, passages: list[Passage], prior_passage_ids: set[str] | None = None) -> list[Passage]:
-        ...
-
-    def build_evidence_bundle(
-        self,
-        claim: Claim,
-        passages: list[Passage],
-        verification: VerificationResult,
-        gated_results: list[GatedSerpResult],
-    ) -> EvidenceBundle:
-        ...
-
-    def should_stop_claim_loop(
-        self,
-        claim: Claim,
-        bundle: EvidenceBundle,
-        iteration: int,
-    ) -> bool:
-        ...
-
-    def compose_answer(self, report: AgentRunResult) -> str:
         ...
 
     def estimate_search_cost(self, claim_runs) -> float:
