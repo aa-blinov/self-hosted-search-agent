@@ -1,240 +1,243 @@
 # Self-hosted search agent
 
-Итеративный веб-поисковый агент: ищет в DuckDuckGo или Brave, отсеивает мусорные ссылки, качает страницы, режет их на фрагменты и одним обращением к языковой модели одновременно пишет ответ и сам проверяет его на полноту. Рассчитан на локальный запуск и относительно дешёвые модели через OpenAI-совместимый API (например, OpenRouter).
+An iterative web search agent that runs on your own machine and talks to any
+OpenAI-compatible model endpoint. It searches DuckDuckGo or Brave, drops the
+SEO filler, fetches the pages that survive, and asks the model for an answer
+and for its own assessment of that answer in one call. The loop ends when
+every claim in the answer rests on at least two independent domains, so a
+question the pages cannot settle comes back with the list of what is missing
+instead of a confident guess.
 
-## Требования
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
-- Python **3.11+**
-- [uv](https://docs.astral.sh/uv/) (рекомендуется)
+---
 
-## Установка
+## Quick start
+
+Python 3.11 or newer, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
 cp .env.example .env
-# Заполните LLM_API_KEY и при необходимости BRAVE_API_KEY / SEARCH_PROVIDER
 ```
 
-Первый запуск crawl4ai (если используется глубокая загрузка через Playwright):
+Put the model key in `.env`:
+
+```
+LLM_API_KEY=your_key_here
+```
+
+The default search backend is Brave, which needs a subscription token:
+
+```
+BRAVE_API_KEY=your_brave_subscription_token_here
+```
+
+DuckDuckGo needs no key. Set `SEARCH_PROVIDER=ddgs` in `.env`, or switch the
+backend for one run with `-S ddgs`.
+
+Then ask a question:
+
+```bash
+uv run search-agent -q "When was Python 3.13 released?" -p web
+```
+
+Without `-q` the program opens an interactive prompt where you pick a search
+profile for every question. The commands there are `/help`, `/config`,
+`/profiles`, `/research`, `/clear` and `/quit`.
+
+The deep fetch path needs a browser, once:
 
 ```bash
 uv run crawl4ai-setup
 ```
 
-## Запуск
+Without it the agent still works, but a page that returns no readable text
+over HTTP is never retried through Playwright.
 
-Интерактивный режим:
+## What it does
 
-```bash
-uv run search-agent
+- **Writes the query list.** One model call classifies the question and
+  returns 3 to 5 keyword queries at the same time, so the first round of
+  searching costs one round trip rather than two.
+- **Reads pages, not snippets.** Search hits are scored, the pages are fetched
+  over HTTP and stripped to text with trafilatura, and a page that yields too
+  little text is fetched again through a headless browser.
+- **Answers and grades itself in one call.** The model returns the markdown
+  answer with `[N]` citations, the atomic claims behind it, a confidence value
+  from 0 to 1, the gaps it noticed, and a flag for a question the evidence
+  contradicts.
+- **Stops on evidence.** The loop ends when the evidence contradicts the
+  question, or when the confidence is at least 0.75 and every claim is backed
+  by two independent domains, or when the iteration cap of 2 is reached.
+- **Counts a host once.** Two pages on the same domain are one source, so a
+  site that repeats itself cannot satisfy the two-domain rule.
+- **Cites what it used.** Every `[N]` resolves to a URL, and the source list is
+  appended under the answer.
+- **Drops the junk.** The gate scores each hit on domain type, freshness,
+  entity match, primary-source likelihood and spam cues, and keeps 10 to 20
+  URLs.
+- **Keeps one page from filling the window.** Passages are interleaved round
+  by round across URLs, and the prompt takes at most 2 passages per URL, 4 per
+  domain, and 14 in total.
+- **Keeps the keys on your machine.** The model key, the search key and the
+  `.env` file stay on your disk.
+- **Ships an evaluation harness.** The datasets live in `eval_data/`, every
+  run is saved as JSON in `eval_runs/`, and two runs can be diffed.
+
+## How it works
+
+```
+question
+  |
+  v
+normalize time references     <- model, only for relative dates
+  |
+  v
++-------------------------------------------------------------+
+| iteration 1 .. 2                                            |
+|                                                             |
+|   queries                <- model; iteration 1 reuses the   |
+|                            queries the classify call made   |
+|   parallel search         <- CachingBudgetSearchGateway     |
+|   gate                   -> 10 to 20 URLs                   |
+|   fetch                  -> page_cache, shared              |
+|   split into passages    -> at most 420 characters each     |
+|   rank and interleave    -> top 25                          |
+|   cap per URL and domain -> at most 14 passages             |
+|   assess and answer      <- model, one call                 |
+|                                                             |
+|   stop?  contradicts_query, or confidence >= 0.75 and two  |
+|          domains behind every claim, or the iteration cap  |
++-------------------------------------------------------------+
+  |
+  v
+answer, source list, audit trail
 ```
 
-Один запрос:
+The single model call at the end of an iteration carries the whole decision.
+The same call that writes the answer returns the claims it made, so the
+runner can check whether each claim has two independent domains behind it
+without a second verification pass. The `[N]` numbers in the prompt and the
+numbers in the source list come from the same list in the same order, which
+is why the runner rebuilds the passage index from the capped list and not
+from the ranked one.
+
+The runner keeps a single synthetic claim, so the evaluation harness, which
+was written for the older claim-per-claim pipeline, can still score it. The
+verdict it reports comes from the assessment: `contradicts_query` becomes
+`contradicted`, a confidence of at least 0.75 becomes `supported`, and
+anything else becomes `insufficient_evidence`.
+
+| Path | What it holds |
+| --- | --- |
+| `search_agent/application/unified_runner.py` | The loop. The only place the iteration is driven from. |
+| `search_agent/application/agent_steps.py` | The helper steps the runner calls: gate, fetch, split, rank. |
+| `search_agent/application/agent_sources.py` | Source scoring, the gate, the fetch plan, the passage split. |
+| `search_agent/application/agent_compose.py` | The composed answer and the search-cost estimate. |
+| `search_agent/application/contracts.py` | The ports. The boundary between the layers. |
+| `search_agent/application/policy_tuning.py` | The weights of the scoring rules. |
+| `search_agent/domain/assessment.py` | `Assessment` and `KeyClaim`, the output of the answer call. |
+| `search_agent/domain/models.py` | Claims, passages, snapshots, the run result. |
+| `search_agent/infrastructure/intelligence.py` | The model calls: classify, queries, answer. |
+| `search_agent/infrastructure/caching_search_gateway.py` | The search cache and the per-run call budget. |
+| `search_agent/infrastructure/ddgs_gateway.py` | DuckDuckGo, with retries on a transient backend failure. |
+| `search_agent/infrastructure/brave_search.py` | Brave, with a fallback chain of profiles. |
+| `search_agent/infrastructure/extractor.py` | Page text: HTTP first, headless browser as the fallback. |
+| `search_agent/infrastructure/source_handlers.py` | Per-source extraction: Reddit, arXiv, Crossref, Semantic Scholar, GitHub. |
+| `search_agent/config/profiles.py` | The 15 search profiles. |
+| `search_agent/settings.py` | The environment settings. |
+| `search_agent/tuning.py` | The internal constants. |
+
+## Configuration
+
+The keys, the provider and the endpoints live in the environment. Everything
+else is a constant in `search_agent/tuning.py`, and the example file
+`.env.example` holds the same list.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `LLM_API_KEY` | none | The model key. The program exits with an error when it is missing. |
+| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
+| `LLM_MODEL` | `qwen/qwen3.5-35b-a3b` | The model name sent to the endpoint. |
+| `LLM_PROVIDER` | none | Routing hint for the endpoint. |
+| `LLM_MAX_TOKENS` | `8192` | The ceiling for a single call. |
+| `LLM_HTTP_REFERER` | `https://github.com/local/search-agent` | Sent as the `HTTP-Referer` header. |
+| `SEARCH_PROVIDER` | `brave` | `brave` or `ddgs`. |
+| `SEARCH_PROVIDER_OVERRIDE` | none | Wins over `SEARCH_PROVIDER`. The `-S` flag sets it. |
+| `BRAVE_API_KEY` | none | The Brave Search subscription token. |
+| `BRAVE_BASE_URL` | `https://api.search.brave.com` | The Brave endpoint. |
+| `BRAVE_COUNTRY` | `US` | The country sent to Brave. |
+| `BRAVE_SAFESEARCH` | `moderate` | `off`, `moderate` or `strict`. |
+| `BRAVE_GOGGLES` | none | A JSON array, or newline-separated ranking rules. |
+| `BRAVE_SEARCH_FALLBACK` | `true` | Falls back to other profiles when Brave returns nothing. |
+| `SEARCH_BACKEND_FALLBACK_DELAY_SEC` | `1.0` | The wait before a fallback request. |
+| `DDGS_REGION` | `wt-wt` | The DuckDuckGo region. |
+| `DDGS_SAFESEARCH` | `moderate` | The DuckDuckGo safesearch setting. |
+| `DDGS_TIMEOUT` | `15` | Seconds. |
+| `DEFAULT_PROFILE` | `web` | The profile used when the run names none. |
+| `AGENT_RECEIPTS_DIR` | none | Where the audit trail JSON is written. |
+| `LOGFIRE_TOKEN` | none | Turns on Logfire tracing. |
+| `GITHUB_TOKEN` | none | Raises the GitHub API rate limit for repository pages. |
+| `EXTRACT_MAX_CHARS` | `4000` | Overrides `tuning.EXTRACT_MAX_CHARS`. |
+| `COMPOSE_ANSWER_MAX_TOKENS` | `1600` | The cap on the composed answer. |
+| `RAG_ANALYSIS_MAX_TOKENS` | `1400` | The cap on the arXiv analysis. |
+| `CLAIM_DECOMPOSE_MAX_TOKENS` | `500` | The cap on a decomposition call. |
+| `VERIFY_CLAIM_MAX_TOKENS` | `700` | The cap on a verification call. |
+| `TIME_NORMALIZE_MAX_TOKENS` | `120` | The cap on the date normalization call. |
+| `SYNTHESIZE_ANSWER_MAX_TOKENS` | `2000` | The cap on the answer call. |
+
+A search profile decides the category, the language, the freshness window and
+the query hints. The interactive prompt suggests one from the wording of the
+question and lets you pick another.
+
+| Profile | What it is for |
+| --- | --- |
+| `web` | General search. The default. |
+| `ru` | General search with a Russian language bias. |
+| `news` | The news vertical, last week. |
+| `news_fresh` | The news vertical, last 24 hours. |
+| `ru_news` | The news vertical, last week, Russian bias. |
+| `ru_news_fresh` | The news vertical, last 24 hours, Russian bias. |
+| `science` | Scientific sources, with an arXiv boost. |
+| `tech` | Software and IT, with a tech-blog bias. |
+| `it_qa` | Question and answer sites. |
+| `it_repos` | Repositories and packages. |
+| `deep` | A wide budget across the general, news and science categories. |
+| `reference` | Wikipedia and Wikidata. |
+| `reddit` | Reddit. |
+| `arxiv` | arXiv only. |
+| `wikipedia` | Wikipedia and Wikidata, with a wider result set. |
+
+## Development
 
 ```bash
-uv run search-agent -q "Ваш вопрос" -p web
-```
-
-### Windows и кириллица в консоли
-
-При старте приложение переключает консоль на **UTF-8** (кодовая страница 65001) и задаёт UTF-8 для `stdout`/`stderr`, чтобы Rich и русский текст не превращались в «кракозябры» (`â…`, `Ð…`). Если в очень старом `cmd` искажения всё ещё остаются, откройте **Windows Terminal** или выполните перед запуском `chcp 65001`. Можно также задать `PYTHONUTF8=1` в переменных окружения.
-
-Разовое переопределение поискового движка:
-
-```bash
-uv run search-agent -S ddgs -q "..."
-```
-
-## Настройка
-
-Основные переменные окружения — ключи, провайдеры и связанные адреса — описаны в `search_agent/settings.py`. Дополнительно: **`EXTRACT_MAX_CHARS`** (максимум символов с одной страницы), лимиты токенов для языковой модели (**`ASSESS_AND_ANSWER_MAX_TOKENS`**, **`TIME_NORMALIZE_MAX_TOKENS`**, **`GENERATE_QUERIES_MAX_TOKENS`**), общий потолок **`LLM_MAX_TOKENS`**. Остальные тайминги и лимиты агента — в `search_agent/tuning.py` и `search_agent/application/unified_runner.py`. Пример — в `.env.example`.
-
-## Оценка качества
-
-Датасеты лежат в `eval_data/`. Подробности: [`eval_data/README.md`](eval_data/README.md).
-
-Быстрый прогон на 5 кейсах. Результат **автоматически** сохраняется в `eval_runs/` (имя файла содержит время UTC и короткий git-хеш, метаданные запуска — в поле `run_metadata` внутри JSON):
-
-```bash
+uv sync                                          # install
+uv run python -m unittest discover -s tests -q   # the tests, 19 files, 85 tests
 uv run search-agent --eval eval_data/quality_smoke.jsonl --eval-label smoke
+uv run python -m search_agent.eval eval_runs/a.json eval_runs/b.json
 ```
 
-Полный контрольный набор (12 кейсов):
+The third command runs a dataset of 5 cases and saves the metrics to
+`eval_runs/`; the fourth diffs two saved runs. There is no build step for
+running it, and the package itself is a hatchling project, so `uv build`
+produces a wheel.
 
-```bash
-uv run search-agent --eval eval_data/control_dataset.jsonl --eval-label control
-```
+| Path | What it holds |
+| --- | --- |
+| `search_agent/app.py` | The command line: one query, a dataset run, the arXiv mode. |
+| `search_agent/cli.py` | The interactive prompt, the profile picker, the history file. |
+| `search_agent/bootstrap.py` | The wiring. Builds the use case out of the ports. |
+| `search_agent/eval/` | The run artifacts and the comparison between two runs. |
+| `search_agent/evaluation.py` | The scoring of a dataset against the expectations. |
+| `eval_data/` | The datasets and their schema. |
+| `bench/` | Two scripts for measuring the routing and the stop condition. |
+| `tests/` | The tests. |
 
-Отключить сохранение файла — флаг `--eval-no-save`. Указать свой путь — `--eval-out path.json` или `--eval-out my_dir/`.
+`eval_data/README.md` holds the schema of a dataset row and the meaning of
+every metric.
 
-Сравнение двух сохранённых отчётов:
+## License
 
-```bash
-uv run python -m search_agent.eval eval_runs/run_a.json eval_runs/run_b.json
-```
-
-## Как работает агент
-
-### Общая идея
-
-Агент работает одним общим циклом для всех типов вопросов. Нет отдельных веток «факт», «обзор», «новости», нет разбиения запроса на под-вопросы, нет отдельных шагов «классификация темы», «проверка утверждения», «финальная сборка ответа». Вся логика живёт в одной процедуре `UnifiedSearchAgentUseCase.run()` (файл `search_agent/application/unified_runner.py`).
-
-Одна итерация состоит из следующих шагов:
-
-1. **Языковая модель придумывает поисковые запросы.**
-2. **Агент параллельно ищет** по этим запросам в выбранном движке.
-3. **Отсеивает мусорные ссылки**, качает оставшиеся страницы, режет их на короткие фрагменты.
-4. **Отдаёт фрагменты языковой модели**, которая одним вызовом одновременно:
-   - пишет готовый ответ с ссылками `[1]`, `[2]`, ... на использованные фрагменты,
-   - перечисляет, из каких именно фактов состоит этот ответ (`key_claims`),
-   - ставит себе оценку уверенности (`confidence` от 0 до 1),
-   - перечисляет, чего в собранных данных не хватило (`gaps`),
-   - отдельным флагом говорит, противоречат ли найденные данные самому вопросу (`contradicts_query`).
-5. **Агент проверяет, пора ли остановиться.** Если данных достаточно — цикл завершается. Если нет — начинается следующая итерация, и на этот раз языковая модель придумывает новые запросы с учётом того, чего не хватило в прошлый раз.
-
-### Шаги по порядку
-
-1. **Нормализация времени** _(обращение к модели, только при необходимости)._ Если в вопросе есть слова вроде «сегодня», «на этой неделе», «в прошлом месяце», модель заменяет их на конкретные даты. Результат кешируется по исходной строке вопроса.
-
-2. **Генерация поисковых запросов** _(обращение к модели, каждую итерацию)._ Метод `generate_queries_unified` возвращает от трёх до пяти поисковых запросов. На второй и следующих итерациях он получает пропуски из прошлого ответа (`gaps`) и список уже использованных запросов — чтобы новые запросы закрывали именно недостающие места.
-
-3. **Параллельный поиск.** Запросы раскладываются в объекты `QueryVariant` и одновременно уходят в движок через обёртку `CachingBudgetSearchGateway`. Эта обёртка кеширует результаты и следит за бюджетом вызовов на весь запуск. У DDGS-движка дополнительно есть **повторы** (задержки 0.5 и 1.0 секунды) на случай временных ошибок бэкендов Yahoo и Wikipedia — движок не переключается, а спокойно ретраит тот же запрос.
-
-4. **Отсев мусорных ссылок.** Функция `gate_serp_results` смотрит на все накопленные выдачи (в том числе прошлых итераций), выбирает от 10 до 20 URL — отбрасывая SEO-спам и нерелевантные домены.
-
-5. **Загрузка страниц.** `fetch_claim_documents` сначала быстро качает страницы обычным HTTP через trafilatura (до 4000 символов; для авторитетных доменов — до 15000). Если текста мало, эскалирует до Playwright через crawl4ai. Загруженные страницы лежат в общем кеше `page_cache` и переиспользуются между итерациями.
-
-6. **Разбиение на фрагменты.** Свежие документы режутся на куски примерно по 500 символов (`split_into_passages`). Уже виденные фрагменты пропускаются по `passage_id`.
-
-7. **Ранжирование фрагментов с перемешиванием по URL.** Функция `_rank_passages_for_prompt` сначала сортирует все фрагменты по паре «авторитетность источника, полезность». А затем проходит по URL «круговой раздачей»: первый раунд берёт лучший фрагмент из каждого URL, второй раунд — второй лучший, и так далее. Это нужно, чтобы в верхушку попали фрагменты из **разных статей**, а не десять подряд кусков одной большой страницы. Верхние 25 фрагментов идут дальше.
-
-8. **Ограничения на состав промпта.** Функция `_build_prompt_passages` жадно упаковывает фрагменты с ограничениями: не более 2 фрагментов с одного URL, не более 4 с одного домена, всего не более 14. Именно эта нумерация `[1]`, `[2]`, ..., `[N]` попадёт в промпт и именно на неё модель будет ссылаться в ответе.
-
-9. **Ответ и самопроверка одной операцией.** Метод `assess_and_answer` получает вопрос и отобранные фрагменты. Возвращает объект `Assessment`:
-   - `answer` — готовый ответ в Markdown с ссылками `[N]`;
-   - `key_claims` — список атомарных утверждений этого ответа, у каждого — список номеров фрагментов, которые его подтверждают;
-   - `confidence` — самооценка полноты ответа от 0 до 1;
-   - `gaps` — чего не хватило; используется при генерации запросов на следующей итерации;
-   - `contradicts_query` — если найденные фрагменты прямо опровергают то, что заложено в вопросе (например, вопрос «почему Python 3.13 вышел в 2022 году?» при том, что он вышел в 2024).
-
-10. **Проверка остановки.** Агент останавливается, если выполнено хотя бы одно условие:
-    - `contradicts_query = True` — вопрос противоречит реальности, отвечать дальше бессмысленно;
-    - уверенность не ниже **0.75** **и** у каждого утверждения из `key_claims` есть подтверждение минимум с **двух независимых доменов**;
-    - достигнут потолок итераций (`AGENT_MAX_CLAIM_ITERATIONS`).
-
-    «Независимый домен» — это уникальный хост страницы, на которую ссылается номер из `supporting_citation_numbers`.
-
-11. **Сборка результата.** Для совместимости со старым набором метрик (`claim_support_rate`, `contradiction_detection_rate`, `source_requirement_rate` и т. д.) агент собирает один синтетический «прогон утверждения» (`ClaimRun`), где:
-    - вердикт выводится из `Assessment`: `contradicts_query` → `contradicted`; уверенность ≥ 0.75 → `supported`; иначе — `insufficient_evidence`;
-    - число независимых источников считается как объединение доменов по всем `key_claims`.
-
-### Схема данных
-
-```
-вопрос пользователя
-  │
-  ▼
-нормализация времени                      ← модель (только при относительных датах)
-  │                                         кеш: исходный вопрос → нормализованный
-  ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Итерация 1..AGENT_MAX_CLAIM_ITERATIONS                     │
-│                                                             │
-│  generate_queries_unified           ← модель                │
-│    на вход: вопрос, нормализованный вопрос, номер итерации, │
-│             пропуски из прошлого ответа, занятые запросы    │
-│    на выход: 3–5 поисковых запросов                         │
-│                                                             │
-│  параллельный поиск × N запросов    ← CachingBudgetGateway  │
-│    (DDGS с повторами 0.5 / 1.0 с)                           │
-│                                                             │
-│  gate_serp_results                  → 10–20 URL             │
-│  fetch_claim_documents              → общий page_cache      │
-│  split_into_passages                → куски ~500 символов   │
-│                                                             │
-│  _rank_passages_for_prompt          → верхние 25            │
-│    базовая сортировка по (source_score, utility_score)      │
-│    круговой проход по URL — перемешивание источников        │
-│                                                             │
-│  _build_prompt_passages             → до 14 фрагментов      │
-│    ограничения: 2 с URL, 4 с домена, 14 всего               │
-│                                                             │
-│  assess_and_answer                  ← модель (ОДИН вызов)   │
-│    на выход: Assessment                                     │
-│      .answer              готовый ответ с ссылками [N]      │
-│      .key_claims          атомарные утверждения ответа      │
-│      .confidence          самооценка полноты (0..1)         │
-│      .gaps                чего не хватило                   │
-│      .contradicts_query   флаг противоречия с вопросом      │
-│                                                             │
-│  Проверка остановки:                                        │
-│    contradicts_query = True                  → стоп         │
-│    уверенность ≥ 0.75 И ≥ 2 домена на факт   → стоп         │
-│    достигнут потолок итераций                → стоп         │
-│    иначе — следующая итерация с учётом gaps                 │
-└─────────────────────────────────────────────────────────────┘
-  │
-  ▼
-AgentRunResult: ответ, синтетический ClaimRun, журнал запуска
-```
-
-### Кеши на время одного запуска
-
-| Кеш                          | Ключ                         | Что хранит                                    |
-| ---------------------------- | ---------------------------- | --------------------------------------------- |
-| `_normalize_cache`           | исходный вопрос              | нормализованная строка вопроса                |
-| `CachingBudgetSearchGateway` | провайдер + параметры поиска | выдача поискового движка + бюджет вызовов     |
-| `page_cache`                 | URL                          | загруженная страница — общий между итерациями |
-| `seen_passage_ids`           | `passage_id`                 | чтобы не резать уже виденные документы заново |
-
-Отдельных кешей под классификацию темы, переиспользование поисковых запросов и результаты проверки утверждений больше нет — соответствующие шаги либо удалены, либо выполняются строго один раз на итерацию и каждый раз заново, с учётом результатов предыдущего шага.
-
-### Обращения к языковой модели за один запуск
-
-| Обращение                  | Когда                                    | Приблизительный расход     |
-| -------------------------- | ---------------------------------------- | -------------------------- |
-| `normalize_time`           | только при относительных датах в вопросе | ~120 токенов на ответ      |
-| `generate_queries_unified` | каждую итерацию                          | ~300–500 токенов на ответ  |
-| `assess_and_answer`        | каждую итерацию, ровно один раз          | ~700–2000 токенов на ответ |
-
-Для простого вопроса, который закрывается на первой итерации, выходит всего **два обращения к модели**: сначала `generate_queries_unified`, потом `assess_and_answer`. Если нужна вторая итерация — ещё плюс два. У рассуждающих моделей (например, `qwen3.5-35b-a3b`) часть бюджета токенов уходит на внутренние рассуждения `<think>...</think>`; потолок `ASSESS_AND_ANSWER_MAX_TOKENS` это учитывает.
-
-### Условие остановки — формально
-
-```
-остановиться = (
-    assessment.contradicts_query
-    or (
-        assessment.confidence >= 0.75
-        and len(assessment.key_claims) >= 1
-        and для каждого факта kc в assessment.key_claims:
-            len(уникальных доменов среди kc.supporting_citation_numbers) >= 2
-    )
-    or текущая_итерация == AGENT_MAX_CLAIM_ITERATIONS
-)
-```
-
-Основной критерий достаточности — **покрытие каждого утверждения как минимум двумя независимыми источниками**. Порог уверенности `0.75` добавлен как мягкий фильтр — чтобы отсечь ответы, у которых формально по два домена на факт, но модель сама честно призналась, что данных мало.
-
-## Тесты
-
-```bash
-uv run python -m unittest discover -s tests -q
-```
-
-## Структура репозитория
-
-| Путь                                                    | Назначение                                                                             |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `search_agent/settings.py`                              | Настройки приложения                                                                   |
-| `search_agent/application/unified_runner.py`            | Единый итеративный цикл — главная точка входа                                          |
-| `search_agent/application/agent_steps.py`               | Отсев ссылок, загрузка, нарезка, ранжирование                                          |
-| `search_agent/domain/assessment.py`                     | `Assessment` и `KeyClaim` — выход `assess_and_answer`                                  |
-| `search_agent/domain/models.py`                         | Утверждения, фрагменты, журнал запуска                                                 |
-| `search_agent/infrastructure/intelligence.py`           | Обёртка над моделью: `normalize_time`, `generate_queries_unified`, `assess_and_answer` |
-| `search_agent/infrastructure/ddgs_gateway.py`           | DDGS с повторами на временные ошибки                                                   |
-| `search_agent/infrastructure/caching_search_gateway.py` | Обёртка-кеш поискового движка с бюджетом вызовов                                       |
-| `search_agent/eval/`                                    | Сохранение и сравнение прогонов оценки качества                                        |
-| `eval_data/`                                            | Датасеты и документация по оценке                                                      |
-
-Для ассистентов и контрибьюторов см. [`AGENTS.md`](AGENTS.md) и [`CLAUDE.md`](CLAUDE.md).
+MIT, © Alexander Blinov. See [LICENSE](LICENSE).
