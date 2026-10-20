@@ -78,7 +78,8 @@ comes back empty.
   appended under the answer.
 - **Drops the junk.** The gate scores each hit on domain type, freshness,
   entity match, primary-source likelihood and spam cues, and keeps 10 to 20
-  URLs.
+  URLs. Up to 5 of them are read on the first iteration and up to 10 on the
+  second.
 - **Keeps one page from filling the window.** Passages are interleaved round
   by round across URLs, and the prompt takes at most 2 passages per URL, 4 per
   domain, and 14 in total.
@@ -87,7 +88,8 @@ comes back empty.
   outbound traffic goes to the search backend, the pages and the model
   endpoint.
 - **Ships an evaluation harness.** The datasets live in `eval_data/`, every
-  run is saved as JSON in `eval_runs/`, and two runs can be diffed.
+  dataset run is saved as JSON in `eval_runs/` unless `--eval-no-save` is
+  passed, and two runs can be diffed.
 
 ## How it works
 

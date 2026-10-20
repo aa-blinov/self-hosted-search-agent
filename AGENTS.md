@@ -98,10 +98,12 @@ needed once per machine, and only for pages that fail over to Playwright.
   CLI prints "Claims (1)" whatever the question was. Nothing is being
   decomposed.
 
-- **The fetch layer is called with `intent="synthesis"`.** That is how the
-  runner gets the highest fetch ceiling, and it is also why the reference
-  domains in `tuning.AUTHORITY_DOMAINS` get 15000 characters instead of
-  4000. The synthetic classification uses the same intent so that the older
+- **The fetch layer is called with `intent="synthesis"`.** The intent decides
+  the character cap, so the reference domains in `tuning.AUTHORITY_DOMAINS`
+  get 15000 characters instead of 4000. The number of pages fetched comes
+  from the iteration number and the profile, not from the intent: 5 shallow
+  pages on the first iteration, 10 on the second, and 2 deep pages either
+  way. The synthetic classification uses the same intent so that the older
   evaluation gates stay out of the way.
 
 - **The gate runs over every snapshot so far.** A hit from the first
