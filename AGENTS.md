@@ -19,8 +19,8 @@ uv run python -m search_agent.eval eval_runs/a.json eval_runs/b.json
 uv run python -m search_agent.eval.components --all --no-llm
 ```
 
-Python 3.11 or newer. The sixth command scores a dataset of 5 cases and
-saves the metrics to `eval_runs/`; the seventh diffs two saved runs; the
+Python 3.11 or newer. The fifth command scores a dataset of 5 cases and
+saves the metrics to `eval_runs/`; the sixth diffs two saved runs; the
 last one runs the component checks that need neither a key nor a network.
 
 `uv run crawl4ai-setup` installs the browser the deep fetch path uses. It is
@@ -38,7 +38,7 @@ needed once per machine, and only for pages that fail over to Playwright.
 | `search_agent/application/unified_runner.py` | The loop. The only place an iteration is driven from. |
 | `search_agent/application/agent_steps.py` | The helper steps the runner calls, and the facade over the rest of the scoring code. |
 | `search_agent/application/agent_sources.py` | Source scoring, the SERP gate, the fetch plan, the passage split. |
-| `search_agent/application/agent_compose.py` | The composed answer and the search-cost estimate. |
+| `search_agent/application/agent_compose.py` | The answer composition of the older pipeline, and the search-cost estimate. |
 | `search_agent/application/agent_passage_scoring.py` | The cheap TF-IDF passage filter and the utility rerank. |
 | `search_agent/application/agent_evidence.py` | The evidence bundle and the old stop condition. |
 | `search_agent/application/claim_policy.py` | The per-shape rules: how many sources a claim needs, whether it needs a primary source. |
@@ -58,7 +58,7 @@ needed once per machine, and only for pages that fail over to Playwright.
 | `search_agent/evaluation.py` | The scoring of a dataset against the expectations. |
 | `search_agent/eval/` | The run artifacts and the comparison between two runs. |
 | `eval_data/` | The datasets, and `eval_data/README.md` holds the schema of a row. |
-| `bench/` | Two scripts that measure the routing and the stop condition. |
+| `bench/` | Two diagnostics: the scored search results with the routing breakdown, and the truth table of the older stop rule. |
 
 ## Traps
 
@@ -127,10 +127,10 @@ needed once per machine, and only for pages that fail over to Playwright.
   such as `wt.wikipedia.org` from the region prefix, and they do not resolve.
   The gateway turns that into an empty result and does not retry.
 
-- **Importing the package pulls in everything.**
+- **Importing the package pulls in the model stack.**
   `search_agent/__init__.py` imports the bootstrap, so `from search_agent
-  import tuning` loads pydantic-ai and the extractor with it. The tests need
-  the dependencies installed, and Python 3.11, because the code uses
+  import tuning` loads pydantic-ai and logfire with it. The tests need the
+  dependencies installed, and Python 3.11, because the code uses
   `datetime.UTC`.
 
 - **The Windows console needs code page 65001.** `ensure_utf8_stdio` sets it

@@ -53,17 +53,18 @@ The deep fetch path needs a browser, once:
 uv run crawl4ai-setup
 ```
 
-Without it the agent still works, but a page that returns no readable text
-over HTTP is never retried through Playwright.
+Without it the agent still works over HTTP, but a page that needs the browser
+comes back empty.
 
 ## What it does
 
 - **Writes the query list.** One model call classifies the question and
   returns 3 to 5 keyword queries at the same time, so the first round of
   searching costs one round trip rather than two.
-- **Reads pages, not snippets.** Search hits are scored, the pages are fetched
-  over HTTP and stripped to text with trafilatura, and a page that yields too
-  little text is fetched again through a headless browser.
+- **Reads the pages.** Search hits are scored, the pages are fetched over
+  HTTP and stripped to text with trafilatura, and a page that yields too
+  little text is fetched again through a headless browser. A page that cannot
+  be fetched at all contributes its search snippet instead.
 - **Answers and grades itself in one call.** The model returns the markdown
   answer with `[N]` citations, the atomic claims behind it, a confidence value
   from 0 to 1, the gaps it noticed, and a flag for a question the evidence
@@ -71,7 +72,7 @@ over HTTP is never retried through Playwright.
 - **Stops on evidence.** The loop ends when the evidence contradicts the
   question, or when the confidence is at least 0.75 and every claim is backed
   by two independent domains, or when the iteration cap of 2 is reached.
-- **Counts a host once.** Two pages on the same domain are one source, so a
+- **Counts a host once.** Two pages on the same host are one source, so a
   site that repeats itself cannot satisfy the two-domain rule.
 - **Cites what it used.** Every `[N]` resolves to a URL, and the source list is
   appended under the answer.
@@ -81,8 +82,10 @@ over HTTP is never retried through Playwright.
 - **Keeps one page from filling the window.** Passages are interleaved round
   by round across URLs, and the prompt takes at most 2 passages per URL, 4 per
   domain, and 14 in total.
-- **Keeps the keys on your machine.** The model key, the search key and the
-  `.env` file stay on your disk.
+- **Keeps the keys on your machine.** Nothing is sent to the project. The
+  model key, the search key and the `.env` file stay on your disk, and the
+  outbound traffic goes to the search backend, the pages and the model
+  endpoint.
 - **Ships an evaluation harness.** The datasets live in `eval_data/`, every
   run is saved as JSON in `eval_runs/`, and two runs can be diffed.
 
@@ -135,7 +138,7 @@ anything else becomes `insufficient_evidence`.
 | `search_agent/application/unified_runner.py` | The loop. The only place the iteration is driven from. |
 | `search_agent/application/agent_steps.py` | The helper steps the runner calls: gate, fetch, split, rank. |
 | `search_agent/application/agent_sources.py` | Source scoring, the gate, the fetch plan, the passage split. |
-| `search_agent/application/agent_compose.py` | The composed answer and the search-cost estimate. |
+| `search_agent/application/agent_compose.py` | The answer composition of the older pipeline, and the search-cost estimate the runner uses. |
 | `search_agent/application/contracts.py` | The ports. The boundary between the layers. |
 | `search_agent/application/policy_tuning.py` | The weights of the scoring rules. |
 | `search_agent/domain/assessment.py` | `Assessment` and `KeyClaim`, the output of the answer call. |
@@ -161,7 +164,7 @@ else is a constant in `search_agent/tuning.py`, and the example file
 | `LLM_API_KEY` | none | The model key. The program exits with an error when it is missing. |
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
 | `LLM_MODEL` | `qwen/qwen3.5-35b-a3b` | The model name sent to the endpoint. |
-| `LLM_PROVIDER` | none | Routing hint for the endpoint. |
+| `LLM_PROVIDER` | none | Pins the provider on an OpenRouter-style endpoint, with fallbacks off. |
 | `LLM_MAX_TOKENS` | `8192` | The ceiling for a single call. |
 | `LLM_HTTP_REFERER` | `https://github.com/local/search-agent` | Sent as the `HTTP-Referer` header. |
 | `SEARCH_PROVIDER` | `brave` | `brave` or `ddgs`. |
@@ -179,7 +182,7 @@ else is a constant in `search_agent/tuning.py`, and the example file
 | `DEFAULT_PROFILE` | `web` | The profile used when the run names none. |
 | `AGENT_RECEIPTS_DIR` | none | Where the audit trail JSON is written. |
 | `LOGFIRE_TOKEN` | none | Turns on Logfire tracing. |
-| `GITHUB_TOKEN` | none | Raises the GitHub API rate limit for repository pages. |
+| `GITHUB_TOKEN` | none | Raises the GitHub API rate limit when a repository page is fetched. |
 | `EXTRACT_MAX_CHARS` | `4000` | Overrides `tuning.EXTRACT_MAX_CHARS`. |
 | `COMPOSE_ANSWER_MAX_TOKENS` | `1600` | The cap on the composed answer. |
 | `RAG_ANALYSIS_MAX_TOKENS` | `1400` | The cap on the arXiv analysis. |
