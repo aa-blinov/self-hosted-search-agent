@@ -1,6 +1,6 @@
 ---
 name: self-hosted-search-agent
-description: A command line tool with no interface of its own. The surface is the terminal: a rule, a panel, a list of claims and a prompt.
+description: "A command line tool with no interface of its own. The surface is the terminal: a rule, a panel, a list of claims and a prompt."
 colors:
   source: terminal-default
   accent: "#ffcc00"
