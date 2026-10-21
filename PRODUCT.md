@@ -33,7 +33,7 @@ Two decisions shape the rest. The model writes the answer and assesses it in
 the same call, so the claims behind the answer and the confidence in it come
 from one reading of one passage set. And the loop does not stop until every
 claim in the answer has two independent domains behind it, which keeps the
-usual failure, a confident answer resting on one weak source, away from the
+common failure, a confident answer resting on one weak source, off the
 console.
 
 Success for the user: an answer whose `[N]` citations open pages that say
@@ -51,12 +51,12 @@ behind it, or until the agent can state what is missing.
 
 The second difference is ownership of the parts. The endpoint is any
 OpenAI-compatible one, the search backend is Brave or DuckDuckGo, and the
-keys never leave the machine. A question that touches something a hosted
-assistant would not be asked can be asked here.
+project keeps nothing: the keys live in a `.env` on the operator's disk, and
+the runs are read and diffed there.
 
-The third difference sits in the shape of the loop. One procedure serves every kind of
-question, with no separate branch for a fact, an overview or a news roundup,
-and the two-domain rule applies to all of them.
+The third difference sits in the shape of the loop. One procedure serves every
+kind of question, with no separate branch for a fact, an overview or a news
+roundup, and the two-domain rule applies to all of them.
 
 ## Operating Context
 
@@ -71,10 +71,10 @@ of them range from a general web search to arXiv only. The interactive prompt
 suggests one from the wording of the question and lets the operator pick
 another.
 
-Runs are slow enough to want a record. Every dataset run writes a JSON
-artifact to `eval_runs/` holding the metrics, the per-case results, the git
-revision and the model name, and two artifacts can be diffed. A single run
-can write its audit trail to a file with `--receipts-dir`.
+Every dataset run writes a JSON artifact to `eval_runs/` holding the metrics,
+the per-case results, the git revision and the model name, and two artifacts
+can be diffed. A single run can write its audit trail to a file with
+`--receipts-dir`.
 
 The operator is expected to check the citations. The answer prints its source
 list underneath, with the URLs that were fetched, and the independent-source
@@ -176,14 +176,14 @@ stars, no releases and no description, so there is nothing to count.
 2. **A claim needs two independent domains.** One source is a lead, not
    evidence. The rule holds for every kind of question, and a question that
    cannot meet it comes back with its gaps.
-3. **The pages are read, not the snippets.** A snippet can start a search; it
-   cannot end one.
+3. **The pages are read.** A search snippet can stand in for a page that
+   would not load, and nothing else does.
 4. **The evidence is shown.** The answer carries the citation numbers, the
    source list is printed under it, and the independent-source count sits
    next to the verdict.
-5. **The keys stay on the machine.** The model endpoint, the search backend
-   and the `.env` file are the operator's, and the code never asks for
-   anything else.
+5. **The parts belong to the operator.** The model endpoint, the search
+   backend and the `.env` file are chosen locally, and the project stores
+   nothing of its own.
 
 ## Accessibility & Inclusion
 
